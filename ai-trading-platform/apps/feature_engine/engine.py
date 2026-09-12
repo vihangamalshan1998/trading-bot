@@ -80,7 +80,7 @@ class FeatureEngine:
         high_60 = np.max(prices[-60:]) if len(prices) >= 60 else np.max(prices)
         low_60 = np.min(prices[-60:]) if len(prices) >= 60 else np.min(prices)
         price_range = (high_60 - low_60) / current_price if current_price > 0 else 0.0
-        momentum = ret_60s
+        momentum = ret_1m
         
         # 2. Volume & Trade Features
         vol_60 = np.sum(volumes[-60:]) if len(volumes) >= 60 else np.sum(volumes)

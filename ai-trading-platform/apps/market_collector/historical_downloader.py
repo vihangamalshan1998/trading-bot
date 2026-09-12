@@ -16,7 +16,6 @@ class HistoricalDownloader:
     """
     def __init__(self):
         self.binance = BinanceFuturesAdapter()
-        self.feature_engine = FeatureEngine()
         self.SessionLocal = SessionLocal
         self.symbols = settings.symbol_universe
         
@@ -32,7 +31,7 @@ class HistoricalDownloader:
         # In a real setup, we'd use a robust HTTP client with retry logic.
         # For demonstration, we'll assume the public endpoint works.
         try:
-            return await self.binance._request("GET", "/fapi/v1/klines", params)
+            return await self.binance._request("GET", "/fapi/v1/klines", params=params)
         except Exception as e:
             logger.error(f"Failed to fetch historical klines: {e}")
             return []
@@ -66,21 +65,23 @@ class HistoricalDownloader:
             df = df.astype(float)
             
             # Process sequentially to build the feature state
+            feature_engine = FeatureEngine(symbol=symbol)
+            
             with self.SessionLocal() as session:
                 for idx, row in df.iterrows():
                     # Mock a websocket payload
                     ws_data = {
-                        "s": symbol,
-                        "c": row["close"],
-                        "h": row["high"],
-                        "l": row["low"],
-                        "v": row["volume"],
-                        "q": row["quote_volume"],
-                        "n": row["trades"]
+                        "mid_price": row["close"],
+                        "volume": row["volume"],
+                        "buy_volume": row["taker_base"],
+                        "trade_count": row["trades"],
+                        "best_bid": row["close"], # approximate
+                        "best_ask": row["close"]  # approximate
                     }
                     
-                    market_state = self.feature_engine.process_trade(ws_data)
-                    if market_state is None:
+                    feature_engine.add_tick(ws_data)
+                    market_state = feature_engine.compute_features()
+                    if len(feature_engine.prices) < 2:
                         continue # Still warming up
                         
                     # Create a dummy experience for historical state (Action = HOLD)
@@ -88,7 +89,7 @@ class HistoricalDownloader:
                     exp = Experience(
                         timestamp=row["close_time"] / 1000.0,
                         symbol=symbol,
-                        market_state=market_state.features,
+                        market_state=market_state.tolist(),
                         portfolio_state=[10000.0, 10000.0], # Dummy
                         position_state=[0.0, 0.0], # Dummy
                         action_type="HOLD",

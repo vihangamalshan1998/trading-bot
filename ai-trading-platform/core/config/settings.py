@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     )
 
     # ============================================================
+    # Gemini AI Integration (For News/Macro State)
+    # ============================================================
+    gemini_api_key: str = Field(default="")
+    gemini_model_version: str = Field(default="gemini-2.5-flash")
+
+    # ============================================================
     # Trading Symbols
     # ============================================================
     trading_symbol: str = Field(default="BTCUSDT")

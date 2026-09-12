@@ -5,6 +5,7 @@ import feedparser
 from core.db.redis import redis_manager
 from core.logging.logger import logger
 from core.schemas.state_schema import MacroState
+from core.config.settings import settings
 
 class NewsMacroCollector:
     """
@@ -21,8 +22,7 @@ class NewsMacroCollector:
 
     async def fetch_and_analyze(self) -> MacroState:
         """
-        Fetches RSS feeds and runs simple heuristic sentiment analysis.
-        (In a full ML pipeline, this would call a FinBERT microservice).
+        Fetches RSS feeds and runs Gemini NLP sentiment analysis.
         """
         all_entries = []
         for url in self.rss_urls:
@@ -33,28 +33,55 @@ class NewsMacroCollector:
             except Exception as e:
                 logger.error(f"Error fetching RSS {url}: {e}")
                 
-        sentiment_score = 0.0
-        bullish_keywords = ["surge", "bull", "adopt", "buy", "high", "growth", "approve"]
-        bearish_keywords = ["crash", "bear", "ban", "sell", "low", "hack", "reject"]
+        # Combine headlines
+        headlines = [entry.title for entry in all_entries]
+        combined_text = "\n".join(headlines)
         
-        for entry in all_entries:
-            text = (entry.title + " " + entry.get('summary', '')).lower()
-            bull_count = sum(1 for word in bullish_keywords if word in text)
-            bear_count = sum(1 for word in bearish_keywords if word in text)
+        if not combined_text or not settings.gemini_api_key:
+            return MacroState(timestamp=time.time(), sentiment_score=0.0, volatility_expectation=0.5, regime=0.0)
+
+        try:
+            from google import genai
+            from google.genai import types
             
-            if bull_count > bear_count: sentiment_score += 0.2
-            elif bear_count > bull_count: sentiment_score -= 0.2
+            client = genai.Client(api_key=settings.gemini_api_key)
+            prompt = (
+                "You are a quantitative financial analyst. Read the following cryptocurrency headlines. "
+                "Determine the overall market sentiment and expected volatility. "
+                "Return a raw JSON object (and nothing else, no markdown) with two keys: "
+                "'sentiment_score' (float from -1.0 for extreme bearish fear to 1.0 for extreme bullish greed) and "
+                "'volatility_expectation' (float from 0.0 for calm to 1.0 for extreme panic/shock).\n\n"
+                f"Headlines:\n{combined_text}"
+            )
             
-        # Normalize to [-1, 1]
-        sentiment_score = max(-1.0, min(1.0, sentiment_score))
-        
+            # Using generate_content synchronously (wrapped in try/except)
+            response = client.models.generate_content(
+                model=settings.gemini_model_version,
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.0)
+            )
+            
+            result = json.loads(response.text.strip('`').replace('json\n', ''))
+            
+            sentiment_score = float(result.get('sentiment_score', 0.0))
+            volatility_expectation = float(result.get('volatility_expectation', 0.5))
+            
+            # Bound the values
+            sentiment_score = max(-1.0, min(1.0, sentiment_score))
+            volatility_expectation = max(0.0, min(1.0, volatility_expectation))
+            
+        except Exception as e:
+            logger.error(f"Gemini API Error: {e}")
+            sentiment_score = 0.0
+            volatility_expectation = 0.5
+            
         # Determine macro regime based on sentiment
         regime = 1.0 if sentiment_score > 0.3 else (-1.0 if sentiment_score < -0.3 else 0.0)
         
         return MacroState(
             timestamp=time.time(),
             sentiment_score=sentiment_score,
-            volatility_expectation=0.5 + abs(sentiment_score) * 0.5, # High extreme sentiment = higher vol
+            volatility_expectation=volatility_expectation,
             regime=regime
         )
 

@@ -38,10 +38,18 @@ class ProductionTradingBot:
             
         logger.info(f"Trading Mode: {'DRY_RUN' if self.dry_run else 'TESTNET'}")
         
-        # Load the ActorCritic
-        self.model = MultiSymbolActorCritic(num_symbols=self.num_symbols, macro_dim=8)
-        self.model.eval()
-        logger.info(f"Loaded MultiSymbolActorCritic for {self.num_symbols} symbols.")
+        # 4. Strict Model Checkpoint Loading
+        try:
+            self.model = MultiSymbolActorCritic(num_symbols=self.num_symbols, macro_dim=8)
+            # This calls the strictly validated loader that checks architecture and active status
+            self.model = self.registry.load_model(self.model)
+            self.model.eval()
+            logger.info(f"Loaded rigorously validated MultiSymbolActorCritic for {self.num_symbols} symbols.")
+        except Exception as e:
+            logger.critical(f"FAIL CLOSED: Could not load valid production model checkpoint. Error: {e}")
+            self.dry_run = True # Force safety
+            self.trading_enabled = False
+            raise RuntimeError(f"FAIL CLOSED: Production model failed to load. {e}")
         
         self.running = False
         self.event_memory = EventMemoryBuffer()
@@ -129,13 +137,18 @@ class ProductionTradingBot:
         # obs.extend(self.event_memory.step().tolist()) # Disabled for exact dimension matching until fully validated
         
         # Dimension validation
-        expected_dim = 9 + (self.num_symbols * 37) + 8
-        actual_dim = len(obs)
-        if actual_dim != expected_dim:
-            logger.error(f"STATE DIMENSION MISMATCH: Expected {expected_dim}, got {actual_dim}. Halting inference.")
-            return None
+        from core.schemas.dimension_config import get_expected_observation_dimension, validate_observation
+        expected_dim = get_expected_observation_dimension(self.num_symbols)
+        obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        
+        try:
+            validate_observation(obs_tensor, expected_dim, self.symbols)
+        except ValueError as e:
+            logger.critical(f"FAIL CLOSED: State Vector Validation Failed - {e}")
+            self.running = False
+            raise RuntimeError(f"FAIL CLOSED: State Validation Failed: {e}")
             
-        return torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        return obs_tensor
                 
     async def inference_loop(self):
         logger.info("Starting production inference loop...")
@@ -199,7 +212,9 @@ class ProductionTradingBot:
                             logger.warning(f"[{sym}] Risk Manager REJECTED: {decision.reason}")
                             
             except Exception as e:
-                logger.error(f"Error in inference loop: {e}")
+                logger.critical(f"FAIL CLOSED: Critical error in inference loop: {e}")
+                self.running = False # Halt the bot immediately
+                raise RuntimeError(f"FAIL CLOSED: Inference loop error: {e}")
                 
             await asyncio.sleep(5.0)
             

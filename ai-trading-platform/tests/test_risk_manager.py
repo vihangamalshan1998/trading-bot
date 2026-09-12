@@ -42,7 +42,7 @@ def test_max_order_size_blocks_order(base_state):
 
 def test_max_portfolio_exposure_blocks_order(base_state):
     market, portfolio = base_state
-    rm = RiskManager(max_portfolio_exposure_pct=0.50)
+    rm = RiskManager(max_portfolio_exposure_pct=0.50, max_order_size=1000.0)
     # Requesting 100 BTC * 100.5 = 10,050. Equity is 10,000. Max is 5,000.
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=100.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)

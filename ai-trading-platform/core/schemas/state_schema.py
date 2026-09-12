@@ -1,9 +1,9 @@
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional
 from datetime import datetime
 import math
 
-def check_not_nan_inf(v, field_name):
+def check_not_nan_inf(v, field_name: str):
     if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
         raise ValueError(f"{field_name} cannot be NaN or Inf")
     return v
@@ -31,12 +31,13 @@ class MarketState(BaseModel):
     vwap: float = Field(gt=0)
     volatility: float = Field(ge=0)
     funding_rate: float
-    features: List[float] = Field(..., min_items=25, max_items=25)
+    features: List[float] = Field(..., min_length=25, max_length=25)
     data_quality: float = Field(default=1.0, ge=0.0, le=1.0)
 
-    @validator('*', pre=True)
-    def check_floats(cls, v, field):
-        return check_not_nan_inf(v, field.name)
+    @field_validator('*', mode='before')
+    @classmethod
+    def check_floats(cls, v, info):
+        return check_not_nan_inf(v, info.field_name)
 
 class PositionState(BaseModel):
     """Canonical representation of a single symbol's position."""
@@ -51,9 +52,10 @@ class PositionState(BaseModel):
     margin: float = Field(default=0.0, ge=0.0)
     liquidation_price: float = Field(default=0.0, ge=0.0)
 
-    @validator('*', pre=True)
-    def check_floats(cls, v, field):
-        return check_not_nan_inf(v, field.name)
+    @field_validator('*', mode='before')
+    @classmethod
+    def check_floats(cls, v, info):
+        return check_not_nan_inf(v, info.field_name)
 
 class PortfolioState(BaseModel):
     """Canonical representation of the overall account."""
@@ -65,9 +67,10 @@ class PortfolioState(BaseModel):
     total_exposure: float = Field(ge=0.0)
     positions: Dict[str, PositionState] = Field(default_factory=dict)
 
-    @validator('*', pre=True)
-    def check_floats(cls, v, field):
-        return check_not_nan_inf(v, field.name)
+    @field_validator('*', mode='before')
+    @classmethod
+    def check_floats(cls, v, info):
+        return check_not_nan_inf(v, info.field_name)
 
 class MacroState(BaseModel):
     """Canonical representation of external market conditions."""
@@ -76,9 +79,10 @@ class MacroState(BaseModel):
     volatility_expectation: float = Field(default=0.5, ge=0.0)
     regime: float = 0.0
 
-    @validator('*', pre=True)
-    def check_floats(cls, v, field):
-        return check_not_nan_inf(v, field.name)
+    @field_validator('*', mode='before')
+    @classmethod
+    def check_floats(cls, v, info):
+        return check_not_nan_inf(v, info.field_name)
 
 class NewsState(BaseModel):
     timestamp: float

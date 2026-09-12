@@ -36,9 +36,9 @@ def test_max_order_size_blocks_order(base_state):
     rm = RiskManager(max_order_size=5.0)
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=10.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)
-    assert decision.approved  # It clamps it, which is the designed behavior, but logs MAX_ORDER_SIZE_EXCEEDED
-    assert decision.adjusted_quantity == 5.0
-    assert "MAX_ORDER_SIZE_EXCEEDED" in decision.risk_flags
+    assert not decision.approved
+    assert decision.adjusted_quantity == 0.0
+    assert decision.reason == "MAX_ORDER_SIZE_EXCEEDED"
 
 def test_max_portfolio_exposure_blocks_order(base_state):
     market, portfolio = base_state
@@ -46,9 +46,9 @@ def test_max_portfolio_exposure_blocks_order(base_state):
     # Requesting 100 BTC * 100.5 = 10,050. Equity is 10,000. Max is 5,000.
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=100.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)
-    assert decision.approved
-    assert "EXCESSIVE_PORTFOLIO_EXPOSURE" in decision.risk_flags
-    assert decision.adjusted_quantity < 100.0 # Clamped
+    assert not decision.approved
+    assert decision.adjusted_quantity == 0.0
+    assert decision.reason == "EXCESSIVE_PORTFOLIO_EXPOSURE"
 
 def test_max_open_positions_blocks_order(base_state):
     market, portfolio = base_state

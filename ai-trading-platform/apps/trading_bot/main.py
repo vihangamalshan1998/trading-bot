@@ -55,11 +55,11 @@ class ProductionTradingBot:
             self.has_valid_model = True
             logger.info(f"Loaded rigorously validated MultiSymbolActorCritic for {self.num_symbols} symbols.")
         except Exception as e:
-            logger.critical("MODEL NOT AVAILABLE")
+            logger.critical("NO PRODUCTION INFERENCE")
             logger.critical("NO TRADING")
             self.dry_run = True # Force safety
             self.trading_enabled = False
-            raise RuntimeError(f"MODEL NOT AVAILABLE. NO TRADING. Error: {e}")
+            raise RuntimeError(f"NO PRODUCTION INFERENCE. NO TRADING. Error: {e}")
         
         self.running = False
         self.event_memory = EventMemoryBuffer()

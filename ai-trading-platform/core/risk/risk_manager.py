@@ -72,10 +72,7 @@ class RiskManager:
             return RiskDecision(approved=False, reason="INVALID_QUANTITY", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INVALID_QUANTITY"])
             
         if order_request.requested_quantity > self.max_order_size:
-            flags.append("MAX_ORDER_SIZE_EXCEEDED")
-            safe_qty = self.max_order_size
-            max_allowed = self.max_order_size
-            reason = f"Clamped to max_order_size: {self.max_order_size}"
+            return RiskDecision(approved=False, reason="MAX_ORDER_SIZE_EXCEEDED", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_ORDER_SIZE_EXCEEDED"])
 
         # 8. Daily Drawdown Breach
         if now - self.last_day_reset > 86400:
@@ -115,22 +112,14 @@ class RiskManager:
         total_portfolio_pct = (portfolio_state.total_exposure + proposed_notional) / portfolio_state.equity
         
         if total_portfolio_pct > self.max_portfolio_exposure_pct:
-            flags.append("EXCESSIVE_PORTFOLIO_EXPOSURE")
-            max_p_notional = (self.max_portfolio_exposure_pct * portfolio_state.equity) - portfolio_state.total_exposure
-            safe_qty = min(safe_qty, max(0.0, max_p_notional / market_state.mid_price))
-            max_allowed = safe_qty
-            reason = "Clamped due to portfolio exposure limit"
+            return RiskDecision(approved=False, reason="EXCESSIVE_PORTFOLIO_EXPOSURE", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["EXCESSIVE_PORTFOLIO_EXPOSURE"])
             
         # 12. Max Symbol Exposure
         if total_symbol_pct > self.max_symbol_exposure_pct:
-            flags.append("MAX_SYMBOL_EXPOSURE")
-            max_s_notional = (self.max_symbol_exposure_pct * portfolio_state.equity) - current_symbol_notional
-            safe_qty = min(safe_qty, max(0.0, max_s_notional / market_state.mid_price))
-            max_allowed = safe_qty
-            reason = "Clamped due to symbol exposure limit"
+            return RiskDecision(approved=False, reason="MAX_SYMBOL_EXPOSURE", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_SYMBOL_EXPOSURE"])
             
         if safe_qty <= 0:
-            return RiskDecision(approved=False, reason="Safe quantity <= 0 after exposure limits", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=flags)
+            return RiskDecision(approved=False, reason="INVALID_QUANTITY", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INVALID_QUANTITY"])
 
         return RiskDecision(
             approved=True,

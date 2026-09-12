@@ -46,17 +46,20 @@ class ProductionTradingBot:
         logger.info(f"Trading Mode: {'DRY_RUN' if self.dry_run else 'LIVE_OR_TESTNET'} | Enabled: {self.trading_enabled}")
         
         # 4. Strict Model Checkpoint Loading
+        self.has_valid_model = False
         try:
             self.model = MultiSymbolActorCritic(num_symbols=self.num_symbols, macro_dim=8)
             # This calls the strictly validated loader that checks architecture and active status
             self.model = self.registry.load_model(self.model)
             self.model.eval()
+            self.has_valid_model = True
             logger.info(f"Loaded rigorously validated MultiSymbolActorCritic for {self.num_symbols} symbols.")
         except Exception as e:
-            logger.critical(f"FAIL CLOSED: Could not load valid production model checkpoint. Error: {e}")
+            logger.critical("MODEL NOT AVAILABLE")
+            logger.critical("NO TRADING")
             self.dry_run = True # Force safety
             self.trading_enabled = False
-            raise RuntimeError(f"FAIL CLOSED: Production model failed to load. {e}")
+            raise RuntimeError(f"MODEL NOT AVAILABLE. NO TRADING. Error: {e}")
         
         self.running = False
         self.event_memory = EventMemoryBuffer()
@@ -210,11 +213,17 @@ class ProductionTradingBot:
                             qty_str = registry.get_symbol(sym).format_quantity(decision.adjusted_quantity)
                             logger.info(f"[{sym}] EXECUTING: {side} {qty_str} (Confidence: {confidence:.2f})")
                             
-                            if not self.dry_run:
+                            if (self.trading_enabled and 
+                                not self.dry_run and 
+                                (settings.allow_testnet or settings.allow_live_trading) and 
+                                not settings.emergency_stop and 
+                                self.has_valid_model and 
+                                decision.approved):
+                                
                                 # await self.binance.create_order(sym, "BUY" if "LONG" in side else "SELL", float(qty_str))
                                 pass
                             else:
-                                logger.info(f"[{sym}] DRY RUN: Blocked execution of {side} {qty_str}")
+                                logger.info(f"[{sym}] NO ORDER (Blocked by final safety gate): {side} {qty_str}")
                         else:
                             logger.warning(f"[{sym}] Risk Manager REJECTED: {decision.reason}")
                             

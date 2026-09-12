@@ -21,8 +21,16 @@ class Settings(BaseSettings):
     binance_api_secret: str = Field(default="")
     binance_testnet: bool = Field(default=True)
 
-    # Trading Symbol
+    # Phase 1 Safety Gates
+    trading_enabled: bool = Field(default=False)
+    dry_run: bool = Field(default=True)
+    allow_testnet: bool = Field(default=False)
+    allow_live_trading: bool = Field(default=False)
+    emergency_stop: bool = Field(default=False)
+
+    # Trading Symbols
     trading_symbol: str = Field(default="BTCUSDT")
+    symbol_universe: list[str] = Field(default=["BTCUSDT", "ETHUSDT"])
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

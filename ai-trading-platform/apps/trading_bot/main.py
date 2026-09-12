@@ -30,13 +30,20 @@ class ProductionTradingBot:
         self.registry = ModelRegistry()
         self.binance = BinanceFuturesAdapter()
         
-        # Disable Unsafe Execution explicitly
-        self.dry_run = os.environ.get("TRADING_ENABLED", "false").lower() != "true"
-        if not self.dry_run and not settings.binance_testnet:
-            logger.error("SAFETY GATE: Live trading on mainnet is strictly disabled in this phase.")
+        # Phase 1: Complete Safety Gates Configured in settings
+        self.dry_run = settings.dry_run
+        self.trading_enabled = settings.trading_enabled
+        
+        if not self.dry_run and not settings.allow_live_trading and not settings.allow_testnet:
+            logger.error("SAFETY GATE: Live/Testnet trading disabled by settings.")
             self.dry_run = True
             
-        logger.info(f"Trading Mode: {'DRY_RUN' if self.dry_run else 'TESTNET'}")
+        if settings.emergency_stop:
+            logger.critical("SAFETY GATE: EMERGENCY STOP ACTIVE")
+            self.trading_enabled = False
+            self.dry_run = True
+            
+        logger.info(f"Trading Mode: {'DRY_RUN' if self.dry_run else 'LIVE_OR_TESTNET'} | Enabled: {self.trading_enabled}")
         
         # 4. Strict Model Checkpoint Loading
         try:

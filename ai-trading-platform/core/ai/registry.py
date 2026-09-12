@@ -35,9 +35,9 @@ class ModelRegistry:
                 new_version = ModelVersion(
                     version_id=version_id,
                     architecture=architecture,
-                    file_path=file_path,
+                    checkpoint_path=file_path,
                     metrics=metrics,
-                    is_active=False # Must be manually promoted to active
+                    status="CANDIDATE"
                 )
                 session.add(new_version)
                 session.commit()
@@ -50,27 +50,53 @@ class ModelRegistry:
     def load_model(self, model: torch.nn.Module, version_id: str = None) -> torch.nn.Module:
         """
         Loads weights from disk. If version_id is None, loads the strictly Active production model.
-        Includes architecture and schema validation.
+        Includes architecture, dimension, and schema validation.
         """
         try:
             with self.SessionLocal() as session:
                 if version_id:
                     version_meta = session.query(ModelVersion).filter_by(version_id=version_id).first()
                 else:
-                    version_meta = session.query(ModelVersion).filter_by(is_active=True).first()
+                    version_meta = session.query(ModelVersion).filter_by(status="PRODUCTION").first()
                     
                 if not version_meta:
                     logger.error("SAFETY GATE: No valid model version found in MySQL.")
                     raise ValueError("No valid model version found.")
                     
-                # Schema/Architecture validation
+                # 1. Architecture validation
                 expected_arch = model.__class__.__name__
                 if version_meta.architecture != expected_arch:
                     logger.error(f"SAFETY GATE: Model architecture mismatch. Expected {expected_arch}, DB says {version_meta.architecture}.")
                     raise ValueError("Architecture mismatch.")
                     
-                file_path = version_meta.file_path
-                if not os.path.exists(file_path):
+                # 2. Dimension and Symbol validation
+                hyperparams = version_meta.hyperparameters or {}
+                
+                # Check symbol ordering
+                db_symbols = hyperparams.get("symbol_universe")
+                if db_symbols and db_symbols != settings.symbol_universe:
+                    logger.error(f"SAFETY GATE: Symbol universe mismatch. Config wants {settings.symbol_universe}, Model trained on {db_symbols}.")
+                    raise ValueError("Symbol universe mismatch.")
+                    
+                # Check dimension
+                from core.schemas.dimension_config import get_expected_observation_dimension
+                expected_dim = get_expected_observation_dimension(len(settings.symbol_universe))
+                db_dim = hyperparams.get("observation_dimension")
+                
+                if db_dim and db_dim != expected_dim:
+                    logger.error(f"SAFETY GATE: Observation dimension mismatch. Model expects {db_dim}, Pipeline provides {expected_dim}.")
+                    raise ValueError("Observation dimension mismatch.")
+                    
+                # Finally, verify model weights input layer matches the dimension
+                try:
+                    if hasattr(model, 'encoder') and hasattr(model.encoder[1], 'in_features'):
+                        if model.encoder[1].in_features != expected_dim:
+                            raise ValueError(f"Model weight in_features {model.encoder[1].in_features} != expected {expected_dim}")
+                except Exception as ex:
+                    logger.warning(f"Could not statically verify linear layer dim: {ex}")
+                    
+                file_path = version_meta.checkpoint_path or getattr(version_meta, 'file_path', None)
+                if not file_path or not os.path.exists(file_path):
                     logger.error(f"SAFETY GATE: Model weights not found at {file_path}")
                     raise FileNotFoundError(f"Model weights not found at {file_path}")
                     

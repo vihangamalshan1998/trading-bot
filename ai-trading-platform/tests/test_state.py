@@ -24,7 +24,7 @@ def test_portfolio_state():
     assert state.equity == 100.0
     assert "BTCUSDT" in state.positions
 
-def test_observation_dimension():
+def test_observation_dimension_validation():
     num_symbols = len(settings.symbol_universe)
     expected_dim = get_expected_observation_dimension(num_symbols)
     obs = torch.zeros((1, expected_dim))

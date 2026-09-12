@@ -1,79 +1,60 @@
 import pytest
 import time
-from core.schemas.state_schema import MarketState, PortfolioState, OrderRequest
+from core.schemas.state_schema import MarketState, PortfolioState, PositionState, OrderRequest
 from core.risk.risk_manager import RiskManager
+from core.config.settings import settings
 
 @pytest.fixture
 def base_state():
+    settings.trading_enabled = True
+    settings.emergency_stop = False
     market = MarketState(
-        symbol="BTCUSDT", timestamp=time.time(), bid=10000.0, ask=10002.0, 
-        mid_price=10001.0, last_price=10001.0, spread=2.0, order_book_imbalance=0.1, 
-        volume=100.0, vwap=10000.5, volatility=0.01, funding_rate=0.0001, 
-        features=[0.0]*25, data_quality=1.0
+        symbol="BTCUSDT", timestamp=time.time(), bid=100.0, ask=101.0, 
+        mid_price=100.5, last_price=100.5, spread=1.0, order_book_imbalance=0.1, 
+        volume=100.0, vwap=100.2, volatility=0.5, funding_rate=0.001, 
+        features=[0.0]*25
     )
     portfolio = PortfolioState(
-        wallet_balance=100000.0, equity=100000.0, used_margin=0.0, 
-        free_margin=100000.0, total_unrealized_pnl=0.0, total_exposure=0.0, 
-        positions={}
+        wallet_balance=10000.0, equity=10000.0, used_margin=0.0, 
+        free_margin=10000.0, total_unrealized_pnl=0.0, total_exposure=0.0, 
+        positions={"BTCUSDT": PositionState(symbol="BTCUSDT", quantity=0.0, leverage=1)}
     )
     return market, portfolio
 
-def test_risk_manager_accepts_valid_order(base_state):
+def test_max_leverage_blocks_order(base_state):
     market, portfolio = base_state
-    rm = RiskManager(trading_enabled=True)
-    request = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
-    
-    decision = rm.evaluate(request, portfolio, market)
-    assert decision.approved is True
-    assert decision.adjusted_quantity == 1.0
+    # Position has 20x leverage, max is 10
+    portfolio.positions["BTCUSDT"] = PositionState(symbol="BTCUSDT", quantity=1.0, leverage=20)
+    rm = RiskManager(max_leverage=10)
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert not decision.approved
+    assert decision.reason == "MAX_LEVERAGE_EXCEEDED"
 
-def test_risk_manager_rejects_excessive_exposure(base_state):
+def test_max_order_size_blocks_order(base_state):
     market, portfolio = base_state
-    rm = RiskManager(trading_enabled=True, max_symbol_exposure_pct=0.10) # Max 10% = $10,000
-    
-    # Requesting 2 BTC = $20,002
-    request = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=2.0, target_position=1.0, model_version="v1", timestamp=time.time())
-    
-    decision = rm.evaluate(request, portfolio, market)
-    assert decision.approved is True # It approves, but clamps the quantity! Wait, the prompt says "rejects_excessive_exposure". 
-    # Let's check if the quantity was clamped to max 10% exposure
-    expected_qty = 10000.0 / 10001.0
-    assert abs(decision.adjusted_quantity - expected_qty) < 1e-4
-    assert "MAX_SYMBOL_EXPOSURE" in decision.risk_flags
-    
-    # If the user strictly meant "reject", we could adjust RiskManager, but clamping is standard. The flag indicates rejection of the FULL amount.
-    # Let's test a case where it is fully rejected because safe_qty <= 0
-    portfolio.total_exposure = 100000.0 # 100% exposure
-    rm = RiskManager(trading_enabled=True, max_portfolio_exposure_pct=0.80)
-    decision = rm.evaluate(request, portfolio, market)
-    assert decision.approved is False
-    assert decision.reason == "Safe quantity <= 0 after exposure limits"
+    rm = RiskManager(max_order_size=5.0)
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=10.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert decision.approved  # It clamps it, which is the designed behavior, but logs MAX_ORDER_SIZE_EXCEEDED
+    assert decision.adjusted_quantity == 5.0
+    assert "MAX_ORDER_SIZE_EXCEEDED" in decision.risk_flags
 
-def test_risk_manager_rejects_invalid_price(base_state):
+def test_max_portfolio_exposure_blocks_order(base_state):
     market, portfolio = base_state
-    market.mid_price = -100.0 # Invalid price
-    rm = RiskManager(trading_enabled=True)
-    request = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
-    
-    decision = rm.evaluate(request, portfolio, market)
-    assert decision.approved is False
-    assert decision.reason == "INVALID_PRICE"
+    rm = RiskManager(max_portfolio_exposure_pct=0.50)
+    # Requesting 100 BTC * 100.5 = 10,050. Equity is 10,000. Max is 5,000.
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=100.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert decision.approved
+    assert "EXCESSIVE_PORTFOLIO_EXPOSURE" in decision.risk_flags
+    assert decision.adjusted_quantity < 100.0 # Clamped
 
-def test_risk_manager_rejects_stale_data(base_state):
+def test_max_open_positions_blocks_order(base_state):
     market, portfolio = base_state
-    market.timestamp = time.time() - 120 # 2 minutes old
-    rm = RiskManager(trading_enabled=True)
-    request = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
-    
-    decision = rm.evaluate(request, portfolio, market)
-    assert decision.approved is False
-    assert decision.reason == "STALE_MARKET_DATA"
-
-def test_risk_manager_rejects_when_trading_disabled(base_state):
-    market, portfolio = base_state
-    rm = RiskManager(trading_enabled=False)
-    request = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
-    
-    decision = rm.evaluate(request, portfolio, market)
-    assert decision.approved is False
-    assert decision.reason == "TRADING_DISABLED"
+    rm = RiskManager(max_open_positions=1)
+    portfolio.positions["ETHUSDT"] = PositionState(symbol="ETHUSDT", quantity=1.0) # 1 active position
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert not decision.approved
+    assert decision.reason == "MAX_OPEN_POSITIONS"

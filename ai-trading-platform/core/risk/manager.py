@@ -10,6 +10,10 @@ class RiskManager:
         self.max_leverage = max_leverage
         self.bearish_macro_threshold = bearish_macro_threshold
         
+        # Track live portfolio state in memory
+        self.equity = 10000.0  # Starting equity
+        self.positions = {}    # symbol -> {"side": "LONG"/"SHORT", "quantity": float, "entry_price": float}
+        
     def validate_action(self, symbol: str, ai_action: int, portfolio_state: Dict[str, Any], macro_state: Dict[str, Any]) -> int:
         """
         Validates the AI's intended action.
@@ -43,3 +47,45 @@ class RiskManager:
         # In a real engine, we'd check if the intended notional exceeds max leverage limits.
         
         return ai_action
+
+    def update_position(self, symbol: str, side: str, quantity: float, price: float):
+        """
+        Records an executed order to update the live portfolio memory state.
+        This is a basic mock tracker for the dashboard.
+        """
+        # If CLOSING a position (side is CLOSE or opposite of current)
+        if symbol in self.positions:
+            current_side = self.positions[symbol]["side"]
+            if side != current_side:
+                # Basic PnL calculation for dashboard mock
+                entry = self.positions[symbol]["entry_price"]
+                pnl = (price - entry) * quantity if current_side == "LONG" else (entry - price) * quantity
+                self.equity += pnl
+                del self.positions[symbol]
+                return
+        
+        # If OPENING a new position
+        self.positions[symbol] = {
+            "side": side,
+            "quantity": quantity,
+            "entry_price": price
+        }
+
+    def get_portfolio_summary(self) -> Dict[str, Any]:
+        """
+        Returns a clean JSON-serializable dictionary of the current equity and positions
+        for the dashboard API to consume.
+        """
+        formatted_positions = []
+        for sym, data in self.positions.items():
+            formatted_positions.append({
+                "symbol": sym,
+                "side": data["side"],
+                "quantity": data["quantity"],
+                "pnl": 0.0 # Unrealized PnL could be calculated here if we passed live price
+            })
+            
+        return {
+            "equity": self.equity,
+            "positions": formatted_positions
+        }

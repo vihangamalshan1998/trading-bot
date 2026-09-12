@@ -16,7 +16,7 @@ class MarketCollectorService:
         self.adapter = BinanceFuturesAdapter()
         
         # Initialize registry with target universe
-        for sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]:
+        for sym in settings.symbol_universe:
             registry.add_symbol(SymbolConfig(symbol=sym))
             registry.update_status(sym, "ENABLED")
             

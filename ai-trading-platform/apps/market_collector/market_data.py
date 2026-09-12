@@ -1,10 +1,12 @@
 import asyncio
 import websockets
 import json
+import time
 import numpy as np
 from typing import List, Dict
 from core.logging.logger import logger
 from core.db.redis import redis_manager
+from core.config.settings import settings
 from apps.feature_engine.engine import FeatureEngine
 from core.data_quality.validator import DataQualityValidator
 
@@ -46,6 +48,14 @@ class BinanceWebSocketCollector:
             
             if redis_manager.redis is not None:
                 await redis_manager.redis.publish(channel, json.dumps(payload))
+                
+                # Also publish a human-readable state for the Dashboard UI
+                trend = "UP" if self.latest_raw[symbol]["buy_volume"] > (self.latest_raw[symbol]["volume"] / 2) else "DOWN"
+                dashboard_payload = {
+                    "price": self.latest_raw[symbol]["mid_price"],
+                    "trend": trend
+                }
+                await redis_manager.redis.set(f"dashboard:market_states:{symbol}", json.dumps(dashboard_payload))
                 
         except Exception as e:
             logger.error(f"Error publishing features for {symbol}: {e}")
@@ -170,12 +180,17 @@ class BinanceWebSocketCollector:
     def stop(self):
         self._running = False
 
-async def test_collector():
-    collector = BinanceWebSocketCollector(["BTCUSDT", "ETHUSDT"])
-    task = asyncio.create_task(collector.listen())
-    await asyncio.sleep(10)
-    collector.stop()
-    await task
+async def run_collector():
+    symbols = settings.symbol_universe
+    collector = BinanceWebSocketCollector(symbols)
+    
+    try:
+        await collector.listen()
+    except asyncio.CancelledError:
+        collector.stop()
 
 if __name__ == "__main__":
-    asyncio.run(test_collector())
+    try:
+        asyncio.run(run_collector())
+    except KeyboardInterrupt:
+        pass

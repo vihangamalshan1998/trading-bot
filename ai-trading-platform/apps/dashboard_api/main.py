@@ -2,7 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import uvicorn
+import asyncio
 from core.db.redis import redis_manager
+
+# Cache the last 50 metrics in memory
+training_metrics = []
 
 app = FastAPI(title="AI Trading Dashboard API")
 
@@ -18,24 +22,47 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     await redis_manager.connect()
+    asyncio.create_task(listen_training_metrics())
+
+async def listen_training_metrics():
+    pubsub = redis_manager.redis.pubsub()
+    await pubsub.subscribe("training:metrics")
+    async for message in pubsub.listen():
+        if message["type"] == "message":
+            data = json.loads(message["data"])
+            training_metrics.append(data)
+            if len(training_metrics) > 50:
+                training_metrics.pop(0)
+
+@app.get("/api/training")
+async def get_training_metrics():
+    return {"metrics": training_metrics}
 
 @app.get("/api/state")
 async def get_system_state():
     """
-    Returns the latest system state by polling Redis.
-    (In a real app, we'd use WebSockets for push).
+    Returns the latest system state by polling Redis for the live data.
     """
-    # Mocking for Phase 12 completion
+    if not redis_manager.redis:
+        return {"equity": 0.0, "positions": [], "market_states": {}}
+        
+    # Get portfolio
+    portfolio_raw = await redis_manager.redis.get("dashboard:portfolio")
+    portfolio = json.loads(portfolio_raw) if portfolio_raw else {"equity": 10000.0, "positions": []}
+    
+    # Get market states
+    market_states = {}
+    keys = await redis_manager.redis.keys("dashboard:market_states:*")
+    for key in keys:
+        symbol = key.decode("utf-8").split(":")[-1] if isinstance(key, bytes) else key.split(":")[-1]
+        state_raw = await redis_manager.redis.get(key)
+        if state_raw:
+            market_states[symbol] = json.loads(state_raw)
+            
     return {
-        "equity": 10500.25,
-        "positions": [
-            {"symbol": "BTCUSDT", "side": "LONG", "quantity": 0.5, "pnl": 125.50},
-            {"symbol": "ETHUSDT", "side": "SHORT", "quantity": 10.0, "pnl": -45.20}
-        ],
-        "market_states": {
-            "BTCUSDT": {"price": 65120.50, "trend": "UP"},
-            "ETHUSDT": {"price": 3490.10, "trend": "DOWN"}
-        }
+        "equity": portfolio.get("equity", 0.0),
+        "positions": portfolio.get("positions", []),
+        "market_states": market_states
     }
 
 if __name__ == "__main__":

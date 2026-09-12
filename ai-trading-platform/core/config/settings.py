@@ -75,6 +75,10 @@ class Settings(BaseSettings):
         default_factory=lambda: [
             "BTCUSDT",
             "ETHUSDT",
+            "SOLUSDT",
+            "BNBUSDT",
+            "XRPUSDT",
+            "DOGEUSDT",
         ]
     )
 

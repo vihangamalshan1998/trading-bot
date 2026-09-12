@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from typing import List, Tuple
+import asyncio
+import json
+import time
+from core.db.redis import redis_manager
 from core.ai.replay_buffer import ReplayBuffer
 from core.logging.logger import logger
 from apps.research.model import MultiSymbolActorCritic
@@ -78,3 +82,25 @@ class PPOTrainer:
             self.optimizer.step()
             
         logger.info(f"PPO Training Step Complete | Loss: {loss.item():.4f}")
+        
+        # Publish metrics to Redis asynchronously via asyncio.create_task or run_coroutine_threadsafe
+        # We assume trainer loop might be sync or async. Let's provide a safe sync wrapper or fire-and-forget
+        payload = {
+            "timestamp": time.time(),
+            "loss": float(loss.item()),
+            "actor_loss": float(actor_loss.item()),
+            "critic_loss": float(critic_loss.item())
+        }
+        
+        # Since trainer might run synchronously, we can dispatch it via the running loop or a new one
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._publish_metrics(payload))
+        except RuntimeError:
+            asyncio.run(self._publish_metrics(payload))
+            
+    async def _publish_metrics(self, payload: dict):
+        if not redis_manager.redis:
+            await redis_manager.connect()
+        if redis_manager.redis:
+            await redis_manager.redis.publish("training:metrics", json.dumps(payload))

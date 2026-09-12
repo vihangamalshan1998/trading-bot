@@ -24,6 +24,9 @@ class TradingBotService:
         await redis_manager.connect()
         state_key = f"market:state:{self.symbol}"
         
+        # Start the background publisher task
+        publisher_task = asyncio.create_task(self._publish_portfolio_loop())
+        
         try:
             while self.running:
                 # Poll state from Redis
@@ -38,8 +41,20 @@ class TradingBotService:
         except asyncio.CancelledError:
             logger.info("Trading Bot Service shutting down...")
         finally:
+            publisher_task.cancel()
             await self.adapter.close()
             await redis_manager.disconnect()
+            
+    async def _publish_portfolio_loop(self):
+        """Continuously publishes the live portfolio state to Redis for the Dashboard."""
+        while self.running:
+            try:
+                if redis_manager.redis:
+                    state = self.risk_manager.get_portfolio_summary()
+                    await redis_manager.redis.set("dashboard:portfolio", json.dumps(state))
+            except Exception as e:
+                logger.error(f"Error publishing portfolio state: {e}")
+            await asyncio.sleep(1.0)
             
     async def _evaluate_state(self, state: Dict[str, Any]):
         order_intent = self.strategy.evaluate(state)
@@ -69,7 +84,7 @@ class TradingBotService:
                     logger.info("Order executed successfully", extra={"order_result": result})
                     
                     # Update risk manager state
-                    self.risk_manager.update_position(side, quantity, price)
+                    self.risk_manager.update_position(self.symbol, side, quantity, price)
                     
                 except Exception as e:
                     logger.error("Failed to execute order", exc_info=True)

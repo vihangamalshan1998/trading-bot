@@ -12,13 +12,15 @@ class RiskManager:
     """
     def __init__(self):
         # Load from centralized configuration
+        self.max_position_size = settings.max_position_size
         self.max_order_size = settings.max_order_size
         self.max_leverage = settings.max_leverage
         self.max_portfolio_exposure_pct = settings.max_portfolio_exposure_pct
         self.max_symbol_exposure_pct = settings.max_symbol_exposure_pct
         self.max_open_positions = settings.max_open_positions
+        self.max_daily_loss_pct = settings.max_daily_loss_pct
         self.max_drawdown_pct = settings.max_drawdown_pct
-        self.stale_data_threshold = settings.stale_data_threshold
+        self.max_market_data_age_seconds = settings.max_market_data_age_seconds
         self.correlated_exposure_limit_pct = settings.correlated_exposure_limit_pct
         
         self.daily_high_equity = 0.0
@@ -57,17 +59,31 @@ class RiskManager:
             
         # 6. Stale Market Data
         now = time.time()
-        if now - market_state.timestamp > self.stale_data_threshold:
+        if now - market_state.timestamp > self.max_market_data_age_seconds:
             return RiskDecision(approved=False, reason="STALE_MARKET_DATA", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["STALE_MARKET_DATA"])
             
-        # 7. Max Order Size
+        # 7. Max Order Size (Hard Limit)
         if order_request.requested_quantity <= 0:
             return RiskDecision(approved=False, reason="INVALID_QUANTITY", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INVALID_QUANTITY"])
             
         if order_request.requested_quantity > self.max_order_size:
             return RiskDecision(approved=False, reason="MAX_ORDER_SIZE_EXCEEDED", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_ORDER_SIZE_EXCEEDED"])
+            
+        # 7.5 Max Position Size (Clamped Limit)
+        current_qty = 0.0
+        if order_request.symbol in portfolio_state.positions:
+            current_qty = abs(portfolio_state.positions[order_request.symbol].quantity)
+            
+        if current_qty + safe_qty > self.max_position_size:
+            flags.append("MAX_POSITION_SIZE_CLAMPED")
+            safe_qty = max(0.0, self.max_position_size - current_qty)
+            max_allowed = safe_qty
+            reason = f"Clamped to max_position_size: {self.max_position_size}"
+            
+        if safe_qty <= 0:
+            return RiskDecision(approved=False, reason="MAX_POSITION_SIZE_REACHED", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_POSITION_SIZE_REACHED"])
 
-        # 8. Daily Drawdown Breach
+        # 8. Daily Loss & Overall Drawdown
         if now - self.last_day_reset > 86400:
             self.daily_high_equity = portfolio_state.equity
             self.last_day_reset = now
@@ -77,18 +93,25 @@ class RiskManager:
         if portfolio_state.equity > self.global_high_equity:
             self.global_high_equity = portfolio_state.equity
             
+        daily_loss = (self.daily_high_equity - portfolio_state.equity) / self.daily_high_equity if self.daily_high_equity > 0 else 0.0
+        
+        if daily_loss >= self.max_daily_loss_pct:
+            return RiskDecision(approved=False, reason="MAX_DAILY_LOSS", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_DAILY_LOSS"])
+            
         drawdown = (self.global_high_equity - portfolio_state.equity) / self.global_high_equity if self.global_high_equity > 0 else 0.0
         
         if drawdown >= self.max_drawdown_pct:
             return RiskDecision(approved=False, reason="MAX_DRAWDOWN", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_DRAWDOWN"])
             
         # 8.5. Insufficient Free Margin
+        # Phase-1 conservative approximation: required_margin = notional / max_leverage
         notional_value = safe_qty * market_state.mid_price
         required_margin = notional_value / max(1, self.max_leverage)
         if portfolio_state.free_margin < required_margin and "OPEN" in order_request.action_type:
             return RiskDecision(approved=False, reason="INSUFFICIENT_FREE_MARGIN", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INSUFFICIENT_FREE_MARGIN"])
             
-        # 8.6. Correlated Exposure (Simple placeholder check)
+        # 8.6. Correlated Exposure
+        # Phase-1 conservative placeholder. Will just issue a warning for now.
         if portfolio_state.total_exposure > (self.max_portfolio_exposure_pct * portfolio_state.equity * 0.9):
              flags.append("HIGH_CORRELATED_EXPOSURE_WARNING")
             
@@ -101,16 +124,21 @@ class RiskManager:
         if active_positions >= self.max_open_positions and order_request.symbol not in [sym for sym, p in portfolio_state.positions.items() if p.quantity != 0]:
             return RiskDecision(approved=False, reason="MAX_OPEN_POSITIONS", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_OPEN_POSITIONS"])
 
-        # 10. Max Leverage (Symbol specific)
+        # 10. Max Leverage (Symbol & Effective Leverage)
+        # Phase-1 conservative approach: ensure the effective/proposed position cannot exceed max_leverage.
         current_symbol_notional = 0.0
         if order_request.symbol in portfolio_state.positions:
             pos = portfolio_state.positions[order_request.symbol]
             current_symbol_notional = abs(pos.quantity) * market_state.mid_price
-            if pos.leverage > self.max_leverage:
+            
+        proposed_notional = safe_qty * market_state.mid_price
+        
+        if portfolio_state.equity > 0:
+            effective_leverage = (current_symbol_notional + proposed_notional) / portfolio_state.equity
+            if effective_leverage > self.max_leverage:
                 return RiskDecision(approved=False, reason="MAX_LEVERAGE_EXCEEDED", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_LEVERAGE_EXCEEDED"])
             
         # 11. Max Portfolio Exposure
-        proposed_notional = safe_qty * market_state.mid_price
         total_symbol_pct = (current_symbol_notional + proposed_notional) / portfolio_state.equity
         total_portfolio_pct = (portfolio_state.total_exposure + proposed_notional) / portfolio_state.equity
         

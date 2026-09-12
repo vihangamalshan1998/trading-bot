@@ -29,13 +29,15 @@ class Settings(BaseSettings):
     emergency_stop: bool = Field(default=True)
 
     # Phase 1 Risk Limits
+    max_position_size: float = Field(default=10.0)
+    max_symbol_exposure_pct: float = Field(default=0.20)
+    max_portfolio_exposure_pct: float = Field(default=0.50)
     max_leverage: int = Field(default=10)
     max_order_size: float = Field(default=5.0)
-    max_portfolio_exposure_pct: float = Field(default=0.50)
-    max_symbol_exposure_pct: float = Field(default=0.20)
     max_open_positions: int = Field(default=5)
+    max_daily_loss_pct: float = Field(default=0.05)
     max_drawdown_pct: float = Field(default=0.10)
-    stale_data_threshold: float = Field(default=60.0)
+    max_market_data_age_seconds: float = Field(default=60.0)
     correlated_exposure_limit_pct: float = Field(default=0.40)
 
     # Trading Symbols

@@ -16,7 +16,6 @@ class SystemOrchestrator:
             {"name": "Universe Screener", "path": "apps/market_collector/universe.py"},
             {"name": "News & Macro Collector", "path": "apps/market_collector/news_macro.py"},
             {"name": "Market Data Collector", "path": "apps/market_collector/market_data.py"},
-            {"name": "Online Trainer", "path": "apps/trading_bot/online_trainer.py"},
             {"name": "Production Trading Bot", "path": "apps/trading_bot/main.py"}
         ]
 

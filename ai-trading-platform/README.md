@@ -1,6 +1,6 @@
 # AI Adaptive Binance Futures Trading Platform
 
-A research-grade AI algorithmic trading platform for Binance Spot, built with asynchronous Python, Redis, MySQL, and PyTorch. 
+A research-grade AI algorithmic trading platform for Binance Futures, built with asynchronous Python, Redis, MySQL, and PyTorch. 
 
 This platform is designed to collect high-frequency market data (Level 2 Order Book, Aggregate Trades), compute live micro-structural features, train Reinforcement Learning agents, and execute live trades on the Binance Testnet through an enforced Risk Management engine.
 
@@ -9,7 +9,7 @@ This platform is designed to collect high-frequency market data (Level 2 Order B
 The system is decoupled into discrete microservices connected via a Redis state-bus:
 
 1. **Market Collector Service (`apps/market_collector`)**
-   - Connects to the Binance Spot WebSocket streams (`depth@100ms`, `aggTrade`).
+   - Connects to the Binance Futures WebSocket streams (`depth@100ms`, `aggTrade`).
    - Maintains an in-memory Limit Order Book (LOB) synchronized via REST snapshots and WebSocket deltas.
    - Pushes live updates to the Feature Engine.
    

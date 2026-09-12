@@ -403,6 +403,7 @@ class MultiAssetFuturesEnv(gym.Env):
             obs_list.extend([
                 macro_state.get("sentiment_score", 0.0),
                 macro_state.get("volatility_expectation", 0.0),
+            ])
         # 4. Append Event Memory
         memory_vector = self.event_memory.step()
         obs_list.extend(memory_vector)

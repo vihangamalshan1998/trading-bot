@@ -1,165 +1,411 @@
-import time
 import math
-from typing import Dict, Any, List
-from core.logging.logger import logger
-from core.schemas.state_schema import MarketState, PortfolioState, OrderRequest, RiskDecision
+import time
+
 from core.config.settings import settings
+from core.logging.logger import logger
+from core.schemas.state_schema import (
+    MarketState,
+    OrderRequest,
+    PortfolioState,
+    RiskDecision,
+)
+
 
 class RiskManager:
     """
-    Evaluates order requests against portfolio and market state constraints.
-    Returns a deterministic RiskDecision.
+    Phase 1 deterministic risk firewall.
+
+    IMPORTANT:
+    - AI proposes an action.
+    - RiskManager decides whether that action is allowed.
+    - RiskManager can reduce quantity.
+    - RiskManager can never increase quantity.
+    - RiskManager cannot be bypassed.
     """
+
     def __init__(self):
-        # Load from centralized configuration
+        # Centralized configuration
         self.max_position_size = settings.max_position_size
-        self.max_order_size = settings.max_order_size
-        self.max_leverage = settings.max_leverage
-        self.max_portfolio_exposure_pct = settings.max_portfolio_exposure_pct
         self.max_symbol_exposure_pct = settings.max_symbol_exposure_pct
+        self.max_portfolio_exposure_pct = settings.max_portfolio_exposure_pct
+        self.max_leverage = settings.max_leverage
+        self.max_order_size = settings.max_order_size
         self.max_open_positions = settings.max_open_positions
         self.max_daily_loss_pct = settings.max_daily_loss_pct
         self.max_drawdown_pct = settings.max_drawdown_pct
-        self.max_market_data_age_seconds = settings.max_market_data_age_seconds
-        self.correlated_exposure_limit_pct = settings.correlated_exposure_limit_pct
-        
+        self.max_market_data_age_seconds = (
+            settings.max_market_data_age_seconds
+        )
+        self.correlated_exposure_limit_pct = (
+            settings.correlated_exposure_limit_pct
+        )
+
         self.daily_high_equity = 0.0
         self.global_high_equity = 0.0
         self.last_day_reset = time.time()
 
-    def evaluate(self, order_request: OrderRequest, portfolio_state: PortfolioState, market_state: MarketState) -> RiskDecision:
-        """
-        Evaluates an AI's proposed OrderRequest and applies exactly the 12 requested Phase 1 checks.
-        """
-        flags = []
-        approved = True
-        reason = "Approved"
-        safe_qty = order_request.requested_quantity
-        max_allowed = safe_qty
-        
-        # 1. Trading Disabled
-        if not settings.trading_enabled:
-            return RiskDecision(approved=False, reason="TRADING_DISABLED", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["TRADING_DISABLED"])
-            
-        # 2. Emergency Stop
-        if settings.emergency_stop:
-            return RiskDecision(approved=False, reason="EMERGENCY_STOP", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["EMERGENCY_STOP"])
-            
-        # 3. NaN/Inf Checks
-        if math.isnan(safe_qty) or math.isinf(safe_qty) or math.isnan(market_state.mid_price) or math.isinf(market_state.mid_price):
-            return RiskDecision(approved=False, reason="NAN_INF_DETECTED", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["NAN_INF_DETECTED"])
-            
-        # 4. Insufficient Equity
-        if portfolio_state.equity <= 0:
-            return RiskDecision(approved=False, reason="INSUFFICIENT_EQUITY", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INSUFFICIENT_EQUITY"])
-            
-        # 5. Invalid Price
-        if market_state.mid_price <= 0:
-            return RiskDecision(approved=False, reason="INVALID_PRICE", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INVALID_PRICE"])
-            
-        # 6. Stale Market Data
-        now = time.time()
-        if now - market_state.timestamp > self.max_market_data_age_seconds:
-            return RiskDecision(approved=False, reason="STALE_MARKET_DATA", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["STALE_MARKET_DATA"])
-            
-        # 7. Max Order Size (Hard Limit)
-        if order_request.requested_quantity <= 0:
-            return RiskDecision(approved=False, reason="INVALID_QUANTITY", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INVALID_QUANTITY"])
-            
-        if order_request.requested_quantity > self.max_order_size:
-            return RiskDecision(approved=False, reason="MAX_ORDER_SIZE_EXCEEDED", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_ORDER_SIZE_EXCEEDED"])
-            
-        # 7.5 Max Position Size (Clamped Limit)
-        current_qty = 0.0
-        if order_request.symbol in portfolio_state.positions:
-            current_qty = abs(portfolio_state.positions[order_request.symbol].quantity)
-            
-        if current_qty + safe_qty > self.max_position_size:
-            flags.append("MAX_POSITION_SIZE_CLAMPED")
-            safe_qty = max(0.0, self.max_position_size - current_qty)
-            max_allowed = safe_qty
-            reason = f"Clamped to max_position_size: {self.max_position_size}"
-            
-        if safe_qty <= 0:
-            return RiskDecision(approved=False, reason="MAX_POSITION_SIZE_REACHED", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_POSITION_SIZE_REACHED"])
+    @staticmethod
+    def _reject(reason: str) -> RiskDecision:
+        return RiskDecision(
+            approved=False,
+            reason=reason,
+            adjusted_quantity=0.0,
+            max_allowed_quantity=0.0,
+            risk_flags=[reason],
+        )
 
-        # 8. Daily Loss & Overall Drawdown
-        if now - self.last_day_reset > 86400:
-            self.daily_high_equity = portfolio_state.equity
+    def _update_equity_highs(self, equity: float, now: float) -> None:
+        # Reset daily high once per 24h.
+        if now - self.last_day_reset >= 86400:
+            self.daily_high_equity = equity
             self.last_day_reset = now
-            
-        if portfolio_state.equity > self.daily_high_equity:
-            self.daily_high_equity = portfolio_state.equity
-        if portfolio_state.equity > self.global_high_equity:
-            self.global_high_equity = portfolio_state.equity
-            
-        daily_loss = (self.daily_high_equity - portfolio_state.equity) / self.daily_high_equity if self.daily_high_equity > 0 else 0.0
-        
-        if daily_loss >= self.max_daily_loss_pct:
-            return RiskDecision(approved=False, reason="MAX_DAILY_LOSS", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_DAILY_LOSS"])
-            
-        drawdown = (self.global_high_equity - portfolio_state.equity) / self.global_high_equity if self.global_high_equity > 0 else 0.0
-        
-        if drawdown >= self.max_drawdown_pct:
-            return RiskDecision(approved=False, reason="MAX_DRAWDOWN", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_DRAWDOWN"])
-            
-        # 8.5. Insufficient Free Margin
-        # Phase-1 conservative approximation: required_margin = notional / max_leverage
-        notional_value = safe_qty * market_state.mid_price
-        required_margin = notional_value / max(1, self.max_leverage)
-        if portfolio_state.free_margin < required_margin and "OPEN" in order_request.action_type:
-            return RiskDecision(approved=False, reason="INSUFFICIENT_FREE_MARGIN", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INSUFFICIENT_FREE_MARGIN"])
-            
-        # 8.6. Correlated Exposure
-        # Phase-1 conservative placeholder. Will just issue a warning for now.
-        if portfolio_state.total_exposure > (self.max_portfolio_exposure_pct * portfolio_state.equity * 0.9):
-             flags.append("HIGH_CORRELATED_EXPOSURE_WARNING")
-            
-        # Closing positions is always allowed if we got past emergency/stale data checks
-        if "CLOSE" in order_request.action_type or order_request.action_type == "HOLD":
-            return RiskDecision(approved=True, reason=reason, adjusted_quantity=safe_qty, max_allowed_quantity=max_allowed, risk_flags=flags)
-            
-        # 9. Max Open Positions
-        active_positions = sum(1 for p in portfolio_state.positions.values() if p.quantity != 0)
-        if active_positions >= self.max_open_positions and order_request.symbol not in [sym for sym, p in portfolio_state.positions.items() if p.quantity != 0]:
-            return RiskDecision(approved=False, reason="MAX_OPEN_POSITIONS", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_OPEN_POSITIONS"])
 
-        # 10. Max Leverage (Symbol & Effective Leverage)
-        # Phase-1 conservative approach: ensure the effective/proposed position cannot exceed max_leverage.
+        if self.daily_high_equity <= 0:
+            self.daily_high_equity = equity
+
+        if self.global_high_equity <= 0:
+            self.global_high_equity = equity
+
+        self.daily_high_equity = max(
+            self.daily_high_equity,
+            equity,
+        )
+
+        self.global_high_equity = max(
+            self.global_high_equity,
+            equity,
+        )
+
+    def _correlated_exposure(
+        self,
+        portfolio: PortfolioState,
+        market: MarketState,
+    ) -> float:
+        """
+        Phase-1 conservative BTC/ETH correlated exposure.
+
+        Uses current position prices when available.
+        Uses current market price for the requested symbol.
+
+        This is NOT a statistical correlation model.
+        It is a conservative exposure bucket.
+        """
+
+        correlated_symbols = {"BTCUSDT", "ETHUSDT"}
+
+        exposure = 0.0
+
+        for symbol, position in portfolio.positions.items():
+            if symbol not in correlated_symbols:
+                continue
+
+            if position.quantity == 0:
+                continue
+
+            if symbol == market.symbol:
+                price = market.mid_price
+            elif position.current_price > 0:
+                price = position.current_price
+            else:
+                # Cannot safely value unknown exposure.
+                return float("inf")
+
+            exposure += abs(position.quantity) * price
+
+        return exposure
+
+    def evaluate(
+        self,
+        order_request: OrderRequest,
+        portfolio_state: PortfolioState,
+        market_state: MarketState,
+    ) -> RiskDecision:
+
+        now = time.time()
+
+        # ========================================================
+        # 1. Global safety gates
+        # ========================================================
+
+        if not settings.trading_enabled:
+            return self._reject("TRADING_DISABLED")
+
+        if settings.emergency_stop:
+            return self._reject("EMERGENCY_STOP")
+
+        # ========================================================
+        # 2. Validate core numerical values
+        # ========================================================
+
+        qty = float(order_request.requested_quantity)
+        price = float(market_state.mid_price)
+
+        if not math.isfinite(qty):
+            return self._reject("NAN_INF_DETECTED")
+
+        if not math.isfinite(price):
+            return self._reject("NAN_INF_DETECTED")
+
+        if qty <= 0:
+            return self._reject("INVALID_QUANTITY")
+
+        if price <= 0:
+            return self._reject("INVALID_PRICE")
+
+        # ========================================================
+        # 3. Market freshness
+        # ========================================================
+
+        age = now - market_state.timestamp
+
+        if age < 0:
+            return self._reject("INVALID_MARKET_TIMESTAMP")
+
+        if age > self.max_market_data_age_seconds:
+            return self._reject("STALE_MARKET_DATA")
+
+        # ========================================================
+        # 4. Portfolio health
+        # ========================================================
+
+        if not math.isfinite(portfolio_state.equity):
+            return self._reject("INVALID_EQUITY")
+
+        if portfolio_state.equity <= 0:
+            return self._reject("INSUFFICIENT_EQUITY")
+
+        if not math.isfinite(portfolio_state.free_margin):
+            return self._reject("INVALID_FREE_MARGIN")
+
+        if portfolio_state.free_margin < 0:
+            return self._reject("INSUFFICIENT_FREE_MARGIN")
+
+        # ========================================================
+        # 5. Update drawdown tracking
+        # ========================================================
+
+        self._update_equity_highs(
+            portfolio_state.equity,
+            now,
+        )
+
+        daily_loss = 0.0
+
+        if self.daily_high_equity > 0:
+            daily_loss = (
+                self.daily_high_equity - portfolio_state.equity
+            ) / self.daily_high_equity
+
+        if daily_loss >= self.max_daily_loss_pct:
+            return self._reject("MAX_DAILY_LOSS")
+
+        drawdown = 0.0
+
+        if self.global_high_equity > 0:
+            drawdown = (
+                self.global_high_equity - portfolio_state.equity
+            ) / self.global_high_equity
+
+        if drawdown >= self.max_drawdown_pct:
+            return self._reject("MAX_DRAWDOWN")
+
+        # ========================================================
+        # 6. Closing/HOLD actions
+        # ========================================================
+
+        action = order_request.action_type.upper()
+
+        if action == "HOLD" or "CLOSE" in action:
+            return RiskDecision(
+                approved=True,
+                reason="Approved",
+                adjusted_quantity=qty,
+                max_allowed_quantity=qty,
+                risk_flags=[],
+            )
+
+        # Only OPEN actions continue.
+        if action not in {"OPEN_LONG", "OPEN_SHORT"}:
+            return self._reject("INVALID_ACTION")
+
+        # ========================================================
+        # 7. Maximum single-order quantity
+        # ========================================================
+
+        if qty > self.max_order_size:
+            return self._reject("MAX_ORDER_SIZE_EXCEEDED")
+
+        # ========================================================
+        # 8. Maximum open positions
+        # ========================================================
+
+        active_symbols = {
+            symbol
+            for symbol, position in portfolio_state.positions.items()
+            if position.quantity != 0
+        }
+
+        if (
+            len(active_symbols) >= self.max_open_positions
+            and order_request.symbol not in active_symbols
+        ):
+            return self._reject("MAX_OPEN_POSITIONS")
+
+        # ========================================================
+        # 9. Existing position
+        # ========================================================
+
+        position = portfolio_state.positions.get(
+            order_request.symbol
+        )
+
+        current_quantity = 0.0
+        current_leverage = 1
+
+        if position is not None:
+            current_quantity = float(position.quantity)
+            current_leverage = int(position.leverage)
+
+            if current_leverage > self.max_leverage:
+                return self._reject("MAX_LEVERAGE_EXCEEDED")
+
+        # ========================================================
+        # 10. Maximum resulting position size
+        # ========================================================
+
+        if action == "OPEN_LONG":
+            resulting_quantity = current_quantity + qty
+        else:
+            resulting_quantity = current_quantity - qty
+
+        if abs(resulting_quantity) > self.max_position_size:
+            return self._reject("MAX_POSITION_SIZE_EXCEEDED")
+
+        # ========================================================
+        # 11. Proposed notional
+        # ========================================================
+
+        proposed_notional = qty * price
+
+        if notional_is_invalid := (
+            not math.isfinite(proposed_notional)
+            or proposed_notional <= 0
+        ):
+            return self._reject("INVALID_NOTIONAL")
+
+        # ========================================================
+        # 12. Conservative margin check
+        # ========================================================
+
+        # Phase 1 does not yet have authoritative exchange leverage
+        # for the requested order.
+        #
+        # Therefore we use max_leverage conservatively.
+        required_margin = proposed_notional / self.max_leverage
+
+        if portfolio_state.free_margin < required_margin:
+            return self._reject("INSUFFICIENT_FREE_MARGIN")
+
+        # ========================================================
+        # 13. Portfolio exposure
+        # ========================================================
+
+        proposed_portfolio_exposure = (
+            portfolio_state.total_exposure
+            + proposed_notional
+        )
+
+        portfolio_exposure_pct = (
+            proposed_portfolio_exposure
+            / portfolio_state.equity
+        )
+
+        if portfolio_exposure_pct > self.max_portfolio_exposure_pct:
+            return self._reject(
+                "EXCESSIVE_PORTFOLIO_EXPOSURE"
+            )
+
+        # ========================================================
+        # 14. Symbol exposure
+        # ========================================================
+
         current_symbol_notional = 0.0
-        if order_request.symbol in portfolio_state.positions:
-            pos = portfolio_state.positions[order_request.symbol]
-            current_symbol_notional = abs(pos.quantity) * market_state.mid_price
-            
-        proposed_notional = safe_qty * market_state.mid_price
-        
-        if portfolio_state.equity > 0:
-            effective_leverage = (current_symbol_notional + proposed_notional) / portfolio_state.equity
-            if effective_leverage > self.max_leverage:
-                return RiskDecision(approved=False, reason="MAX_LEVERAGE_EXCEEDED", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_LEVERAGE_EXCEEDED"])
-            
-        # 11. Max Portfolio Exposure
-        total_symbol_pct = (current_symbol_notional + proposed_notional) / portfolio_state.equity
-        total_portfolio_pct = (portfolio_state.total_exposure + proposed_notional) / portfolio_state.equity
-        
-        if total_portfolio_pct > self.max_portfolio_exposure_pct:
-            return RiskDecision(approved=False, reason="EXCESSIVE_PORTFOLIO_EXPOSURE", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["EXCESSIVE_PORTFOLIO_EXPOSURE"])
-            
-        # 12. Max Symbol Exposure (SAFE CLAMP)
-        if total_symbol_pct > self.max_symbol_exposure_pct:
-            flags.append("MAX_SYMBOL_EXPOSURE")
-            max_s_notional = (self.max_symbol_exposure_pct * portfolio_state.equity) - current_symbol_notional
-            safe_qty = min(safe_qty, max(0.0, max_s_notional / market_state.mid_price))
-            max_allowed = safe_qty
-            reason = "Clamped due to symbol exposure limit"
-            
-        if safe_qty <= 0:
-            return RiskDecision(approved=False, reason="INVALID_QUANTITY", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INVALID_QUANTITY"])
+
+        if position is not None and current_quantity != 0:
+            current_symbol_price = (
+                position.current_price
+                if position.current_price > 0
+                else price
+            )
+
+            current_symbol_notional = (
+                abs(current_quantity)
+                * current_symbol_price
+            )
+
+        proposed_symbol_exposure = (
+            current_symbol_notional
+            + proposed_notional
+        )
+
+        symbol_exposure_pct = (
+            proposed_symbol_exposure
+            / portfolio_state.equity
+        )
+
+        if symbol_exposure_pct > self.max_symbol_exposure_pct:
+            return self._reject(
+                "MAX_SYMBOL_EXPOSURE"
+            )
+
+        # ========================================================
+        # 15. Correlated BTC/ETH exposure
+        # ========================================================
+
+        correlated_exposure = self._correlated_exposure(
+            portfolio_state,
+            market_state,
+        )
+
+        if not math.isfinite(correlated_exposure):
+            return self._reject(
+                "INVALID_CORRELATED_EXPOSURE"
+            )
+
+        if order_request.symbol in {"BTCUSDT", "ETHUSDT"}:
+            correlated_exposure += proposed_notional
+
+        correlated_pct = (
+            correlated_exposure
+            / portfolio_state.equity
+        )
+
+        if (
+            correlated_pct
+            > self.correlated_exposure_limit_pct
+        ):
+            return self._reject(
+                "CORRELATED_EXPOSURE_LIMIT"
+            )
+
+        # ========================================================
+        # 16. Final quantity validation
+        # ========================================================
+
+        if qty <= 0 or not math.isfinite(qty):
+            return self._reject("INVALID_QUANTITY")
+
+        logger.debug(
+            "Risk approved: %s %s qty=%s",
+            order_request.symbol,
+            action,
+            qty,
+        )
 
         return RiskDecision(
             approved=True,
-            reason=reason,
-            adjusted_quantity=safe_qty,
-            max_allowed_quantity=max_allowed,
-            risk_flags=flags
+            reason="Approved",
+            adjusted_quantity=qty,
+            max_allowed_quantity=qty,
+            risk_flags=[],
         )

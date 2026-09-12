@@ -25,6 +25,10 @@ class ProductionTradingBot:
     def __init__(self, symbols: list):
         self.symbols = symbols
         self.num_symbols = len(symbols)
+        
+        if self.symbols != settings.symbol_universe:
+            raise RuntimeError(f"Symbols mismatch: {self.symbols} != {settings.symbol_universe}")
+            
         self.redis = redis_manager
         self.risk_manager = RiskManager()
         self.registry = ModelRegistry()
@@ -65,10 +69,10 @@ class ProductionTradingBot:
         self.event_memory = EventMemoryBuffer()
         
         # Tracking live states using Canonical Schemas
-        # SIMULATION ONLY: Fake production account state
+        # SIMULATION ONLY: Safe zero account state
         self.portfolio_state = PortfolioState(
-            wallet_balance=10000.0, equity=10000.0, used_margin=0.0,
-            free_margin=10000.0, total_unrealized_pnl=0.0, total_exposure=0.0,
+            wallet_balance=0.0, equity=0.0, used_margin=0.0,
+            free_margin=0.0, total_unrealized_pnl=0.0, total_exposure=0.0,
             positions={sym: PositionState(symbol=sym) for sym in self.symbols}
         )
         self.macro_state = MacroState(timestamp=time.time())
@@ -198,7 +202,7 @@ class ProductionTradingBot:
                     if action_val < -0.2: side = "CLOSE_LONG" if pos.quantity > 0 else "OPEN_SHORT"
                     elif action_val > 0.2: side = "CLOSE_SHORT" if pos.quantity < 0 else "OPEN_LONG"
                     
-                    if side != "HOLD" and notional_requested > 10.0:
+                    if side != "HOLD":
                         qty_raw = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack
                         
                         request = OrderRequest(

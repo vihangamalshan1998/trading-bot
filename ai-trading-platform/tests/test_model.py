@@ -25,7 +25,7 @@ def test_C_no_random_production_fallback():
         mock_load.side_effect = ValueError("Simulated DB Load Failure")
         with pytest.raises(RuntimeError, match="NO TRADING"):
             # If load_model fails, the bot MUST crash, not fallback to a random model.
-            ProductionTradingBot(symbols=["BTCUSDT"])
+            ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
 
 def test_checkpoint_architecture_validation():
     registry = ModelRegistry()

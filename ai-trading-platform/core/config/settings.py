@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     allow_live_trading: bool = Field(default=False)
     emergency_stop: bool = Field(default=True)
 
+    # Phase 1 Risk Limits
+    max_leverage: int = Field(default=10)
+    max_order_size: float = Field(default=5.0)
+    max_portfolio_exposure_pct: float = Field(default=0.50)
+    max_symbol_exposure_pct: float = Field(default=0.20)
+    max_open_positions: int = Field(default=5)
+    max_drawdown_pct: float = Field(default=0.10)
+    stale_data_threshold: float = Field(default=60.0)
+    correlated_exposure_limit_pct: float = Field(default=0.40)
+
     # Trading Symbols
     trading_symbol: str = Field(default="BTCUSDT")
     symbol_universe: list[str] = Field(default=["BTCUSDT", "ETHUSDT"])

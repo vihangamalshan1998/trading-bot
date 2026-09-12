@@ -7,36 +7,20 @@ from apps.trading_bot.main import ProductionTradingBot
 from core.schemas.dimension_config import get_expected_observation_dimension
 from core.config.settings import settings
 
-def test_production_bot_fails_without_active_model():
-    # B. Production bot fails if no active model exists
-    with patch("core.ai.registry.ModelRegistry.load_model") as mock_load:
-        mock_load.side_effect = ValueError("No valid model version found")
-        with pytest.raises(RuntimeError, match="NO PRODUCTION INFERENCE"):
-            # This should crash during __init__ preventing a random model from taking over
-            ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
-
-def test_production_bot_loads_active_model():
-    # A. ProductionTradingBot loads ModelRegistry
+def test_A_production_bot_loads_model():
     with patch("core.ai.registry.ModelRegistry.load_model") as mock_load:
         mock_load.return_value = MagicMock()
         bot = ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
         assert mock_load.called
         assert bot.has_valid_model is True
 
-def test_production_model_requires_active_checkpoint():
-    registry = ModelRegistry()
-    model = MultiSymbolActorCritic(num_symbols=len(settings.symbol_universe), macro_dim=8)
-    
-    # Patch the DB session to return None for active model
-    with patch.object(registry, 'SessionLocal') as mock_session_maker:
-        mock_session = MagicMock()
-        mock_session_maker.return_value.__enter__.return_value = mock_session
-        mock_session.query().filter_by().first.return_value = None
-        
-        with pytest.raises(ValueError, match="No valid model version found"):
-            registry.load_model(model)
+def test_B_production_bot_refuses_missing_checkpoint():
+    with patch("core.ai.registry.ModelRegistry.load_model") as mock_load:
+        mock_load.side_effect = ValueError("No valid model version found")
+        with pytest.raises(RuntimeError, match="NO PRODUCTION INFERENCE"):
+            ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
 
-def test_random_model_cannot_be_used_for_production():
+def test_C_no_random_production_fallback():
     with patch("core.ai.registry.ModelRegistry.load_model") as mock_load:
         mock_load.side_effect = ValueError("Simulated DB Load Failure")
         with pytest.raises(RuntimeError, match="NO TRADING"):

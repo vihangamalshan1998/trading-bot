@@ -7,26 +7,19 @@ from core.config.settings import settings
 
 class RiskManager:
     """
-    Phase 1: Deterministic firewall implementing all 12 requested strict bounds.
+    Evaluates order requests against portfolio and market state constraints.
+    Returns a deterministic RiskDecision.
     """
-    def __init__(self, 
-                 max_position_size: float = 10.0, # max absolute position size
-                 max_symbol_exposure_pct: float = 0.20,
-                 max_portfolio_exposure_pct: float = 0.80,
-                 max_leverage: int = 10,
-                 max_order_size: float = 5.0,
-                 max_open_positions: int = 5,
-                 max_daily_loss_pct: float = 0.05,
-                 max_drawdown_pct: float = 0.10):
-                 
-        self.max_position_size = max_position_size
-        self.max_symbol_exposure_pct = max_symbol_exposure_pct
-        self.max_portfolio_exposure_pct = max_portfolio_exposure_pct
-        self.max_leverage = max_leverage
-        self.max_order_size = max_order_size
-        self.max_open_positions = max_open_positions
-        self.max_daily_loss_pct = max_daily_loss_pct
-        self.max_drawdown_pct = max_drawdown_pct
+    def __init__(self):
+        # Load from centralized configuration
+        self.max_order_size = settings.max_order_size
+        self.max_leverage = settings.max_leverage
+        self.max_portfolio_exposure_pct = settings.max_portfolio_exposure_pct
+        self.max_symbol_exposure_pct = settings.max_symbol_exposure_pct
+        self.max_open_positions = settings.max_open_positions
+        self.max_drawdown_pct = settings.max_drawdown_pct
+        self.stale_data_threshold = settings.stale_data_threshold
+        self.correlated_exposure_limit_pct = settings.correlated_exposure_limit_pct
         
         self.daily_high_equity = 0.0
         self.global_high_equity = 0.0
@@ -64,7 +57,7 @@ class RiskManager:
             
         # 6. Stale Market Data
         now = time.time()
-        if now - market_state.timestamp > 60:
+        if now - market_state.timestamp > self.stale_data_threshold:
             return RiskDecision(approved=False, reason="STALE_MARKET_DATA", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["STALE_MARKET_DATA"])
             
         # 7. Max Order Size

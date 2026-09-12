@@ -47,14 +47,38 @@ class ModelRegistry:
             
         return file_path
         
-    def load_model(self, model: torch.nn.Module, version_id: str) -> torch.nn.Module:
+    def load_model(self, model: torch.nn.Module, version_id: str = None) -> torch.nn.Module:
         """
-        Loads weights from disk for a specific version.
+        Loads weights from disk. If version_id is None, loads the strictly Active production model.
+        Includes architecture and schema validation.
         """
-        file_path = os.path.join(self.storage_dir, f"{version_id}.pth")
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Model weights not found at {file_path}")
-            
-        model.load_state_dict(torch.load(file_path))
-        model.eval()
-        return model
+        try:
+            with self.SessionLocal() as session:
+                if version_id:
+                    version_meta = session.query(ModelVersion).filter_by(version_id=version_id).first()
+                else:
+                    version_meta = session.query(ModelVersion).filter_by(is_active=True).first()
+                    
+                if not version_meta:
+                    logger.error("SAFETY GATE: No valid model version found in MySQL.")
+                    raise ValueError("No valid model version found.")
+                    
+                # Schema/Architecture validation
+                expected_arch = model.__class__.__name__
+                if version_meta.architecture != expected_arch:
+                    logger.error(f"SAFETY GATE: Model architecture mismatch. Expected {expected_arch}, DB says {version_meta.architecture}.")
+                    raise ValueError("Architecture mismatch.")
+                    
+                file_path = version_meta.file_path
+                if not os.path.exists(file_path):
+                    logger.error(f"SAFETY GATE: Model weights not found at {file_path}")
+                    raise FileNotFoundError(f"Model weights not found at {file_path}")
+                    
+                model.load_state_dict(torch.load(file_path))
+                model.eval()
+                logger.info(f"Loaded rigorously validated model {version_meta.version_id} into production.")
+                return model
+                
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            raise e

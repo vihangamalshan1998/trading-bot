@@ -114,6 +114,14 @@ class LatentWorldModel(nn.Module):
         prev_action: (batch, total_action_dim)
         prev_hidden: (batch, hidden_dim)
         """
+        batch_size = obs.size(0)
+        
+        # Phase 6: Strict Dimensional Asserts
+        expected_obs_dim = 9 + (self.num_symbols * 37) + self.macro_dim
+        assert obs.size(1) == expected_obs_dim, f"State dim mismatch: Expected {expected_obs_dim}, got {obs.size(1)}"
+        assert prev_action.size(1) == self.total_action_dim, f"Action dim mismatch: Expected {self.total_action_dim}, got {prev_action.size(1)}"
+        assert prev_hidden.size(1) == self.rssM.hidden_dim, f"Hidden dim mismatch: Expected {self.rssM.hidden_dim}, got {prev_hidden.size(1)}"
+
         # 1. Encode observation
         embed = self.encoder(obs)
         

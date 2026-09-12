@@ -61,6 +61,19 @@ class SystemOrchestrator:
     async def start_all(self):
         logger.info("=== Starting AI Trading Platform ===")
         
+        # Phase 8: Strict Execution Broadcast
+        dry_run = os.environ.get("TRADING_ENABLED", "false").lower() != "true"
+        if dry_run:
+            logger.warning("==================================================")
+            logger.warning("   EXECUTION MODE: DRY RUN (SAFE MODE)            ")
+            logger.warning("   No real orders will be sent to the exchange.   ")
+            logger.warning("==================================================")
+        else:
+            logger.warning("==================================================")
+            logger.warning("   EXECUTION MODE: TESTNET LIVE TRADING           ")
+            logger.warning("   System will attempt to place simulated orders. ")
+            logger.warning("==================================================")
+        
         # Run all services concurrently
         tasks = [self.run_service(service) for service in self.services]
         await asyncio.gather(*tasks)

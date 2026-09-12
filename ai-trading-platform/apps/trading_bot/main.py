@@ -65,6 +65,7 @@ class ProductionTradingBot:
         self.event_memory = EventMemoryBuffer()
         
         # Tracking live states using Canonical Schemas
+        # SIMULATION ONLY: Fake production account state
         self.portfolio_state = PortfolioState(
             wallet_balance=10000.0, equity=10000.0, used_margin=0.0,
             free_margin=10000.0, total_unrealized_pnl=0.0, total_exposure=0.0,

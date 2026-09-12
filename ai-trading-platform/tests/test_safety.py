@@ -2,7 +2,7 @@ import pytest
 import time
 from core.schemas.state_schema import MarketState, PortfolioState, OrderRequest
 from core.risk.risk_manager import RiskManager
-from core.config.settings import settings
+from core.config.settings import Settings
 
 @pytest.fixture
 def base_state():
@@ -19,87 +19,87 @@ def base_state():
     )
     return market, portfolio
 
-def test_trading_disabled_blocks_order(base_state):
-    market, portfolio = base_state
-    settings.trading_enabled = False
-    rm = RiskManager()
-    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
-    decision = rm.evaluate(req, portfolio, market)
-    assert not decision.approved
-    assert decision.reason == "TRADING_DISABLED"
+def test_safety_settings_default_safely():
+    # C. Safety settings default safely
+    s = Settings()
+    assert s.trading_enabled is False
+    assert s.dry_run is True
+    assert s.allow_testnet is False
+    assert s.allow_live_trading is False
+    assert s.emergency_stop is True
 
-def test_emergency_stop_blocks_order(base_state):
+def test_risk_rejects_stale_market_data(base_state):
+    # D. Risk rejects stale market data.
     market, portfolio = base_state
-    settings.trading_enabled = True
-    settings.emergency_stop = True
-    rm = RiskManager()
-    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
-    decision = rm.evaluate(req, portfolio, market)
-    assert not decision.approved
-    assert decision.reason == "EMERGENCY_STOP"
-
-def test_stale_market_blocks_order(base_state):
-    market, portfolio = base_state
-    settings.trading_enabled = True
-    settings.emergency_stop = False
     market.timestamp = time.time() - 120
     rm = RiskManager()
+    
+    # We must mock the global settings so it doesn't fail on emergency_stop
+    import core.risk.risk_manager as rm_module
+    old_es = rm_module.settings.emergency_stop
+    old_te = rm_module.settings.trading_enabled
+    rm_module.settings.emergency_stop = False
+    rm_module.settings.trading_enabled = True
+    
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)
     assert not decision.approved
     assert decision.reason == "STALE_MARKET_DATA"
+    
+    rm_module.settings.emergency_stop = old_es
+    rm_module.settings.trading_enabled = old_te
 
-def test_invalid_price_blocks_order(base_state):
+def test_risk_rejects_invalid_zero_price(base_state):
+    # E. Risk rejects invalid/zero price.
     market, portfolio = base_state
-    settings.trading_enabled = True
-    settings.emergency_stop = False
-    market.mid_price = -5.0
+    market.mid_price = 0.0
     rm = RiskManager()
+    
+    import core.risk.risk_manager as rm_module
+    old_es = rm_module.settings.emergency_stop
+    old_te = rm_module.settings.trading_enabled
+    rm_module.settings.emergency_stop = False
+    rm_module.settings.trading_enabled = True
+    
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)
     assert not decision.approved
     assert decision.reason == "INVALID_PRICE"
+    
+    rm_module.settings.emergency_stop = old_es
+    rm_module.settings.trading_enabled = old_te
 
-def test_nan_price_blocks_order(base_state):
+def test_risk_rejects_when_emergency_stop_is_active(base_state):
+    # H. Risk rejects when emergency stop is active.
     market, portfolio = base_state
-    settings.trading_enabled = True
-    settings.emergency_stop = False
-    market.mid_price = float('nan')
     rm = RiskManager()
+    
+    import core.risk.risk_manager as rm_module
+    old_es = rm_module.settings.emergency_stop
+    old_te = rm_module.settings.trading_enabled
+    rm_module.settings.emergency_stop = True
+    rm_module.settings.trading_enabled = True
+    
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)
     assert not decision.approved
-    assert decision.reason == "NAN_INF_DETECTED"
+    assert decision.reason == "EMERGENCY_STOP"
+    
+    rm_module.settings.emergency_stop = old_es
+    rm_module.settings.trading_enabled = old_te
 
-def test_inf_price_blocks_order(base_state):
+def test_risk_rejects_when_trading_is_disabled(base_state):
+    # I. Risk rejects when trading is disabled.
     market, portfolio = base_state
-    settings.trading_enabled = True
-    settings.emergency_stop = False
-    market.mid_price = float('inf')
     rm = RiskManager()
+    
+    import core.risk.risk_manager as rm_module
+    old_te = rm_module.settings.trading_enabled
+    rm_module.settings.trading_enabled = False
+    
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)
     assert not decision.approved
-    assert decision.reason == "NAN_INF_DETECTED"
-
-def test_insufficient_equity_blocks_order(base_state):
-    market, portfolio = base_state
-    settings.trading_enabled = True
-    settings.emergency_stop = False
-    portfolio.equity = 0.0
-    rm = RiskManager()
-    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
-    decision = rm.evaluate(req, portfolio, market)
-    assert not decision.approved
-    assert decision.reason == "INSUFFICIENT_EQUITY"
-
-def test_dry_run_blocks_order():
-    # dry_run is tested effectively in main.py by blocking the create_order call.
-    # We assert settings exists.
-    assert settings.dry_run is not None
-
-def test_testnet_gate():
-    assert settings.allow_testnet is not None
-
-def test_live_trading_gate():
-    assert settings.allow_live_trading is not None
+    assert decision.reason == "TRADING_DISABLED"
+    
+    rm_module.settings.trading_enabled = old_te

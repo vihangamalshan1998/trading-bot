@@ -1,4 +1,4 @@
-# AI Adaptive Spot Trading Platform
+# AI Adaptive Binance Futures Trading Platform
 
 A research-grade AI algorithmic trading platform for Binance Spot, built with asynchronous Python, Redis, MySQL, and PyTorch. 
 

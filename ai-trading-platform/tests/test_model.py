@@ -8,11 +8,20 @@ from core.schemas.dimension_config import get_expected_observation_dimension
 from core.config.settings import settings
 
 def test_production_bot_fails_without_active_model():
+    # B. Production bot fails if no active model exists
     with patch("core.ai.registry.ModelRegistry.load_model") as mock_load:
         mock_load.side_effect = ValueError("No valid model version found")
         with pytest.raises(RuntimeError, match="NO PRODUCTION INFERENCE"):
             # This should crash during __init__ preventing a random model from taking over
             ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
+
+def test_production_bot_loads_active_model():
+    # A. ProductionTradingBot loads ModelRegistry
+    with patch("core.ai.registry.ModelRegistry.load_model") as mock_load:
+        mock_load.return_value = MagicMock()
+        bot = ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
+        assert mock_load.called
+        assert bot.has_valid_model is True
 
 def test_production_model_requires_active_checkpoint():
     registry = ModelRegistry()

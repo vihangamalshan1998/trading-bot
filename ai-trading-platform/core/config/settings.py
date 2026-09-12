@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     dry_run: bool = Field(default=True)
     allow_testnet: bool = Field(default=False)
     allow_live_trading: bool = Field(default=False)
-    emergency_stop: bool = Field(default=False)
+    emergency_stop: bool = Field(default=True)
 
     # Trading Symbols
     trading_symbol: str = Field(default="BTCUSDT")

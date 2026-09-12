@@ -89,6 +89,16 @@ class RiskManager:
         if drawdown >= self.max_drawdown_pct:
             return RiskDecision(approved=False, reason="MAX_DRAWDOWN", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_DRAWDOWN"])
             
+        # 8.5. Insufficient Free Margin
+        notional_value = safe_qty * market_state.mid_price
+        required_margin = notional_value / max(1, self.max_leverage)
+        if portfolio_state.free_margin < required_margin and "OPEN" in order_request.action_type:
+            return RiskDecision(approved=False, reason="INSUFFICIENT_FREE_MARGIN", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INSUFFICIENT_FREE_MARGIN"])
+            
+        # 8.6. Correlated Exposure (Simple placeholder check)
+        if portfolio_state.total_exposure > (self.max_portfolio_exposure_pct * portfolio_state.equity * 0.9):
+             flags.append("HIGH_CORRELATED_EXPOSURE_WARNING")
+            
         # Closing positions is always allowed if we got past emergency/stale data checks
         if "CLOSE" in order_request.action_type or order_request.action_type == "HOLD":
             return RiskDecision(approved=True, reason=reason, adjusted_quantity=safe_qty, max_allowed_quantity=max_allowed, risk_flags=flags)
@@ -114,9 +124,13 @@ class RiskManager:
         if total_portfolio_pct > self.max_portfolio_exposure_pct:
             return RiskDecision(approved=False, reason="EXCESSIVE_PORTFOLIO_EXPOSURE", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["EXCESSIVE_PORTFOLIO_EXPOSURE"])
             
-        # 12. Max Symbol Exposure
+        # 12. Max Symbol Exposure (SAFE CLAMP)
         if total_symbol_pct > self.max_symbol_exposure_pct:
-            return RiskDecision(approved=False, reason="MAX_SYMBOL_EXPOSURE", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["MAX_SYMBOL_EXPOSURE"])
+            flags.append("MAX_SYMBOL_EXPOSURE")
+            max_s_notional = (self.max_symbol_exposure_pct * portfolio_state.equity) - current_symbol_notional
+            safe_qty = min(safe_qty, max(0.0, max_s_notional / market_state.mid_price))
+            max_allowed = safe_qty
+            reason = "Clamped due to symbol exposure limit"
             
         if safe_qty <= 0:
             return RiskDecision(approved=False, reason="INVALID_QUANTITY", adjusted_quantity=0.0, max_allowed_quantity=0.0, risk_flags=["INVALID_QUANTITY"])

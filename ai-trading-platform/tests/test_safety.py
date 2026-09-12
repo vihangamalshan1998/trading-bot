@@ -60,7 +60,46 @@ def test_invalid_price_blocks_order(base_state):
     assert not decision.approved
     assert decision.reason == "INVALID_PRICE"
 
+def test_nan_price_blocks_order(base_state):
+    market, portfolio = base_state
+    settings.trading_enabled = True
+    settings.emergency_stop = False
+    market.mid_price = float('nan')
+    rm = RiskManager()
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert not decision.approved
+    assert decision.reason == "NAN_INF_DETECTED"
+
+def test_inf_price_blocks_order(base_state):
+    market, portfolio = base_state
+    settings.trading_enabled = True
+    settings.emergency_stop = False
+    market.mid_price = float('inf')
+    rm = RiskManager()
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert not decision.approved
+    assert decision.reason == "NAN_INF_DETECTED"
+
+def test_insufficient_equity_blocks_order(base_state):
+    market, portfolio = base_state
+    settings.trading_enabled = True
+    settings.emergency_stop = False
+    portfolio.equity = 0.0
+    rm = RiskManager()
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert not decision.approved
+    assert decision.reason == "INSUFFICIENT_EQUITY"
+
 def test_dry_run_blocks_order():
     # dry_run is tested effectively in main.py by blocking the create_order call.
-    # RiskManager doesn't enforce dry_run directly; it's a structural orchestrator gate.
+    # We assert settings exists.
     assert settings.dry_run is not None
+
+def test_testnet_gate():
+    assert settings.allow_testnet is not None
+
+def test_live_trading_gate():
+    assert settings.allow_live_trading is not None

@@ -11,7 +11,7 @@ class FeatureEngine:
         self.symbol = symbol
         
         # Buffers for rolling calculations
-        self.max_len = 600 # 10 minutes assuming 1 data point per second
+        self.max_len = 900 # 15 minutes assuming 1 data point per second
         
         # Price and Volume
         self.prices = collections.deque(maxlen=self.max_len)
@@ -73,8 +73,9 @@ class FeatureEngine:
         
         # 1. Price Features
         ret_1s = (prices[-1] / prices[-2]) - 1.0
-        ret_10s = (prices[-1] / prices[-10]) - 1.0 if len(prices) >= 10 else 0.0
-        ret_60s = (prices[-1] / prices[-60]) - 1.0 if len(prices) >= 60 else 0.0
+        ret_1m = (prices[-1] / prices[-60]) - 1.0 if len(prices) >= 60 else 0.0
+        ret_5m = (prices[-1] / prices[-300]) - 1.0 if len(prices) >= 300 else 0.0
+        ret_15m = (prices[-1] / prices[-900]) - 1.0 if len(prices) >= 900 else 0.0
         
         high_60 = np.max(prices[-60:]) if len(prices) >= 60 else np.max(prices)
         low_60 = np.min(prices[-60:]) if len(prices) >= 60 else np.min(prices)
@@ -109,8 +110,8 @@ class FeatureEngine:
         recent_liq = np.sum(list(self.liquidations)[-60:]) if len(self.liquidations) > 0 else 0.0
         
         features = [
-            # Price (5)
-            ret_1s, ret_10s, ret_60s, price_range, momentum,
+            # Price (6)
+            ret_1s, ret_1m, ret_5m, ret_15m, price_range, momentum,
             # Volume (4)
             vol_60, buy_vol_60, sell_vol_60, trade_imbalance,
             # Orderbook (4)
@@ -120,7 +121,7 @@ class FeatureEngine:
             # Derivatives (2)
             funding_rate, recent_liq,
             # Add padding up to 25 to match neural network fixed shape
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         ]
         
         return np.array(features, dtype=np.float32)[:25]

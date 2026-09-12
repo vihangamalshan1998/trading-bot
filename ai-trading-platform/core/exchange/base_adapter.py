@@ -30,6 +30,14 @@ class ExchangeAdapter(ABC):
         pass
         
     @abstractmethod
+    async def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        pass
+        
+    @abstractmethod
+    async def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+        pass
+        
+    @abstractmethod
     async def listen_user_data(self, callback):
         """Listen to the user data stream for execution and balance updates."""
         pass

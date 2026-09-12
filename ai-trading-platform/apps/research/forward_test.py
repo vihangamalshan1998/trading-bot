@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from typing import List, Dict
 from core.logging.logger import logger
-from apps.research.environment import MultiAssetFuturesEnv
+from apps.simulator.env import MultiAssetFuturesEnv
 from apps.research.train_multi import generate_multi_asset_mock_data
 from apps.research.model import MultiSymbolActorCritic
 from core.ai.memory import EventMemoryBuffer

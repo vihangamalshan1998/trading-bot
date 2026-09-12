@@ -4,6 +4,7 @@ from core.logging.logger import logger
 from core.exchange.binance_client import BinanceFuturesAdapter
 
 import numpy as np
+import math
 
 class SymbolMetadata:
     def __init__(self, symbol: str):
@@ -41,15 +42,17 @@ class SymbolConfig:
         
     def format_quantity(self, qty: float) -> str:
         """Truncates quantity to the strictly allowed precision (Binance rejects rounding up)."""
+        factor = 10 ** self.quantity_precision
+        truncated = math.floor(qty * factor) / factor
         format_str = f"{{:.{self.quantity_precision}f}}"
-        # We use string formatting then float conversion to strictly truncate, not round up
-        str_val = format_str.format(qty)
-        return str_val
+        return format_str.format(truncated)
         
     def format_price(self, price: float) -> str:
         """Truncates price to the strictly allowed precision."""
+        factor = 10 ** self.price_precision
+        truncated = math.floor(price * factor) / factor
         format_str = f"{{:.{self.price_precision}f}}"
-        return format_str.format(price)
+        return format_str.format(truncated)
 
 class SymbolRegistry:
     """

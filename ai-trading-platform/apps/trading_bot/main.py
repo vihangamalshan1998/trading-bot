@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 import torch
 import numpy as np
 import time
@@ -169,6 +170,13 @@ class ProductionTradingBot:
         logger.info("Starting production inference loop...")
         while self.running:
             try:
+                # 0. Hot Reload Model
+                if self.registry.check_for_updates():
+                    logger.info("New model version detected. Hot reloading...")
+                    self.model = self.registry.load_model(self.model)
+                    self.model.eval()
+                    logger.info("Hot reload complete.")
+
                 # 1. Check if we have valid market data
                 if len(self.market_states) != self.num_symbols:
                     logger.warning("Missing market data for some symbols. Skipping inference.")
@@ -225,8 +233,34 @@ class ProductionTradingBot:
                                 self.has_valid_model and 
                                 decision.approved):
                                 
-                                # await self.binance.create_order(sym, "BUY" if "LONG" in side else "SELL", float(qty_str))
-                                pass
+                                
+                                # Phase 9: Execution and Experience Broadcasting
+                                try:
+                                    # Execute on Binance
+                                    client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
+                                    binance_side = "BUY" if "LONG" in side else "SELL"
+                                    
+                                    order_res = await self.binance.create_order(sym, binance_side, decision.adjusted_quantity, client_order_id)
+                                    logger.info(f"[{sym}] ORDER SUCCESS: {order_res.get('orderId')}")
+                                    
+                                    # Record Experience
+                                    exp_data = {
+                                        "timestamp": time.time(),
+                                        "symbol": sym,
+                                        "market_state": market.features,
+                                        "portfolio_state": [self.portfolio_state.wallet_balance, self.portfolio_state.equity], # Abbreviated
+                                        "position_state": [pos.quantity, pos.entry_price],
+                                        "action_type": side,
+                                        "confidence": float(confidence),
+                                        "requested_size": float(qty_raw),
+                                        "approved_size": float(decision.adjusted_quantity),
+                                        "model_version": "v1"
+                                    }
+                                    await redis_manager.redis.publish("experience:completed", json.dumps(exp_data))
+                                    
+                                except Exception as e:
+                                    logger.error(f"[{sym}] ORDER/EXPERIENCE FAILED: {e}")
+                                    
                             else:
                                 logger.info(f"[{sym}] NO ORDER (Blocked by final safety gate): {side} {qty_str}")
                         else:

@@ -109,6 +109,24 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         logger.info(f"Placing Order: {params}")
         return await self._request("POST", "/fapi/v1/order", signed=True, params=params)
 
+    async def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        """Cancels an active futures order."""
+        params = {
+            "symbol": symbol,
+            "orderId": order_id
+        }
+        logger.info(f"Cancelling Order: {params}")
+        return await self._request("DELETE", "/fapi/v1/order", signed=True, params=params)
+
+    async def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+        """Sets the leverage for a symbol."""
+        params = {
+            "symbol": symbol,
+            "leverage": leverage
+        }
+        logger.info(f"Setting Leverage: {params}")
+        return await self._request("POST", "/fapi/v1/leverage", signed=True, params=params)
+
     # User Data Stream
     async def _start_user_data_stream(self):
         """Creates a listen key for the websocket."""

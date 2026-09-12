@@ -6,7 +6,7 @@ from torch.distributions import Categorical
 import numpy as np
 import time
 
-from apps.research.environment import MultiAssetFuturesEnv
+from apps.simulator.env import MultiAssetFuturesEnv
 from apps.research.model import MultiSymbolTradingNet
 from core.ai.registry import ModelRegistry
 from core.logging.logger import logger

@@ -1,94 +1,55 @@
-import asyncio
-import os
-import sys
 import subprocess
+import sys
+import time
 from core.logging.logger import logger
 
-class SystemOrchestrator:
-    """
-    Master orchestrator script that launches and monitors all microservices concurrently.
-    """
-    def __init__(self):
-        self.processes = []
-        
-        # Define the services to run
-        self.services = [
-            {"name": "Universe Screener", "path": "apps/market_collector/universe.py"},
-            {"name": "News & Macro Collector", "path": "apps/market_collector/news_macro.py"},
-            {"name": "Market Data Collector", "path": "apps/market_collector/market_data.py"},
-            {"name": "Production Trading Bot", "path": "apps/trading_bot/main.py"}
-        ]
+def start_process(name, cmd):
+    logger.info(f"Starting {name}...")
+    return subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
 
-    async def run_service(self, service: dict):
-        logger.info(f"Starting {service['name']}...")
+def main():
+    logger.info("Initializing Autonomous AI Trading System...")
+    
+    processes = []
+    
+    try:
+        # 1. Dashboard API
+        api_proc = start_process("Dashboard API", [sys.executable, "-m", "uvicorn", "apps.dashboard_api.main:app", "--host", "0.0.0.0", "--port", "8000"])
+        processes.append(("Dashboard API", api_proc))
         
-        # Use subprocess to run each service in its own isolated environment
-        # We assume the current virtualenv is active and PYTHONPATH="." is handled by the script runner
-        env = os.environ.copy()
-        env["PYTHONPATH"] = "."
+        # 2. Market Data Collector
+        collector_proc = start_process("Market Collector", [sys.executable, "-m", "apps.market_collector.market_data"])
+        processes.append(("Market Collector", collector_proc))
         
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, service["path"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env
-        )
+        # 3. News & Macro Collector
+        news_proc = start_process("News Collector", [sys.executable, "-m", "apps.market_collector.news_macro"])
+        processes.append(("News Collector", news_proc))
         
-        self.processes.append(process)
+        # 4. Experience Storage Worker
+        storage_proc = start_process("Experience Storage", [sys.executable, "-m", "apps.experience.storage"])
+        processes.append(("Experience Storage", storage_proc))
         
-        # Asynchronously read output
-        async def read_stream(stream, is_stderr=False):
-            while True:
-                line = await stream.readline()
-                if line:
-                    decoded = line.decode('utf-8').strip()
-                    if is_stderr:
-                        logger.error(f"[{service['name']}] {decoded}")
-                    else:
-                        logger.info(f"[{service['name']}] {decoded}")
-                else:
-                    break
-
-        await asyncio.gather(
-            read_stream(process.stdout),
-            read_stream(process.stderr, is_stderr=True)
-        )
+        # 5. Trading Bot
+        bot_proc = start_process("Trading Bot", [sys.executable, "-m", "apps.trading_bot.main"])
+        processes.append(("Trading Bot", bot_proc))
         
-        await process.wait()
-        logger.warning(f"Service {service['name']} exited with code {process.returncode}")
-
-    async def start_all(self):
-        logger.info("=== Starting AI Trading Platform ===")
-        
-        # Phase 8: Strict Execution Broadcast
-        dry_run = os.environ.get("TRADING_ENABLED", "false").lower() != "true"
-        if dry_run:
-            logger.warning("==================================================")
-            logger.warning("   EXECUTION MODE: DRY RUN (SAFE MODE)            ")
-            logger.warning("   No real orders will be sent to the exchange.   ")
-            logger.warning("==================================================")
-        else:
-            logger.warning("==================================================")
-            logger.warning("   EXECUTION MODE: TESTNET LIVE TRADING           ")
-            logger.warning("   System will attempt to place simulated orders. ")
-            logger.warning("==================================================")
-        
-        # Run all services concurrently
-        tasks = [self.run_service(service) for service in self.services]
-        await asyncio.gather(*tasks)
-
-    def shutdown(self):
-        logger.info("Shutting down all services...")
-        for p in self.processes:
-            try:
-                p.terminate()
-            except Exception:
-                pass
+        # Monitor Loop
+        while True:
+            for name, proc in processes:
+                if proc.poll() is not None:
+                    logger.error(f"CRITICAL: {name} crashed with exit code {proc.returncode}!")
+                    # In a real setup, we'd restart it here or let Systemd handle it
+                    
+            time.sleep(5)
+            
+    except KeyboardInterrupt:
+        logger.info("Shutting down system...")
+        for name, proc in processes:
+            logger.info(f"Terminating {name}...")
+            proc.terminate()
+            proc.wait()
+            
+    logger.info("System shutdown complete.")
 
 if __name__ == "__main__":
-    orchestrator = SystemOrchestrator()
-    try:
-        asyncio.run(orchestrator.start_all())
-    except KeyboardInterrupt:
-        orchestrator.shutdown()
-        logger.info("System gracefully shut down.")
+    main()

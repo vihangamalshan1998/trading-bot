@@ -1,7 +1,7 @@
 from typing import Dict, List, Optional
 from datetime import datetime
 from core.logging.logger import logger
-from core.exchange.binance_client import BinanceFuturesClient
+from core.exchange.binance_client import BinanceFuturesAdapter
 
 import numpy as np
 
@@ -59,7 +59,7 @@ class SymbolRegistry:
     def __init__(self):
         self._symbols: Dict[str, SymbolConfig] = {}
         
-    async def initialize_from_exchange(self, client: BinanceFuturesClient):
+    async def initialize_from_exchange(self, client: 'BinanceFuturesAdapter'):
         """Fetches /fapi/v1/exchangeInfo and dynamically loads precision limits."""
         logger.info("Fetching exchangeInfo to build Symbol Registry...")
         try:

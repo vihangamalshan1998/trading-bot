@@ -176,7 +176,7 @@ function App() {
                       <div className="market-card-body">
                         <div className="market-metric">
                           <span className="label">Price</span>
-                          <span className="value">${state.price ? state.price.toFixed(2) : '0.00'}</span>
+                          <span className="value">${state.mid_price ? state.mid_price.toFixed(2) : '0.00'}</span>
                         </div>
                         <div className="market-metric">
                           <span className="label">Spread (BPS)</span>
@@ -184,7 +184,7 @@ function App() {
                         </div>
                         <div className="market-metric">
                           <span className="label">Imbalance</span>
-                          <span className="value">{state.book_imbalance ? state.book_imbalance.toFixed(2) : '0.00'}</span>
+                          <span className="value">{state.imbalance ? state.imbalance.toFixed(2) : '0.00'}</span>
                         </div>
                       </div>
                     </div>

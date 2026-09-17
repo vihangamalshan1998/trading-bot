@@ -8,14 +8,15 @@ import time
 from core.db.redis import redis_manager
 from core.ai.replay_buffer import ReplayBuffer
 from core.logging.logger import logger
-from apps.research.model import MultiSymbolActorCritic
+from apps.research.model import SingleSymbolActorCritic
+from core.ai.registry import ModelRegistry
 
 class PPOTrainer:
     """
     Phase 11: Proximal Policy Optimization (PPO) Training Loop.
     Samples from the MySQL ReplayBuffer and updates the Actor-Critic model.
     """
-    def __init__(self, model: MultiSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2):
+    def __init__(self, model: SingleSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2):
         self.model = model
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
         self.gamma = gamma
@@ -37,7 +38,7 @@ class PPOTrainer:
         """Executes a single PPO training step."""
         batch = self.buffer.sample(batch_size)
         if len(batch) < batch_size:
-            logger.warning("Not enough samples in replay buffer to train.")
+            logger.warning(f"Not enough samples in replay buffer to train. Got {len(batch)}, needed {batch_size}")
             return
             
         states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch)
@@ -100,7 +101,61 @@ class PPOTrainer:
             asyncio.run(self._publish_metrics(payload))
             
     async def _publish_metrics(self, payload: dict):
-        if not redis_manager.redis:
-            await redis_manager.connect()
-        if redis_manager.redis:
-            await redis_manager.redis.publish("training:metrics", json.dumps(payload))
+        try:
+            if not redis_manager.redis:
+                await redis_manager.connect()
+            if redis_manager.redis:
+                await redis_manager.redis.publish("training:metrics", json.dumps(payload))
+        except Exception:
+            pass # Suppress background metrics errors if Redis is down
+
+    async def _publish_model_update(self):
+        try:
+            if not redis_manager.redis:
+                await redis_manager.connect()
+            if redis_manager.redis:
+                payload = {"timestamp": time.time(), "event": "model_saved"}
+                await redis_manager.redis.publish("training:model_update", json.dumps(payload))
+        except Exception:
+            pass
+
+async def run_training_loop():
+    logger.info("Initializing PPO Training Engine...")
+    
+    # We need to initialize the model first
+    from core.config.settings import settings
+    # The ReplayBuffer currently returns 29-dim state vectors (single symbol + portfolio + position)
+    model = SingleSymbolActorCritic(input_dim=29)
+    registry = ModelRegistry()
+    
+    trainer = PPOTrainer(model=model)
+    logger.info("Starting continuous PPO training on historical/live data...")
+    
+    step = 0
+    try:
+        while True:
+            trainer.train_step(batch_size=64, epochs=4)
+            await asyncio.sleep(1.0) # Prevent 100% CPU usage
+            step += 1
+            if step % 100 == 0:
+                logger.info(f"Completed {step} training steps. Saving model...")
+                try:
+                    registry.save_model(model)
+                    
+                    # Schedule model update broadcast
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(trainer._publish_model_update())
+                    except RuntimeError:
+                        asyncio.run(trainer._publish_model_update())
+                except Exception as e:
+                    logger.error(f"Failed to save model: {e}")
+                    
+    except asyncio.CancelledError:
+        logger.info("PPO Training Engine shutting down...")
+        
+if __name__ == "__main__":
+    try:
+        asyncio.run(run_training_loop())
+    except KeyboardInterrupt:
+        pass

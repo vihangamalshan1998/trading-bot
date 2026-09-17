@@ -12,13 +12,20 @@ function App() {
     market_states: {}
   });
 
+  // System Stats (Macro & Model)
+  const [systemStats, setSystemStats] = useState({
+    news_count: 0,
+    latest_sentiment: 0.0,
+    latest_regime: 0.0,
+    model_update_count: 0,
+    last_model_update_time: null
+  });
+
   // Training State
   const [trainingMetrics, setTrainingMetrics] = useState([]);
 
-  // Fetch Live Trading Updates
+  // Fetch Live Trading Updates & System Stats
   useEffect(() => {
-    if (activeTab !== 'live') return;
-    
     const fetchLiveState = async () => {
       try {
         const res = await fetch("http://localhost:8000/api/state");
@@ -29,10 +36,24 @@ function App() {
       }
     };
     
+    const fetchSystemStats = async () => {
+      try {
+        const res = await fetch("http://localhost:8000/api/system_stats");
+        const json = await res.json();
+        setSystemStats(json);
+      } catch (err) {
+        console.error("Failed to fetch system stats:", err);
+      }
+    };
+    
     fetchLiveState();
-    const interval = setInterval(fetchLiveState, 1000);
+    fetchSystemStats();
+    const interval = setInterval(() => {
+      fetchLiveState();
+      fetchSystemStats();
+    }, 1000);
     return () => clearInterval(interval);
-  }, [activeTab]);
+  }, []);
 
   // Fetch Training Metrics from API
   useEffect(() => {
@@ -63,96 +84,168 @@ function App() {
   return (
     <div className="dashboard-container">
       <header className="glass-header">
-        <h1>AI Trading Platform Dashboard</h1>
+        <div className="header-title">
+          <div className="pulse-indicator"></div>
+          <h1>AI Trading Platform</h1>
+        </div>
         
         <div className="nav-tabs">
           <button 
             className={`tab-btn ${activeTab === 'live' ? 'active' : ''}`}
             onClick={() => setActiveTab('live')}
           >
-            Live Trading
+            Live Market & Macro
           </button>
           <button 
             className={`tab-btn ${activeTab === 'training' ? 'active' : ''}`}
             onClick={() => setActiveTab('training')}
           >
-            AI Training
+            Brain & Training
           </button>
         </div>
         
-        {activeTab === 'live' && (
-          <div className="equity-display">
-            <span>Total Equity:</span>
-            <h2>${data.equity.toFixed(2)}</h2>
-          </div>
-        )}
+        <div className="equity-display">
+          <span>Total Equity</span>
+          <h2 className={data.equity > 10000 ? 'profit' : data.equity < 10000 ? 'loss' : ''}>
+            ${data.equity.toFixed(2)}
+          </h2>
+        </div>
       </header>
 
       <main className="dashboard-grid">
         {activeTab === 'live' ? (
           <>
-            <section className="glass-panel">
-              <h3>Active Positions</h3>
-              <div className="position-list">
-                {data.positions.map((pos, idx) => (
-                  <div key={idx} className={`position-card ${pos.side.toLowerCase()}`}>
-                    <div className="pos-header">
-                      <span className="symbol">{pos.symbol}</span>
-                      <span className="side">{pos.side}</span>
-                    </div>
-                    <div className="pos-details">
-                      <span>Qty: {pos.quantity}</span>
-                      <span className={`pnl ${pos.pnl >= 0 ? 'profit' : 'loss'}`}>
-                        PnL: ${pos.pnl.toFixed(2)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
+            <section className="glass-panel stat-panel">
+              <h3>Macro Sentiment & News</h3>
+              <div className="stat-grid">
+                <div className="stat-card">
+                  <span className="stat-label">News Articles Analyzed</span>
+                  <span className="stat-value highlight">{systemStats.news_count}</span>
+                </div>
+                <div className="stat-card">
+                  <span className="stat-label">Gemini Sentiment Score</span>
+                  <span className={`stat-value ${systemStats.latest_sentiment > 0 ? 'profit' : systemStats.latest_sentiment < 0 ? 'loss' : ''}`}>
+                    {systemStats.latest_sentiment.toFixed(2)}
+                  </span>
+                </div>
+                <div className="stat-card">
+                  <span className="stat-label">Market Regime</span>
+                  <span className={`stat-value ${systemStats.latest_regime > 0 ? 'profit' : systemStats.latest_regime < 0 ? 'loss' : ''}`}>
+                    {systemStats.latest_regime > 0 ? 'Bullish' : systemStats.latest_regime < 0 ? 'Bearish' : 'Neutral'}
+                  </span>
+                </div>
               </div>
             </section>
 
-            <section className="glass-panel">
-              <h3>Live Market States</h3>
+            <section className="glass-panel position-panel">
+              <h3>Active AI Positions</h3>
+              <div className="position-list">
+                {data.positions.length === 0 ? (
+                  <p className="empty-text">No active positions.</p>
+                ) : (
+                  data.positions.map((pos, idx) => (
+                    <div key={idx} className={`position-card ${pos.side.toLowerCase()}`}>
+                      <div className="pos-header">
+                        <span className="symbol">{pos.symbol}</span>
+                        <span className="side">{pos.side}</span>
+                      </div>
+                      <div className="pos-details">
+                        <span>Qty: {pos.quantity}</span>
+                        <span className={`pnl ${pos.pnl >= 0 ? 'profit' : 'loss'}`}>
+                          PnL: ${pos.pnl.toFixed(2)}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section className="glass-panel market-panel full-width">
+              <h3>Live Market States (Micro-Structure)</h3>
               <div className="market-list">
-                {Object.entries(data.market_states).map(([sym, state], idx) => (
-                  <div key={idx} className="market-card">
-                    <span className="symbol">{sym}</span>
-                    <span className="price">${state.price.toFixed(2)}</span>
-                    <span className={`trend ${state.trend.toLowerCase()}`}>{state.trend}</span>
-                  </div>
-                ))}
+                {Object.keys(data.market_states).length === 0 ? (
+                  <p className="empty-text">Awaiting market data from Binance...</p>
+                ) : (
+                  Object.entries(data.market_states).map(([sym, state], idx) => (
+                    <div key={idx} className="market-card">
+                      <div className="market-card-header">
+                        <span className="symbol">{sym}</span>
+                        <span className={`trend ${state.trend ? state.trend.toLowerCase() : ''}`}>{state.trend || 'N/A'}</span>
+                      </div>
+                      <div className="market-card-body">
+                        <div className="market-metric">
+                          <span className="label">Price</span>
+                          <span className="value">${state.price ? state.price.toFixed(2) : '0.00'}</span>
+                        </div>
+                        <div className="market-metric">
+                          <span className="label">Spread (BPS)</span>
+                          <span className="value">{state.spread_bps ? state.spread_bps.toFixed(1) : '0.0'}</span>
+                        </div>
+                        <div className="market-metric">
+                          <span className="label">Imbalance</span>
+                          <span className="value">{state.book_imbalance ? state.book_imbalance.toFixed(2) : '0.00'}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </section>
           </>
         ) : (
-          <section className="glass-panel full-width">
-            <h3>PPO Training Progress (Live Loss Metrics)</h3>
-            
-            {trainingMetrics.length === 0 ? (
-              <div className="empty-state">
-                <p>Waiting for training data...</p>
-                <small>Run `python -m apps.trainer.ppo` to start the AI training engine.</small>
+          <>
+            <section className="glass-panel stat-panel full-width">
+              <h3>AI Brain Status</h3>
+              <div className="stat-grid">
+                <div className="stat-card">
+                  <span className="stat-label">Total Brain Saves</span>
+                  <span className="stat-value highlight">{systemStats.model_update_count}</span>
+                </div>
+                <div className="stat-card">
+                  <span className="stat-label">Last Saved</span>
+                  <span className="stat-value">
+                    {systemStats.last_model_update_time 
+                      ? new Date(systemStats.last_model_update_time * 1000).toLocaleTimeString() 
+                      : 'Never'}
+                  </span>
+                </div>
               </div>
-            ) : (
-              <div className="chart-container" style={{ width: '100%', height: 400 }}>
-                <ResponsiveContainer>
-                  <LineChart
-                    data={trainingMetrics}
-                    margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-                    <XAxis dataKey="name" stroke="#888" />
-                    <YAxis stroke="#888" domain={['auto', 'auto']} />
-                    <Tooltip contentStyle={{ backgroundColor: '#1e1e1e', borderColor: '#333' }} />
-                    <Legend />
-                    <Line type="monotone" dataKey="loss" stroke="#8884d8" name="Total Loss" strokeWidth={2} dot={false} />
-                    <Line type="monotone" dataKey="actor_loss" stroke="#82ca9d" name="Actor Loss" strokeWidth={2} dot={false} />
-                    <Line type="monotone" dataKey="critic_loss" stroke="#ffc658" name="Critic Loss" strokeWidth={2} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </section>
+            </section>
+
+            <section className="glass-panel full-width">
+              <h3>PPO Training Progress (Live Loss Metrics)</h3>
+              
+              {trainingMetrics.length === 0 ? (
+                <div className="empty-state">
+                  <div className="spinner"></div>
+                  <p>Waiting for training data...</p>
+                  <small>Make sure `ppo.py` is running and Redis is active.</small>
+                </div>
+              ) : (
+                <div className="chart-container" style={{ width: '100%', height: 400 }}>
+                  <ResponsiveContainer>
+                    <LineChart
+                      data={trainingMetrics}
+                      margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" vertical={false} />
+                      <XAxis dataKey="name" stroke="#a0a0a0" tick={{fill: '#a0a0a0'}} />
+                      <YAxis stroke="#a0a0a0" domain={['auto', 'auto']} tick={{fill: '#a0a0a0'}} />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: 'rgba(20,20,25,0.9)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', backdropFilter: 'blur(10px)' }} 
+                        itemStyle={{ color: '#fff' }}
+                      />
+                      <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                      <Line type="monotone" dataKey="loss" stroke="#8884d8" name="Total Loss" strokeWidth={3} dot={false} activeDot={{ r: 8 }} />
+                      <Line type="monotone" dataKey="actor_loss" stroke="#00f2fe" name="Actor Loss" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="critic_loss" stroke="#4facfe" name="Critic Loss" strokeWidth={2} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+          </>
         )}
       </main>
     </div>
@@ -160,3 +253,4 @@ function App() {
 }
 
 export default App
+

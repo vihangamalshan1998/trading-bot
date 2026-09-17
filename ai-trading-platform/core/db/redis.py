@@ -19,7 +19,7 @@ class RedisManager:
     async def connect(self):
         if self.redis is None:
             try:
-                self.redis = redis.from_url(settings.redis_url, decode_responses=True)
+                self.redis = redis.from_url(settings.redis_url, decode_responses=True, protocol=2, socket_connect_timeout=2.0, socket_timeout=2.0)
                 # Test connection
                 await self.redis.ping()
                 logger.info("Successfully connected to Redis")

@@ -98,6 +98,23 @@ This orchestrator script will automatically launch:
 
 > **Warning:** By default, the bot trades on the **Binance Testnet** with fake money. To switch to real money, you must open your `.env` file and set `BINANCE_TESTNET=False`, `ALLOW_TESTNET=False`, and `ALLOW_LIVE_TRADING=True`. Do this **only** when you are 100% confident in the bot's training.
 
+### Phase 4: Launch the Visual Dashboard (Optional but Recommended)
+To monitor live trades, equity, and AI training loss visually:
+
+1. **Start the API Backend:**
+   ```bash
+   uvicorn apps.dashboard_api.main:app --host 0.0.0.0 --port 8000
+   ```
+2. **Start the React Frontend:**
+   ```bash
+   cd apps/dashboard_frontend
+   npm install
+   npm run dev
+   ```
+   *Open the generated local URL (usually http://localhost:5173) in your web browser.*
+
+> **Critical Note:** The dashboard absolutely requires **Redis** to be running, as it streams all real-time events over Redis Pub/Sub.
+
 ---
 
 ## 5. VPS Specifics (Running 24/7)

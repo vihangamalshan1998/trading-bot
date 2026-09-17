@@ -35,7 +35,8 @@ The system is decoupled into discrete microservices connected via a Redis state-
 
 - **Python 3.10+**
 - **MySQL 8.0+** (Running on port 3306)
-- **Redis Server** (Running on port 6379)
+- **Redis Server** (Running on port 6379 - **CRITICAL:** The dashboard and live event bus will not work without Redis)
+- **Node.js & npm** (Required to run the visual React dashboard)
 - **Binance Testnet API Keys**
 
 ## Setup & Installation
@@ -81,6 +82,25 @@ To orchestrate and launch both the Market Collector and the live Trading Bot sim
 ```
 
 *(This will spawn two separate background windows running the individual services).*
+
+## Visual Dashboard
+
+The platform includes a real-time React dashboard to visualize live trading states, active positions, and AI training metrics (loss).
+
+1. **Start the Backend API:**
+   ```powershell
+   # Ensure your virtual environment is active
+   uvicorn apps.dashboard_api.main:app --host 0.0.0.0 --port 8000
+   ```
+2. **Start the Frontend Dashboard:**
+   ```powershell
+   cd apps/dashboard_frontend
+   npm install  # (First time only)
+   npm run dev
+   ```
+3. Open `http://localhost:5173` in your browser.
+
+> **Note:** The dashboard requires Redis to stream live metrics. If Redis is down, the dashboard will not receive updates.
 
 ## Machine Learning Pipeline
 

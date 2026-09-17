@@ -50,21 +50,20 @@ class ProductionTradingBot:
             
         logger.info(f"Trading Mode: {'DRY_RUN' if self.dry_run else 'LIVE_OR_TESTNET'} | Enabled: {self.trading_enabled}")
         
-        # 4. Strict Model Checkpoint Loading
+        # 4. Strict Model Checkpoint Loading (graceful if no checkpoint yet)
         self.has_valid_model = False
+        self.model = MultiSymbolActorCritic(num_symbols=self.num_symbols, macro_dim=8)
         try:
-            self.model = MultiSymbolActorCritic(num_symbols=self.num_symbols, macro_dim=8)
             # This calls the strictly validated loader that checks architecture and active status
             self.model = self.registry.load_model(self.model)
             self.model.eval()
             self.has_valid_model = True
             logger.info(f"Loaded rigorously validated MultiSymbolActorCritic for {self.num_symbols} symbols.")
         except Exception as e:
-            logger.critical("NO PRODUCTION INFERENCE")
-            logger.critical("NO TRADING")
-            self.dry_run = True # Force safety
+            logger.warning(f"No trained model checkpoint found yet (training in progress). Running in OBSERVATION-ONLY mode. Error: {e}")
+            self.model.eval()
+            self.dry_run = True  # Force safety - no trading without a trained model
             self.trading_enabled = False
-            raise RuntimeError(f"NO PRODUCTION INFERENCE. NO TRADING. Error: {e}")
         
         self.running = False
         self.event_memory = EventMemoryBuffer()
@@ -290,7 +289,8 @@ class ProductionTradingBot:
         self.running = False
 
 if __name__ == "__main__":
-    bot = ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
+    from core.config.settings import settings
+    bot = ProductionTradingBot(symbols=settings.symbol_universe)
     try:
         asyncio.run(bot.start())
     except KeyboardInterrupt:

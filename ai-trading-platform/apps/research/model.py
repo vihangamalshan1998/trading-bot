@@ -138,3 +138,28 @@ class MultiSymbolActorCritic(nn.Module):
         critic_out = self.critic_fc(x)
         
         return actor_out, critic_out
+
+class SingleSymbolActorCritic(nn.Module):
+    """
+    ActorCritic for a single symbol state (e.g. 29-dim from historical downloader).
+    """
+    def __init__(self, input_dim: int = 29, hidden_dim: int = 128):
+        super().__init__()
+        
+        self.shared_fc1 = nn.Linear(input_dim, hidden_dim)
+        self.shared_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        
+        # Actor Head: action, confidence, size
+        self.actor_fc = nn.Linear(hidden_dim, 3)
+        
+        # Critic Head
+        self.critic_fc = nn.Linear(hidden_dim, 1)
+        
+    def forward(self, x: torch.Tensor):
+        x = F.relu(self.shared_fc1(x))
+        x = F.relu(self.shared_fc2(x))
+        
+        actor_out = torch.tanh(self.actor_fc(x))
+        critic_out = self.critic_fc(x)
+        
+        return actor_out, critic_out

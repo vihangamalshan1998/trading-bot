@@ -124,8 +124,8 @@ async def run_training_loop():
     
     # We need to initialize the model first
     from core.config.settings import settings
-    # The ReplayBuffer currently returns 29-dim state vectors (single symbol + portfolio + position)
-    model = SingleSymbolActorCritic(input_dim=29)
+    # The ReplayBuffer currently returns 28-dim state vectors (single symbol + portfolio + position)
+    model = SingleSymbolActorCritic(input_dim=28)
     registry = ModelRegistry()
     
     trainer = PPOTrainer(model=model)

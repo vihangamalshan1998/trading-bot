@@ -143,7 +143,7 @@ class SingleSymbolActorCritic(nn.Module):
     """
     ActorCritic for a single symbol state (e.g. 29-dim from historical downloader).
     """
-    def __init__(self, input_dim: int = 29, hidden_dim: int = 128):
+    def __init__(self, input_dim: int = 28, hidden_dim: int = 128):
         super().__init__()
         
         self.shared_fc1 = nn.Linear(input_dim, hidden_dim)

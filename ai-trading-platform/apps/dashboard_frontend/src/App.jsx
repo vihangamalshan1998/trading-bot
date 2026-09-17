@@ -28,7 +28,7 @@ function App() {
   useEffect(() => {
     const fetchLiveState = async () => {
       try {
-        const res = await fetch("http://localhost:8000/api/state");
+        const res = await fetch("/api/state");
         const json = await res.json();
         setData(json);
       } catch (err) {
@@ -38,7 +38,7 @@ function App() {
     
     const fetchSystemStats = async () => {
       try {
-        const res = await fetch("http://localhost:8000/api/system_stats");
+        const res = await fetch("/api/system_stats");
         const json = await res.json();
         setSystemStats(json);
       } catch (err) {
@@ -61,7 +61,7 @@ function App() {
     
     const fetchMetrics = async () => {
       try {
-        const res = await fetch("http://localhost:8000/api/training");
+        const res = await fetch("/api/training");
         const json = await res.json();
         
         // Format timestamp for display

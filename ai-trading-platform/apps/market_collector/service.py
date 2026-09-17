@@ -107,9 +107,7 @@ class MarketCollectorService:
         # But for 5 symbols, it's fine to run them sequentially or concurrently.
         for sym in self.active_symbols:
             try:
-                # We need to implement get_depth_snapshot in adapter or just use a generic httpx call if missing
-                response = await self.adapter.client.get(f"/fapi/v1/depth?symbol={sym}&limit=1000")
-                snapshot = response.json()
+                snapshot = await self.adapter._request("GET", "/fapi/v1/depth", params={"symbol": sym, "limit": 1000})
                 self.order_books[sym].initialize_book(snapshot)
                 logger.info(f"Initialized order book for {sym}")
             except Exception as e:

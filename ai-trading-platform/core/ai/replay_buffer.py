@@ -100,22 +100,22 @@ class ReplayBuffer:
             state = []
             if exp.portfolio_state: state.extend(exp.portfolio_state)
             if exp.market_state: state.extend(exp.market_state)
-            if exp.position_state: state.extend(exp.position_state)
-            if exp.macro_state: state.extend(exp.macro_state)
-            if exp.event_context: state.extend(exp.event_context)
+            state.append(exp.position_before or 0.0)
             
-            n_state = exp.next_state if exp.next_state else state # fallback
+            n_state = exp.next_state if getattr(exp, "next_state", None) else state # fallback
             
             # Simple discrete/continuous action mock parse
-            act = [0.0, exp.confidence or 0.0, exp.approved_size or 0.0]
-            if exp.action_type == "OPEN_LONG": act[0] = 0.5
-            elif exp.action_type == "OPEN_SHORT": act[0] = -0.5
+            act = [0.0, exp.confidence or 0.0, 0.0]
+            if exp.action == "OPEN_LONG": act[0] = 0.5
+            elif exp.action == "OPEN_SHORT": act[0] = -0.5
+            elif exp.action == "CLOSE_LONG": act[0] = -0.1
+            elif exp.action == "CLOSE_SHORT": act[0] = 0.1
             
             states.append(state)
             actions.append(act)
             rewards.append([exp.reward or 0.0])
             next_states.append(n_state)
-            dones.append([1.0 if exp.done else 0.0])
+            dones.append([0.0]) # Historical offline RL usually continuous unless end of episode
             
         # Pad sequences or truncate depending on exact dimensions (Assumes uniform here)
         try:

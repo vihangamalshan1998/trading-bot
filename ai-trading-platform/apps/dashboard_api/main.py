@@ -82,7 +82,7 @@ async def get_system_state():
     
     # Get market states
     market_states = {}
-    keys = await redis_manager.redis.keys("dashboard:market_states:*")
+    keys = await redis_manager.redis.keys("market:state:*")
     for key in keys:
         symbol = key.decode("utf-8").split(":")[-1] if isinstance(key, bytes) else key.split(":")[-1]
         state_raw = await redis_manager.redis.get(key)

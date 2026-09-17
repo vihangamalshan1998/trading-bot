@@ -24,5 +24,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        logger.error("Unhandled exception in Market Collector", extra={"error": str(e)})
+        logger.error(f"Unhandled exception in Market Collector: {e}", exc_info=True)
         sys.exit(1)

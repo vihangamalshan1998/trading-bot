@@ -21,7 +21,7 @@ class SymbolEmbedding:
 
 class SymbolConfig:
     """Represents the exchange configuration and rules for a single trading pair."""
-    def __init__(self, symbol: str, base_asset: str, quote_asset: str):
+    def __init__(self, symbol: str, base_asset: str = "UNKNOWN", quote_asset: str = "USDT"):
         self.symbol = symbol
         self.market_type = "FUTURES"
         self.base_asset = base_asset
@@ -96,6 +96,14 @@ class SymbolRegistry:
         
     def get_active_symbols(self) -> List[SymbolConfig]:
         return [sym for sym in self._symbols.values() if sym.trading_enabled]
+        
+    def add_symbol(self, config: SymbolConfig):
+        self._symbols[config.symbol] = config
+        
+    def update_status(self, symbol: str, status: str):
+        if symbol in self._symbols:
+            self._symbols[symbol].status = status
+            self._symbols[symbol].trading_enabled = (status == "ENABLED")
 
 # Singleton registry instance
 registry = SymbolRegistry()

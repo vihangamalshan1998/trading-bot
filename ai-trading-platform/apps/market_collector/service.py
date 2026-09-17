@@ -4,7 +4,7 @@ import time
 
 from core.logging.logger import logger
 from core.config.settings import settings
-from apps.market_collector.futures_binance import BinanceFuturesAdapter
+from core.exchange.binance_client import BinanceFuturesAdapter
 from apps.orderbook.builder import OrderBookBuilder
 from apps.feature_engine.calculators import FeatureEngine
 from core.db.redis import redis_manager

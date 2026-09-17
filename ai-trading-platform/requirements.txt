@@ -18,3 +18,5 @@ gymnasium
 pytest
 httpx
 aiomysql
+feedparser
+aiohttp

@@ -170,4 +170,3 @@ cython_debug/
 # AI Trading Platform Specific
 models/
 logs/
-data/

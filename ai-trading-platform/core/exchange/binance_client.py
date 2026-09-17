@@ -168,3 +168,29 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             logger.error(f"User Data Stream disconnected: {e}")
         finally:
             self.ws_connection = None
+
+    async def subscribe_market_data(self, symbols: List[str], streams: List[str], callback):
+        """Connects to public market data multiplex stream."""
+        if not self.session:
+            await self.connect()
+            
+        stream_names = []
+        for sym in symbols:
+            for s in streams:
+                stream_names.append(f"{sym.lower()}@{s}")
+                
+        streams_query = "/".join(stream_names)
+        ws_url = f"{self.ws_base_url}/stream?streams={streams_query}"
+        
+        logger.info(f"Connecting to Market Data Stream: {ws_url[:100]}...")
+        try:
+            async with self.session.ws_connect(ws_url) as ws:
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(msg.data)
+                        await callback(data)
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+        except Exception as e:
+            logger.error(f"Market Data Stream disconnected: {e}")
+

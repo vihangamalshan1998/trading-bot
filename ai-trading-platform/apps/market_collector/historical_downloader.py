@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from core.exchange.binance_client import BinanceFuturesAdapter
 from apps.feature_engine.engine import FeatureEngine
 from core.database.session import SessionLocal
-from core.database.models.experience import Experience
+from core.database.models.ai import Experience
 from core.logging.logger import logger
 from core.config.settings import settings
 
@@ -86,16 +86,17 @@ class HistoricalDownloader:
                         
                     # Create a dummy experience for historical state (Action = HOLD)
                     # We can use offline RL to learn from historical price movements
+                    import uuid
                     exp = Experience(
+                        experience_id=str(uuid.uuid4()),
                         timestamp=row["close_time"] / 1000.0,
                         symbol=symbol,
                         market_state=market_state.tolist(),
                         portfolio_state=[10000.0, 10000.0], # Dummy
-                        position_state=[0.0, 0.0], # Dummy
-                        action_type="HOLD",
+                        position_before=0.0, # Dummy
+                        position_after=0.0, # Dummy
+                        action="HOLD",
                         confidence=0.0,
-                        requested_size=0.0,
-                        approved_size=0.0,
                         reward=0.0, # We'd need a labeler here to calculate forward returns
                         model_version="historical"
                     )

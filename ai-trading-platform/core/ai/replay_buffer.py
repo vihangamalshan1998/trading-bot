@@ -4,7 +4,7 @@ import numpy as np
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 from typing import List, Dict, Any, Tuple
-from core.database.models.experience import Experience
+from core.database.models.ai import Experience
 from core.config.settings import settings
 
 class ReplayBuffer:

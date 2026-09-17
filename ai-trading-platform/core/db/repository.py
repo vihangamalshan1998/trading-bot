@@ -3,8 +3,8 @@ import uuid
 from typing import List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from core.db.database import AsyncSessionLocal, async_session_maker
-from data.models import MarketFeature
-from core.db.models import Experience
+from core.database.models.market import MarketFeature
+from core.database.models.experience import Experience
 from core.logging.logger import logger
 
 class MarketFeatureRepository:

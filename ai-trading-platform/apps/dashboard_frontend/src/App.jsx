@@ -231,7 +231,13 @@ function App() {
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" vertical={false} />
                       <XAxis dataKey="name" stroke="#a0a0a0" tick={{fill: '#a0a0a0'}} />
-                      <YAxis stroke="#a0a0a0" domain={['auto', 'auto']} tick={{fill: '#a0a0a0'}} />
+                      <YAxis 
+                        stroke="#a0a0a0" 
+                        domain={['auto', 'auto']} 
+                        tick={{fill: '#a0a0a0'}} 
+                        width={80}
+                        tickFormatter={(value) => new Intl.NumberFormat('en-US', { notation: "compact", compactDisplay: "short" }).format(value)}
+                      />
                       <Tooltip 
                         contentStyle={{ backgroundColor: 'rgba(20,20,25,0.9)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', backdropFilter: 'blur(10px)' }} 
                         itemStyle={{ color: '#fff' }}

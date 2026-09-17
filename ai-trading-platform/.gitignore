@@ -168,5 +168,5 @@ cython_debug/
 .DS_Store
 
 # AI Trading Platform Specific
-models/
-logs/
+/models/
+/logs/

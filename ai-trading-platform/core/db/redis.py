@@ -39,6 +39,7 @@ class RedisManager:
         try:
             payload = json.dumps(data)
             await self.redis.set(key, payload, ex=ttl_seconds)
+            await self.redis.publish(key, payload)
         except Exception as e:
             logger.error("Failed to set state in Redis", extra={"key": key, "error": str(e)})
 

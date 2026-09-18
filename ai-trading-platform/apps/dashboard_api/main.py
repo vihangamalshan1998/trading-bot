@@ -80,14 +80,29 @@ async def get_system_state():
     portfolio_raw = await redis_manager.redis.get("dashboard:portfolio")
     portfolio = json.loads(portfolio_raw) if portfolio_raw else {"equity": 10000.0, "positions": []}
     
-    # Get market states
+    # Get market states and AI states
     market_states = {}
     keys = await redis_manager.redis.keys("market:state:*")
     for key in keys:
         symbol = key.decode("utf-8").split(":")[-1] if isinstance(key, bytes) else key.split(":")[-1]
         state_raw = await redis_manager.redis.get(key)
+        
+        # Fetch corresponding AI state
+        ai_state_raw = await redis_manager.redis.get(f"ai:state:{symbol}")
+        
         if state_raw:
-            market_states[symbol] = json.loads(state_raw)
+            parsed_state = json.loads(state_raw)
+            if ai_state_raw:
+                ai_data = json.loads(ai_state_raw)
+                parsed_state["ai_confidence"] = ai_data.get("confidence", 0.0)
+                parsed_state["ai_target_size"] = ai_data.get("target_size", 0.0)
+                parsed_state["ai_predicted_side"] = ai_data.get("predicted_side", "WAITING")
+            else:
+                parsed_state["ai_confidence"] = 0.0
+                parsed_state["ai_target_size"] = 0.0
+                parsed_state["ai_predicted_side"] = "WAITING"
+                
+            market_states[symbol] = parsed_state
             
     return {
         "equity": portfolio.get("equity", 0.0),

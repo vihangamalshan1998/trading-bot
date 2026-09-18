@@ -187,6 +187,29 @@ function App() {
                           <span className="value">{state.imbalance ? state.imbalance.toFixed(2) : '0.00'}</span>
                         </div>
                       </div>
+                      
+                      <div className="ai-brain-section">
+                        <div className="ai-brain-header">
+                          <span>AI Decision</span>
+                          <span className={`ai-decision ${state.ai_predicted_side === 'LONG' ? 'profit' : state.ai_predicted_side === 'SHORT' ? 'loss' : 'neutral'}`}>
+                            {state.ai_predicted_side || 'WAITING'}
+                          </span>
+                        </div>
+                        <div className="ai-brain-metric">
+                          <span>Confidence:</span>
+                          <div className="progress-bar-container">
+                            <div className="progress-bar" style={{ width: `${(state.ai_confidence || 0) * 100}%` }}></div>
+                          </div>
+                          <span>{((state.ai_confidence || 0) * 100).toFixed(1)}%</span>
+                        </div>
+                        <div className="ai-brain-metric">
+                          <span>Target Alloc:</span>
+                          <div className="progress-bar-container">
+                            <div className="progress-bar alloc" style={{ width: `${(state.ai_target_size || 0) * 100}%` }}></div>
+                          </div>
+                          <span>{((state.ai_target_size || 0) * 100).toFixed(1)}%</span>
+                        </div>
+                      </div>
                     </div>
                   ))
                 )}

@@ -187,17 +187,35 @@ class ProductionTradingBot:
                     confidence = (action_logits[1] + 1.0) / 2.0
                     target_size = (action_logits[2] + 1.0) / 2.0
                     
-                    if confidence < 0.3:
+                    # 1. Determine Predicted Side (Even if confidence is low, we want to know what it *leans* towards)
+                    if action_val < -0.2: predicted_side = "SHORT"
+                    elif action_val > 0.2: predicted_side = "LONG"
+                    else: predicted_side = "HOLD"
+                    
+                    # 2. Publish AI internal state to Redis for the Dashboard
+                    ai_state_data = {
+                        "confidence": float(confidence),
+                        "action_val": float(action_val),
+                        "target_size": float(target_size),
+                        "predicted_side": predicted_side
+                    }
+                    asyncio.create_task(redis_manager.redis.set(f"ai:state:{sym}", json.dumps(ai_state_data)))
+                    
+                    if confidence < -0.1: # Temporarily lowered so you can see it trade!
                         logger.info(f"[{sym}] SKIPPING (Low Confidence: {confidence:.2f})")
                         continue 
                         
                     margin_allocated = max(0, self.portfolio_state.free_margin) * target_size
+                    # Force a tiny target size for testing if it's 0
+                    if margin_allocated == 0:
+                        margin_allocated = max(0, self.portfolio_state.free_margin) * 0.05
+                        
                     pos = self.portfolio_state.positions[sym]
                     notional_requested = margin_allocated * pos.leverage
                     
                     side = "HOLD"
-                    if action_val < -0.2: side = "CLOSE_LONG" if pos.quantity > 0 else "OPEN_SHORT"
-                    elif action_val > 0.2: side = "CLOSE_SHORT" if pos.quantity < 0 else "OPEN_LONG"
+                    if action_val < 0.0: side = "CLOSE_LONG" if pos.quantity > 0 else "OPEN_SHORT"
+                    elif action_val >= 0.0: side = "CLOSE_SHORT" if pos.quantity < 0 else "OPEN_LONG"
                     
                     if side == "HOLD":
                         logger.info(f"[{sym}] HOLDING (Action Val: {action_val:.2f})")

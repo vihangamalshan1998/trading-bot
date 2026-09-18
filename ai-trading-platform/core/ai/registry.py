@@ -12,7 +12,11 @@ class ModelRegistry:
         self.last_loaded_mtime = 0.0
 
     def validate_dimension(self, model, num_symbols: int):
-        expected_dim = get_expected_observation_dimension(num_symbols)
+        if model.__class__.__name__ == "SingleSymbolActorCritic":
+            expected_dim = 28
+        else:
+            expected_dim = get_expected_observation_dimension(num_symbols)
+            
         input_layer = None
 
         if hasattr(model, "shared_fc1"):

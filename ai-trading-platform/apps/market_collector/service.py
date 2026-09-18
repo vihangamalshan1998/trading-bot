@@ -85,7 +85,7 @@ class MarketCollectorService:
                 features["bid"] = features["best_bid"] or features["mid_price"]
                 features["ask"] = features["best_ask"] or features["mid_price"]
                 features["last_price"] = features["mid_price"]
-                features["spread"] = (features["ask"] - features["bid"])
+                features["spread"] = max(0.0, features["ask"] - features["bid"])
                 features["order_book_imbalance"] = features["imbalance"]
                 features["volume"] = 0.0
                 features["vwap"] = features["vwap_recent"] or features["mid_price"]

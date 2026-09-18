@@ -7,6 +7,7 @@ from core.config.settings import settings
 from core.exchange.binance_client import BinanceFuturesAdapter
 from apps.orderbook.builder import OrderBookBuilder
 from apps.feature_engine.calculators import FeatureEngine
+from apps.feature_engine.engine import FeatureEngine as AIEngine
 from core.db.redis import redis_manager
 from core.db.repository import MarketFeatureRepository
 from core.exchange.symbol_registry import registry, SymbolConfig
@@ -30,6 +31,7 @@ class MarketCollectorService:
         # State per symbol
         self.order_books: Dict[str, OrderBookBuilder] = {sym: OrderBookBuilder(sym) for sym in self.active_symbols}
         self.feature_engines: Dict[str, FeatureEngine] = {sym: FeatureEngine() for sym in self.active_symbols}
+        self.ai_engines: Dict[str, AIEngine] = {sym: AIEngine(sym) for sym in self.active_symbols}
         self._update_counters: Dict[str, int] = {sym: 0 for sym in self.active_symbols}
         
         self.repository = MarketFeatureRepository(batch_size=50)
@@ -57,10 +59,39 @@ class MarketCollectorService:
             
             # Periodically extract features and push to Redis and MySQL
             if self._update_counters[symbol] % 10 == 0:
+                # Dashboard UI features (calculators.py)
                 features = self.feature_engines[symbol].extract_features(self.order_books[symbol])
-                
                 features["best_bid"] = self.order_books[symbol].get_best_bid()
                 features["best_ask"] = self.order_books[symbol].get_best_ask()
+                
+                # AI Model features (engine.py)
+                # We need to simulate the 'tick' for engine.py
+                tick_data = {
+                    "mid_price": features["mid_price"],
+                    "best_bid": features["best_bid"],
+                    "best_ask": features["best_ask"],
+                    "bid_qty": float(self.order_books[symbol].bids.get(features["best_bid"], 0)),
+                    "ask_qty": float(self.order_books[symbol].asks.get(features["best_ask"], 0)),
+                    "volume": 0.0, # Filled by aggTrade
+                    "buy_volume": 0.0,
+                    "trade_count": 0.0
+                }
+                self.ai_engines[symbol].add_tick(tick_data)
+                ai_features_array = self.ai_engines[symbol].compute_features().tolist()
+                
+                # Fill missing Pydantic fields for MarketState
+                features["symbol"] = symbol
+                features["timestamp"] = time.time()
+                features["bid"] = features["best_bid"] or features["mid_price"]
+                features["ask"] = features["best_ask"] or features["mid_price"]
+                features["last_price"] = features["mid_price"]
+                features["spread"] = (features["ask"] - features["bid"])
+                features["order_book_imbalance"] = features["imbalance"]
+                features["volume"] = 0.0
+                features["vwap"] = features["vwap_recent"] or features["mid_price"]
+                features["volatility"] = 0.0
+                features["funding_rate"] = 0.0
+                features["features"] = ai_features_array
                 
                 # Push to Redis asynchronously
                 state_key = f"market:state:{symbol}"

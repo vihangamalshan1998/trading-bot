@@ -55,6 +55,26 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
+  const [tradeHistory, setTradeHistory] = useState([]);
+
+  useEffect(() => {
+    if (activeTab !== 'history') return;
+    
+    const fetchHistory = async () => {
+      try {
+        const res = await fetch("/api/history");
+        const json = await res.json();
+        setTradeHistory(json.history || []);
+      } catch (err) {
+        console.error("Failed to fetch history:", err);
+      }
+    };
+    
+    fetchHistory();
+    const interval = setInterval(fetchHistory, 5000);
+    return () => clearInterval(interval);
+  }, [activeTab]);
+
   // Fetch Training Metrics from API
   useEffect(() => {
     if (activeTab !== 'training') return;
@@ -102,6 +122,12 @@ function App() {
           >
             Brain & Training
           </button>
+          <button 
+            className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`}
+            onClick={() => setActiveTab('history')}
+          >
+            Positions & History
+          </button>
         </div>
         
         <div className="equity-display">
@@ -113,7 +139,7 @@ function App() {
       </header>
 
       <main className="dashboard-grid">
-        {activeTab === 'live' ? (
+        {activeTab === 'live' && (
           <>
             <section className="glass-panel stat-panel">
               <h3>Macro Sentiment & News</h3>
@@ -216,7 +242,92 @@ function App() {
               </div>
             </section>
           </>
-        ) : (
+        )}
+        
+        {activeTab === 'history' && (
+          <section className="glass-panel full-width">
+            <h3>Detailed Open Positions</h3>
+            <div className="table-responsive">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Size</th>
+                    <th>Entry Price</th>
+                    <th>Mark Price</th>
+                    <th>Liq Price</th>
+                    <th>Leverage</th>
+                    <th>PnL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.positions.length === 0 ? (
+                    <tr>
+                      <td colSpan="8" className="empty-text">No active positions.</td>
+                    </tr>
+                  ) : (
+                    data.positions.map((pos, idx) => (
+                      <tr key={idx}>
+                        <td className="symbol">{pos.symbol}</td>
+                        <td className={pos.side.toLowerCase()}>{pos.side}</td>
+                        <td>{pos.quantity}</td>
+                        <td>${pos.entryPrice ? pos.entryPrice.toFixed(4) : '0.0000'}</td>
+                        <td>${pos.markPrice ? pos.markPrice.toFixed(4) : '0.0000'}</td>
+                        <td>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : '0.0000'}</td>
+                        <td>{pos.leverage}x</td>
+                        <td className={`pnl ${pos.pnl >= 0 ? 'profit' : 'loss'}`}>
+                          ${pos.pnl.toFixed(2)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <h3 style={{ marginTop: '2rem' }}>AI Trade History (Last 100)</h3>
+            <div className="table-responsive">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Symbol</th>
+                    <th>Action</th>
+                    <th>Size</th>
+                    <th>Confidence</th>
+                    <th>Order ID</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tradeHistory.length === 0 ? (
+                    <tr>
+                      <td colSpan="6" className="empty-text">No trade history found.</td>
+                    </tr>
+                  ) : (
+                    tradeHistory.map((trade, idx) => (
+                      <tr key={idx}>
+                        <td>{new Date(trade.timestamp * 1000).toLocaleString()}</td>
+                        <td className="symbol">{trade.symbol}</td>
+                        <td className={trade.side.includes("LONG") ? "long" : "short"}>{trade.side}</td>
+                        <td>{trade.quantity}</td>
+                        <td>
+                           <div className="progress-bar-container" style={{ width: '80px', display: 'inline-block', marginRight: '10px' }}>
+                             <div className="progress-bar" style={{ width: `${(trade.confidence || 0) * 100}%` }}></div>
+                           </div>
+                           {(trade.confidence * 100).toFixed(1)}%
+                        </td>
+                        <td>{trade.order_id || 'N/A'}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'training' && (
           <>
             <section className="glass-panel stat-panel full-width">
               <h3>AI Brain Status</h3>

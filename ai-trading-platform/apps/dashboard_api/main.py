@@ -110,5 +110,15 @@ async def get_system_state():
         "market_states": market_states
     }
 
+@app.get("/api/history")
+async def get_trade_history():
+    """Returns the latest 100 AI trades."""
+    if not redis_manager.redis:
+        return {"history": []}
+    
+    raw_history = await redis_manager.redis.lrange("dashboard:trade_history", 0, -1)
+    history = [json.loads(item) for item in raw_history]
+    return {"history": history}
+
 if __name__ == "__main__":
     uvicorn.run("apps.dashboard_api.main:app", host="0.0.0.0", port=8000, reload=True)

@@ -142,7 +142,12 @@ class ProductionTradingBot:
                             "symbol": p.get("symbol"),
                             "side": "LONG" if amt > 0 else "SHORT",
                             "quantity": abs(amt),
-                            "pnl": pnl
+                            "pnl": pnl,
+                            "entryPrice": float(p.get("entryPrice", 0)),
+                            "markPrice": float(p.get("markPrice", 0)),
+                            "leverage": int(p.get("leverage", 1)),
+                            "liquidationPrice": float(p.get("liquidationPrice", 0)),
+                            "marginType": p.get("marginType", "cross")
                         })
                     
                     dashboard_data = {
@@ -249,6 +254,19 @@ class ProductionTradingBot:
                                     
                                     order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id)
                                     logger.info(f"[{sym}] ORDER SUCCESS: {order_res.get('orderId')}")
+                                    
+                                    # Log Trade History for Dashboard
+                                    trade_record = {
+                                        "timestamp": time.time(),
+                                        "symbol": sym,
+                                        "side": side,
+                                        "quantity": float(qty_str),
+                                        "price": market.mid_price,
+                                        "confidence": float(confidence),
+                                        "order_id": order_res.get('orderId')
+                                    }
+                                    asyncio.create_task(redis_manager.redis.lpush("dashboard:trade_history", json.dumps(trade_record)))
+                                    asyncio.create_task(redis_manager.redis.ltrim("dashboard:trade_history", 0, 99))
                                     
                                     # Record Experience
                                     exp_data = {

@@ -294,6 +294,12 @@ class ProductionTradingBot:
                                 
                                 # Phase 9: Execution and Experience Broadcasting
                                 try:
+                                    # Set leverage before executing
+                                    try:
+                                        await self.binance.set_leverage(sym, settings.max_leverage)
+                                    except Exception as e:
+                                        logger.warning(f"[{sym}] Could not set leverage (might already be set): {e}")
+
                                     # Execute on Binance
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
                                     binance_side = "BUY" if side in ["OPEN_LONG", "CLOSE_SHORT"] else "SELL"

@@ -134,10 +134,10 @@ class ProductionTradingBot:
             try:
                 if self.trading_enabled and not self.dry_run:
                     # Update live equity
-                    balance = await self.binance.get_account_balance()
-                    self.portfolio_state.equity = balance
-                    self.portfolio_state.wallet_balance = balance
-                    self.portfolio_state.free_margin = balance
+                    usdt = await self.binance.get_account_details()
+                    self.portfolio_state.wallet_balance = float(usdt.get("balance", 0.0))
+                    self.portfolio_state.equity = float(usdt.get("crossWalletBalance", self.portfolio_state.wallet_balance)) + float(usdt.get("crossUnPnl", 0.0))
+                    self.portfolio_state.free_margin = float(usdt.get("availableBalance", self.portfolio_state.wallet_balance))
                     
                     # Update live positions
                     live_positions = await self.binance.get_positions()
@@ -393,12 +393,13 @@ class ProductionTradingBot:
         
         # Fetch actual account balance to allow RiskManager to approve trades
         try:
-            balance = await self.binance.get_account_balance()
-            if balance == 0.0 and self.dry_run:
-                balance = 1000.0 # Mock balance for dry run
-            self.portfolio_state.wallet_balance = balance
-            self.portfolio_state.equity = balance
-            self.portfolio_state.free_margin = balance
+            usdt = await self.binance.get_account_details()
+            if not usdt and self.dry_run:
+                usdt = {"balance": 1000.0, "crossWalletBalance": 1000.0, "crossUnPnl": 0.0, "availableBalance": 1000.0}
+            self.portfolio_state.wallet_balance = float(usdt.get("balance", 0.0))
+            self.portfolio_state.equity = float(usdt.get("crossWalletBalance", self.portfolio_state.wallet_balance)) + float(usdt.get("crossUnPnl", 0.0))
+            self.portfolio_state.free_margin = float(usdt.get("availableBalance", self.portfolio_state.wallet_balance))
+            balance = self.portfolio_state.wallet_balance
             logger.info(f"Initialized Portfolio with Balance: {balance} USDT")
         except Exception as e:
             logger.error(f"Failed to fetch account balance: {e}")

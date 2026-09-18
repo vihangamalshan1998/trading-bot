@@ -84,13 +84,13 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         return await self._request("GET", "/fapi/v1/ticker/24hr")
         
     # Private Endpoints
-    async def get_account_balance(self) -> float:
-        """Returns total wallet balance in USDT."""
+    async def get_account_details(self) -> Dict[str, Any]:
+        """Returns the full USDT asset dictionary (including availableBalance and crossUnPnl)."""
         data = await self._request("GET", "/fapi/v2/balance", signed=True)
         for asset in data:
             if asset["asset"] == "USDT":
-                return float(asset["balance"])
-        return 0.0
+                return asset
+        return {"balance": 0.0, "crossWalletBalance": 0.0, "crossUnPnl": 0.0, "availableBalance": 0.0}
         
     async def get_positions(self) -> List[Dict[str, Any]]:
         """Returns all open positions."""

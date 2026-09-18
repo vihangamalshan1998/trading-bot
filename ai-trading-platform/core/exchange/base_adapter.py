@@ -18,7 +18,7 @@ class ExchangeAdapter(ABC):
         pass
         
     @abstractmethod
-    async def get_account_balance(self) -> float:
+    async def get_account_details(self) -> Dict[str, Any]:
         pass
         
     @abstractmethod

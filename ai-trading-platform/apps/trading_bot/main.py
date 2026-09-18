@@ -206,6 +206,10 @@ class ProductionTradingBot:
                         
                     market = self.market_states[sym]
                     
+                    # Update portfolio state with current price for RiskManager correlated exposure checks
+                    if sym in self.portfolio_state.positions:
+                        self.portfolio_state.positions[sym].current_price = market.mid_price
+                    
                     action_val = action_logits[0]
                     confidence = (action_logits[1] + 1.0) / 2.0
                     target_size = (action_logits[2] + 1.0) / 2.0

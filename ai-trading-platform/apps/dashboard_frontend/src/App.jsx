@@ -291,18 +291,21 @@ function App() {
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Time</th>
-                    <th>Symbol</th>
-                    <th>Action</th>
-                    <th>Size</th>
-                    <th>Confidence</th>
-                    <th>Order ID</th>
+                    <th>TIME</th>
+                    <th>SYMBOL</th>
+                    <th>ACTION</th>
+                    <th>SIZE</th>
+                    <th>ENTRY PRICE</th>
+                    <th>CLOSE PRICE</th>
+                    <th>PNL (ROI)</th>
+                    <th>CONFIDENCE</th>
+                    <th>ORDER ID</th>
                   </tr>
                 </thead>
                 <tbody>
                   {tradeHistory.length === 0 ? (
                     <tr>
-                      <td colSpan="6" className="empty-text">No trade history found.</td>
+                      <td colSpan="9" className="empty-text">No trade history found.</td>
                     </tr>
                   ) : (
                     tradeHistory.map((trade, idx) => (
@@ -311,6 +314,21 @@ function App() {
                         <td className="symbol">{trade.symbol}</td>
                         <td className={trade.side.includes("LONG") ? "long" : "short"}>{trade.side}</td>
                         <td>{trade.quantity} {trade.symbol.replace('USDT', '')}</td>
+                        <td>
+                          {trade.entry_price 
+                            ? `$${trade.entry_price.toFixed(4)}` 
+                            : (trade.side.includes("OPEN") ? `$${trade.price.toFixed(4)}` : '-')}
+                        </td>
+                        <td>{trade.side.includes("CLOSE") ? `$${trade.price.toFixed(4)}` : '-'}</td>
+                        <td>
+                          {trade.realized_pnl !== undefined ? (
+                            <span className={trade.realized_pnl > 0 ? "profit" : "loss"}>
+                              ${trade.realized_pnl.toFixed(2)} ({trade.roi_pct > 0 ? '+' : ''}{trade.roi_pct.toFixed(2)}%)
+                            </span>
+                          ) : (
+                            '-'
+                          )}
+                        </td>
                         <td>
                            <div className="progress-bar-container" style={{ width: '80px', display: 'inline-block', marginRight: '10px' }}>
                              <div className="progress-bar" style={{ width: `${(trade.confidence || 0) * 100}%` }}></div>

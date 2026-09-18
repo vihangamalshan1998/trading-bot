@@ -299,6 +299,10 @@ class ProductionTradingBot:
                                     order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id)
                                     logger.info(f"[{sym}] ORDER SUCCESS: {order_res.get('orderId')}")
                                     
+                                    # Capture entry price before modifying position
+                                    entry_px = self.portfolio_state.positions[sym].entry_price if sym in self.portfolio_state.positions else 0.0
+                                    pos_leverage = self.portfolio_state.positions[sym].leverage if sym in self.portfolio_state.positions else 10
+                                    
                                     # Update local position state immediately to prevent over-buying before the next sync
                                     if "OPEN_LONG" in side:
                                         self.portfolio_state.positions[sym].quantity += float(qty_str)
@@ -315,6 +319,22 @@ class ProductionTradingBot:
                                         "confidence": float(confidence),
                                         "order_id": order_res.get('orderId')
                                     }
+                                    
+                                    # Add Analytics for Closures
+                                    if "CLOSE" in side and entry_px > 0:
+                                        close_px = market.mid_price
+                                        qty_closed = float(qty_str)
+                                        if side == "CLOSE_LONG":
+                                            pnl = (close_px - entry_px) * qty_closed
+                                            roi = ((close_px - entry_px) / entry_px) * 100 * pos_leverage
+                                        else:
+                                            pnl = (entry_px - close_px) * qty_closed
+                                            roi = ((entry_px - close_px) / entry_px) * 100 * pos_leverage
+                                            
+                                        trade_record["entry_price"] = entry_px
+                                        trade_record["realized_pnl"] = pnl
+                                        trade_record["roi_pct"] = roi
+                                        
                                     asyncio.create_task(redis_manager.redis.lpush("dashboard:trade_history", json.dumps(trade_record)))
                                     asyncio.create_task(redis_manager.redis.ltrim("dashboard:trade_history", 0, 99))
                                     

@@ -230,7 +230,18 @@ class ProductionTradingBot:
                         logger.info(f"[{sym}] HOLDING (Action Val: {action_val:.2f})")
                     
                     if side != "HOLD":
-                        qty_raw = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack
+                        target_qty = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack
+                        
+                        # Only trade the difference between target and current position
+                        if "OPEN" in side:
+                            qty_raw = max(0.0, target_qty - abs(pos.quantity))
+                        else:
+                            # For CLOSE actions, we close the entire existing quantity (or up to target)
+                            qty_raw = abs(pos.quantity)
+                            
+                        if qty_raw <= 0.0001:
+                            logger.info(f"[{sym}] Target quantity reached. No additional {side} needed.")
+                            continue
                         
                         request = OrderRequest(
                             symbol=sym, action_type=side, confidence=float(confidence),

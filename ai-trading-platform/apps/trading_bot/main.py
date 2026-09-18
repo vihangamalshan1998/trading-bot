@@ -202,7 +202,7 @@ class ProductionTradingBot:
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
                                     binance_side = "BUY" if "LONG" in side else "SELL"
                                     
-                                    order_res = await self.binance.create_order(sym, binance_side, decision.adjusted_quantity, client_order_id)
+                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id)
                                     logger.info(f"[{sym}] ORDER SUCCESS: {order_res.get('orderId')}")
                                     
                                     # Record Experience
@@ -238,6 +238,23 @@ class ProductionTradingBot:
     async def start(self):
         self.running = True
         await registry.initialize_from_exchange(self.binance)
+        
+        # Fetch actual account balance to allow RiskManager to approve trades
+        try:
+            balance = await self.binance.get_account_balance()
+            if balance == 0.0 and self.dry_run:
+                balance = 1000.0 # Mock balance for dry run
+            self.portfolio_state.wallet_balance = balance
+            self.portfolio_state.equity = balance
+            self.portfolio_state.free_margin = balance
+            logger.info(f"Initialized Portfolio with Balance: {balance} USDT")
+        except Exception as e:
+            logger.error(f"Failed to fetch account balance: {e}")
+            if self.dry_run:
+                self.portfolio_state.wallet_balance = 1000.0
+                self.portfolio_state.equity = 1000.0
+                self.portfolio_state.free_margin = 1000.0
+                logger.info("Using mock 1000 USDT balance for Dry Run.")
         
         tasks = [
             asyncio.create_task(self.listen_macro()),

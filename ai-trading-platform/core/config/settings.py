@@ -42,10 +42,10 @@ class Settings(BaseSettings):
     # Phase 1 RISK LIMITS
     # ============================================================
     max_position_size: float = Field(default=9999999.0, gt=0)
-    max_symbol_exposure_pct: float = Field(default=0.30, gt=0, le=1)
-    max_portfolio_exposure_pct: float = Field(default=0.70, gt=0, le=1)
+    max_symbol_exposure_pct: float = Field(default=0.20, gt=0, le=1)
+    max_portfolio_exposure_pct: float = Field(default=0.50, gt=0, le=1)
 
-    max_leverage: int = Field(default=50, gt=0)
+    max_leverage: int = Field(default=20, gt=0)
     max_order_size: float = Field(default=9999999.0, gt=0)
     max_open_positions: int = Field(default=5, gt=0)
 

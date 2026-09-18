@@ -133,6 +133,13 @@ class ProductionTradingBot:
         while self.running:
             try:
                 if self.trading_enabled and not self.dry_run:
+                    # Update live equity
+                    balance = await self.binance.get_account_balance()
+                    self.portfolio_state.equity = balance
+                    self.portfolio_state.wallet_balance = balance
+                    self.portfolio_state.free_margin = balance
+                    
+                    # Update live positions
                     live_positions = await self.binance.get_positions()
                     formatted_positions = []
                     for p in live_positions:

@@ -271,7 +271,7 @@ function App() {
                       <tr key={idx}>
                         <td className="symbol">{pos.symbol}</td>
                         <td className={pos.side.toLowerCase()}>{pos.side}</td>
-                        <td>{pos.quantity}</td>
+                        <td>{pos.quantity} {pos.symbol.replace('USDT', '')}</td>
                         <td>${pos.entryPrice ? pos.entryPrice.toFixed(4) : '0.0000'}</td>
                         <td>${pos.markPrice ? pos.markPrice.toFixed(4) : '0.0000'}</td>
                         <td>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : '0.0000'}</td>
@@ -310,7 +310,7 @@ function App() {
                         <td>{new Date(trade.timestamp * 1000).toLocaleString()}</td>
                         <td className="symbol">{trade.symbol}</td>
                         <td className={trade.side.includes("LONG") ? "long" : "short"}>{trade.side}</td>
-                        <td>{trade.quantity}</td>
+                        <td>{trade.quantity} {trade.symbol.replace('USDT', '')}</td>
                         <td>
                            <div className="progress-bar-container" style={{ width: '80px', display: 'inline-block', marginRight: '10px' }}>
                              <div className="progress-bar" style={{ width: `${(trade.confidence || 0) * 100}%` }}></div>

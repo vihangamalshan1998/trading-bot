@@ -146,6 +146,7 @@ class SingleSymbolActorCritic(nn.Module):
     def __init__(self, input_dim: int = 28, hidden_dim: int = 128):
         super().__init__()
         
+        self.shared_norm = nn.LayerNorm(input_dim)
         self.shared_fc1 = nn.Linear(input_dim, hidden_dim)
         self.shared_fc2 = nn.Linear(hidden_dim, hidden_dim)
         
@@ -156,6 +157,7 @@ class SingleSymbolActorCritic(nn.Module):
         self.critic_fc = nn.Linear(hidden_dim, 1)
         
     def forward(self, x: torch.Tensor):
+        x = self.shared_norm(x)
         x = F.relu(self.shared_fc1(x))
         x = F.relu(self.shared_fc2(x))
         

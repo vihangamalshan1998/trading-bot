@@ -154,6 +154,8 @@ class ProductionTradingBot:
                         # Sync back to internal portfolio state
                         if sym in self.portfolio_state.positions:
                             self.portfolio_state.positions[sym].quantity = amt
+                            self.portfolio_state.positions[sym].entry_price = float(p.get("entryPrice", 0))
+                            self.portfolio_state.positions[sym].leverage = int(p.get("leverage", 10))
                             
                         pnl = float(p.get("unRealizedProfit", 0))
                         formatted_positions.append({

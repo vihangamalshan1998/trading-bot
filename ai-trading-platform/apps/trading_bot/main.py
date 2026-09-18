@@ -142,11 +142,22 @@ class ProductionTradingBot:
                     # Update live positions
                     live_positions = await self.binance.get_positions()
                     formatted_positions = []
+                    # Reset local quantities before parsing
+                    for s in self.symbols:
+                        if s in self.portfolio_state.positions:
+                            self.portfolio_state.positions[s].quantity = 0.0
+                            
                     for p in live_positions:
+                        sym = p.get("symbol")
                         amt = float(p.get("positionAmt", 0))
+                        
+                        # Sync back to internal portfolio state
+                        if sym in self.portfolio_state.positions:
+                            self.portfolio_state.positions[sym].quantity = amt
+                            
                         pnl = float(p.get("unRealizedProfit", 0))
                         formatted_positions.append({
-                            "symbol": p.get("symbol"),
+                            "symbol": sym,
                             "side": "LONG" if amt > 0 else "SHORT",
                             "quantity": abs(amt),
                             "pnl": pnl,
@@ -272,6 +283,12 @@ class ProductionTradingBot:
                                     
                                     order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id)
                                     logger.info(f"[{sym}] ORDER SUCCESS: {order_res.get('orderId')}")
+                                    
+                                    # Update local position state immediately to prevent over-buying before the next sync
+                                    if "OPEN_LONG" in side:
+                                        self.portfolio_state.positions[sym].quantity += float(qty_str)
+                                    elif "CLOSE_LONG" in side:
+                                        self.portfolio_state.positions[sym].quantity -= float(qty_str)
                                     
                                     # Log Trade History for Dashboard
                                     trade_record = {

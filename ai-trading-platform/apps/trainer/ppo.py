@@ -138,7 +138,9 @@ async def run_training_loop():
             await asyncio.sleep(1.0) # Prevent 100% CPU usage
             step += 1
             if step % 100 == 0:
-                logger.info(f"Completed {step} training steps. Saving model...")
+                logger.info(f"Completed {step} training steps. Refreshing cache and saving model...")
+                # Refresh cache from DB to prevent Mode Collapse
+                trainer.buffer.load_cache_from_db(limit=1000)
                 try:
                     registry.save_model(model)
                     

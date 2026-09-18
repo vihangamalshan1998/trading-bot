@@ -113,6 +113,9 @@ We use `pm2` so the bots never stop running, even if the server reboots or you c
 # Start the AI Training Bot
 pm2 start venv/bin/python --name "ai-trainer" -- -m apps.trainer.ppo
 
+# Start the Experience Storage Background Worker
+pm2 start venv/bin/python --name "experience-storage" -- -m apps.experience.storage
+
 # Start the Market Data Collector
 pm2 start venv/bin/python --name "market-collector" -- -m apps.market_collector.main
 

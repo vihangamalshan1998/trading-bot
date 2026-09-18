@@ -312,10 +312,21 @@ class ProductionTradingBot:
                                     pos_leverage = self.portfolio_state.positions[sym].leverage if sym in self.portfolio_state.positions else 10
                                     
                                     # Update local position state immediately to prevent over-buying before the next sync
+                                    notional_cost = float(qty_str) * market.mid_price
+                                    margin_used = notional_cost / settings.max_leverage
+
                                     if "OPEN_LONG" in side:
                                         self.portfolio_state.positions[sym].quantity += float(qty_str)
+                                        self.portfolio_state.free_margin -= margin_used
                                     elif "CLOSE_LONG" in side:
                                         self.portfolio_state.positions[sym].quantity -= float(qty_str)
+                                        self.portfolio_state.free_margin += margin_used
+                                    elif "OPEN_SHORT" in side:
+                                        self.portfolio_state.positions[sym].quantity -= float(qty_str)
+                                        self.portfolio_state.free_margin -= margin_used
+                                    elif "CLOSE_SHORT" in side:
+                                        self.portfolio_state.positions[sym].quantity += float(qty_str)
+                                        self.portfolio_state.free_margin += margin_used
                                     
                                     # Log Trade History for Dashboard
                                     trade_record = {

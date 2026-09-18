@@ -162,6 +162,7 @@ class ProductionTradingBot:
                     target_size = (action_logits[2] + 1.0) / 2.0
                     
                     if confidence < 0.3:
+                        logger.info(f"[{sym}] SKIPPING (Low Confidence: {confidence:.2f})")
                         continue 
                         
                     margin_allocated = max(0, self.portfolio_state.free_margin) * target_size
@@ -171,6 +172,9 @@ class ProductionTradingBot:
                     side = "HOLD"
                     if action_val < -0.2: side = "CLOSE_LONG" if pos.quantity > 0 else "OPEN_SHORT"
                     elif action_val > 0.2: side = "CLOSE_SHORT" if pos.quantity < 0 else "OPEN_LONG"
+                    
+                    if side == "HOLD":
+                        logger.info(f"[{sym}] HOLDING (Action Val: {action_val:.2f})")
                     
                     if side != "HOLD":
                         qty_raw = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack

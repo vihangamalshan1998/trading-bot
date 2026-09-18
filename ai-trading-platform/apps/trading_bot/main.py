@@ -268,7 +268,18 @@ class ProductionTradingBot:
                         decision = self.risk_manager.evaluate(request, self.portfolio_state, market)
                         
                         if decision.approved and decision.adjusted_quantity > 0:
-                            qty_str = registry.get_symbol(sym).format_quantity(decision.adjusted_quantity)
+                            sym_config = registry.get_symbol(sym)
+                            qty_str = sym_config.format_quantity(decision.adjusted_quantity)
+                            
+                            if float(qty_str) <= 0:
+                                logger.info(f"[{sym}] Formatted quantity is zero. Skipping execution.")
+                                continue
+                                
+                            notional_val = float(qty_str) * market.mid_price
+                            if notional_val < sym_config.min_notional:
+                                logger.info(f"[{sym}] Notional {notional_val:.2f} < Min Notional {sym_config.min_notional}. Skipping.")
+                                continue
+                                
                             logger.info(f"[{sym}] EXECUTING: {side} {qty_str} (Confidence: {confidence:.2f})")
                             
                             if (self.trading_enabled and 

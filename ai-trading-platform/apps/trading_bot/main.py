@@ -9,7 +9,7 @@ from typing import Dict, Any
 
 from core.db.redis import redis_manager
 from core.ai.registry import ModelRegistry
-from apps.research.model import MultiSymbolActorCritic
+from apps.research.model import SingleSymbolActorCritic
 from core.risk.risk_manager import RiskManager
 from core.exchange.binance_client import BinanceFuturesAdapter
 from core.exchange.symbol_registry import registry

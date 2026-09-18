@@ -52,13 +52,13 @@ class ProductionTradingBot:
         
         # 4. Strict Model Checkpoint Loading (graceful if no checkpoint yet)
         self.has_valid_model = False
-        self.model = MultiSymbolActorCritic(num_symbols=self.num_symbols, macro_dim=8)
+        self.model = SingleSymbolActorCritic(input_dim=28)
         try:
             # This calls the strictly validated loader that checks architecture and active status
             self.model = self.registry.load_model(self.model)
             self.model.eval()
             self.has_valid_model = True
-            logger.info(f"Loaded rigorously validated MultiSymbolActorCritic for {self.num_symbols} symbols.")
+            logger.info(f"Loaded rigorously validated SingleSymbolActorCritic for {self.num_symbols} symbols.")
         except Exception as e:
             logger.warning(f"No trained model checkpoint found yet (training in progress). Running in OBSERVATION-ONLY mode. Error: {e}")
             self.model.eval()
@@ -110,60 +110,23 @@ class ProductionTradingBot:
                 except Exception as e:
                     logger.error(f"Error parsing market state for {symbol}: {e}")
                     
-    def _build_state_vector(self) -> torch.Tensor:
+    def _build_state_vector(self, symbol: str) -> torch.Tensor:
         obs = []
         
-        # 1. Portfolio (9 dims) - using a normalized vector method 
-        # (Assuming we migrate to_array() to the schema or use a helper, but for now we manually construct)
-        obs.extend([
-            self.portfolio_state.wallet_balance,
-            self.portfolio_state.equity,
-            self.portfolio_state.used_margin,
-            self.portfolio_state.free_margin,
-            self.portfolio_state.total_unrealized_pnl,
-            self.portfolio_state.total_exposure,
-            0.0, 0.0, 0.0 # Pad for 9 dims
-        ])
+        # 1. Portfolio (2 dims)
+        obs.extend([self.portfolio_state.wallet_balance, self.portfolio_state.equity])
         
-        # 2. Market (25) + Position (12) per symbol
-        for sym in self.symbols:
-            if sym in self.market_states:
-                m_state = self.market_states[sym]
-                obs.extend(m_state.features) # Exactly 25
-            else:
-                obs.extend([0.0]*25)
-                
-            pos = self.portfolio_state.positions[sym]
-            obs.extend([
-                pos.quantity, pos.entry_price, pos.current_price, pos.unrealized_pnl,
-                pos.realized_pnl, float(pos.leverage), pos.margin, pos.liquidation_price,
-                0.0, 0.0, 0.0, 0.0 # Pad for 12 dims
-            ])
+        # 2. Market Features (25 dims)
+        if symbol in self.market_states:
+            obs.extend(self.market_states[symbol].features)
+        else:
+            obs.extend([0.0] * 25)
             
-        # 3. Macro (3 dims + 5 pad = 8 dims)
-        obs.extend([
-            self.macro_state.sentiment_score,
-            self.macro_state.volatility_expectation,
-            self.macro_state.regime,
-            0.0, 0.0, 0.0, 0.0, 0.0 # Pad to 8
-        ])
+        # 3. Position Before (1 dim)
+        pos = self.portfolio_state.positions[symbol]
+        obs.append(float(pos.quantity))
         
-        # 4. Memory (5 dims)
-        # obs.extend(self.event_memory.step().tolist()) # Disabled for exact dimension matching until fully validated
-        
-        # Dimension validation
-        from core.schemas.dimension_config import get_expected_observation_dimension, validate_observation
-        expected_dim = get_expected_observation_dimension(self.num_symbols)
-        obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
-        
-        try:
-            validate_observation(obs_tensor, expected_dim, self.symbols)
-        except ValueError as e:
-            logger.critical(f"FAIL CLOSED: State Vector Validation Failed - {e}")
-            self.running = False
-            raise RuntimeError(f"FAIL CLOSED: State Validation Failed: {e}")
-            
-        return obs_tensor
+        return torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
                 
     async def inference_loop(self):
         logger.info("Starting production inference loop...")
@@ -182,21 +145,21 @@ class ProductionTradingBot:
                     await asyncio.sleep(5.0)
                     continue
                     
-                state_tensor = self._build_state_vector()
-                if state_tensor is None:
-                    await asyncio.sleep(5.0)
-                    continue
-                
-                with torch.no_grad():
-                    action_logits, expected_return = self.model(state_tensor)
-                    action_logits = action_logits[0].numpy()
+                for sym in self.symbols:
+                    if sym not in self.market_states:
+                        continue
+                        
+                    state_tensor = self._build_state_vector(sym)
                     
-                for i, sym in enumerate(self.symbols):
+                    with torch.no_grad():
+                        action_logits, expected_return = self.model(state_tensor)
+                        action_logits = action_logits[0].numpy()
+                        
                     market = self.market_states[sym]
                     
-                    action_val = action_logits[i][0]
-                    confidence = (action_logits[i][1] + 1.0) / 2.0
-                    target_size = (action_logits[i][2] + 1.0) / 2.0
+                    action_val = action_logits[0]
+                    confidence = (action_logits[1] + 1.0) / 2.0
+                    target_size = (action_logits[2] + 1.0) / 2.0
                     
                     if confidence < 0.3:
                         continue 

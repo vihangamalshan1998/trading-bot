@@ -128,6 +128,32 @@ class ProductionTradingBot:
         
         return torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
                 
+    async def sync_dashboard(self):
+        """Periodically fetches live positions from Binance and publishes to dashboard."""
+        while self.running:
+            try:
+                if self.trading_enabled and not self.dry_run:
+                    live_positions = await self.binance.get_positions()
+                    formatted_positions = []
+                    for p in live_positions:
+                        amt = float(p.get("positionAmt", 0))
+                        pnl = float(p.get("unRealizedProfit", 0))
+                        formatted_positions.append({
+                            "symbol": p.get("symbol"),
+                            "side": "LONG" if amt > 0 else "SHORT",
+                            "quantity": abs(amt),
+                            "pnl": pnl
+                        })
+                    
+                    dashboard_data = {
+                        "equity": self.portfolio_state.equity,
+                        "positions": formatted_positions
+                    }
+                    await redis_manager.redis.set("dashboard:portfolio", json.dumps(dashboard_data))
+            except Exception as e:
+                pass # Fail silently so it doesn't crash the bot
+            await asyncio.sleep(5.0)
+
     async def inference_loop(self):
         logger.info("Starting production inference loop...")
         while self.running:
@@ -161,21 +187,17 @@ class ProductionTradingBot:
                     confidence = (action_logits[1] + 1.0) / 2.0
                     target_size = (action_logits[2] + 1.0) / 2.0
                     
-                    if confidence < -0.1: # Temporarily lowered so you can see it trade!
+                    if confidence < 0.3:
                         logger.info(f"[{sym}] SKIPPING (Low Confidence: {confidence:.2f})")
                         continue 
                         
                     margin_allocated = max(0, self.portfolio_state.free_margin) * target_size
-                    # Force a tiny target size for testing if it's 0
-                    if margin_allocated == 0:
-                        margin_allocated = max(0, self.portfolio_state.free_margin) * 0.05
-                        
                     pos = self.portfolio_state.positions[sym]
                     notional_requested = margin_allocated * pos.leverage
                     
                     side = "HOLD"
-                    if action_val < 0.0: side = "CLOSE_LONG" if pos.quantity > 0 else "OPEN_SHORT"
-                    elif action_val >= 0.0: side = "CLOSE_SHORT" if pos.quantity < 0 else "OPEN_LONG"
+                    if action_val < -0.2: side = "CLOSE_LONG" if pos.quantity > 0 else "OPEN_SHORT"
+                    elif action_val > 0.2: side = "CLOSE_SHORT" if pos.quantity < 0 else "OPEN_LONG"
                     
                     if side == "HOLD":
                         logger.info(f"[{sym}] HOLDING (Action Val: {action_val:.2f})")
@@ -266,7 +288,8 @@ class ProductionTradingBot:
         
         tasks = [
             asyncio.create_task(self.listen_macro()),
-            asyncio.create_task(self.inference_loop())
+            asyncio.create_task(self.inference_loop()),
+            asyncio.create_task(self.sync_dashboard())
         ]
         for sym in self.symbols:
             tasks.append(asyncio.create_task(self.listen_market(sym)))

@@ -279,7 +279,7 @@ class ProductionTradingBot:
                                 try:
                                     # Execute on Binance
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
-                                    binance_side = "BUY" if "LONG" in side else "SELL"
+                                    binance_side = "BUY" if side in ["OPEN_LONG", "CLOSE_SHORT"] else "SELL"
                                     
                                     order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id)
                                     logger.info(f"[{sym}] ORDER SUCCESS: {order_res.get('orderId')}")

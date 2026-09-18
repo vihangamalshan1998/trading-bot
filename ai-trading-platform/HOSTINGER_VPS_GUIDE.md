@@ -119,6 +119,9 @@ pm2 start venv/bin/python --name "market-collector" -- -m apps.market_collector.
 # Start the Dashboard Backend API
 pm2 start venv/bin/uvicorn --name "dashboard-api" -- apps.dashboard_api.main:app --host 127.0.0.1 --port 8000
 
+# Start the Live Trading Execution Bot
+pm2 start venv/bin/python --name "trading-bot" -- -m apps.trading_bot.main
+
 # Save the PM2 configuration so it restarts on server reboot
 pm2 save
 pm2 startup

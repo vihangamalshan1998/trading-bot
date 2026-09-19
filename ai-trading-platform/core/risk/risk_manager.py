@@ -7,6 +7,7 @@ from core.schemas.state_schema import (
     MarketState,
     OrderRequest,
     PortfolioState,
+    MacroState,
     RiskDecision,
 )
 
@@ -39,6 +40,10 @@ class RiskManager:
         self.correlated_exposure_limit_pct = (
             settings.correlated_exposure_limit_pct
         )
+        
+        # Macro thresholds
+        self.bearish_macro_threshold = -0.8
+        self.bullish_macro_threshold = 0.8
 
         self.daily_high_equity = 0.0
         self.global_high_equity = 0.0
@@ -119,6 +124,7 @@ class RiskManager:
         order_request: OrderRequest,
         portfolio_state: PortfolioState,
         market_state: MarketState,
+        macro_state: MacroState = None,
     ) -> RiskDecision:
 
         now = time.time()
@@ -227,6 +233,18 @@ class RiskManager:
         # Only OPEN actions continue.
         if action not in {"OPEN_LONG", "OPEN_SHORT"}:
             return self._reject("INVALID_ACTION")
+            
+        # ========================================================
+        # 6.5 Macro Override
+        # ========================================================
+        if macro_state is not None:
+            sentiment = getattr(macro_state, "sentiment_score", 0.0)
+            if sentiment < self.bearish_macro_threshold and action == "OPEN_LONG":
+                logger.warning(f"RISK MANAGER: Macro sentiment ({sentiment}) is extremely bearish. Blocking OPEN_LONG on {order_request.symbol}.")
+                return self._reject("MACRO_BEARISH_OVERRIDE")
+            elif sentiment > self.bullish_macro_threshold and action == "OPEN_SHORT":
+                logger.warning(f"RISK MANAGER: Macro sentiment ({sentiment}) is extremely bullish. Blocking OPEN_SHORT on {order_request.symbol}.")
+                return self._reject("MACRO_BULLISH_OVERRIDE")
 
         # ========================================================
         # 7. Maximum single-order quantity

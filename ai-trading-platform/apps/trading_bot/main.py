@@ -276,7 +276,7 @@ class ProductionTradingBot:
                         )
                         
                         # Evaluate Risk via Schema
-                        decision = self.risk_manager.evaluate(request, self.portfolio_state, market)
+                        decision = self.risk_manager.evaluate(request, self.portfolio_state, market, self.macro_state)
                         
                         if decision.approved and decision.adjusted_quantity > 0:
                             sym_config = registry.get_symbol(sym)

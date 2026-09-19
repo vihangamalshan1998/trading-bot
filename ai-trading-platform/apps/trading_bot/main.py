@@ -388,6 +388,17 @@ class ProductionTradingBot:
                                     asyncio.create_task(redis_manager.redis.lpush("dashboard:trade_history", json.dumps(trade_record)))
                                     asyncio.create_task(redis_manager.redis.ltrim("dashboard:trade_history", 0, 99))
                                     
+                                    # Calculate immediate RL Reward
+                                    imm_reward = 0.0
+                                    imm_pnl = 0.0
+                                    if "CLOSE" in side and entry_px > 0:
+                                        imm_reward = pnl
+                                        imm_pnl = pnl
+                                    elif "OPEN" in side:
+                                        # Simple fee penalty proxy for opening a trade
+                                        notional_cost = float(qty_str) * market.mid_price
+                                        imm_reward = -(notional_cost * 0.0005) # 0.05% fee penalty
+                                        
                                     # Record Experience
                                     exp_data = {
                                         "timestamp": time.time(),
@@ -399,7 +410,9 @@ class ProductionTradingBot:
                                         "confidence": float(confidence),
                                         "requested_size": float(qty_raw),
                                         "approved_size": float(decision.adjusted_quantity),
-                                        "model_version": "v1"
+                                        "model_version": "v1",
+                                        "reward": imm_reward,
+                                        "realized_pnl": imm_pnl
                                     }
                                     await redis_manager.redis.publish("experience:completed", json.dumps(exp_data))
                                     

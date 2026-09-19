@@ -161,6 +161,25 @@ function App() {
                   </span>
                 </div>
               </div>
+
+              {systemStats.latest_headlines && systemStats.latest_headlines.length > 0 && (
+                <div className="news-headlines" style={{ marginTop: '20px', padding: '15px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px' }}>
+                  <h4 style={{ color: '#8b9bb4', marginBottom: '10px', fontSize: '12px', textTransform: 'uppercase' }}>Latest Headlines Analyzed</h4>
+                  <ul style={{ listStyleType: 'none', padding: 0, margin: 0 }}>
+                    {systemStats.latest_headlines.map((headline, idx) => (
+                      <li key={idx} style={{ 
+                        padding: '8px 0', 
+                        borderBottom: idx < systemStats.latest_headlines.length - 1 ? '1px solid rgba(255,255,255,0.05)' : 'none',
+                        fontSize: '13px',
+                        color: '#c9d1d9',
+                        lineHeight: '1.4'
+                      }}>
+                        📰 {headline}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </section>
 
             <section className="glass-panel position-panel">

@@ -40,7 +40,7 @@ class NewsMacroCollector:
         logger.info(f"📰 Fetched {len(headlines)} Headlines for Gemini: {headlines[:3]}...")
         
         if not combined_text or not settings.gemini_api_key:
-            return MacroState(timestamp=time.time(), sentiment_score=0.0, volatility_expectation=0.5, regime=0.0)
+            return MacroState(timestamp=time.time(), sentiment_score=0.0, volatility_expectation=0.5, regime=0.0, headlines=headlines)
 
         try:
             from google import genai
@@ -84,7 +84,8 @@ class NewsMacroCollector:
             timestamp=time.time(),
             sentiment_score=sentiment_score,
             volatility_expectation=volatility_expectation,
-            regime=regime
+            regime=regime,
+            headlines=headlines
         )
 
     async def run(self):

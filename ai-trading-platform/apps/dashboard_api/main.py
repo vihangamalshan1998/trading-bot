@@ -12,7 +12,8 @@ system_stats = {
     "latest_sentiment": 0.0,
     "latest_regime": 0.0,
     "model_update_count": 0,
-    "last_model_update_time": None
+    "last_model_update_time": None,
+    "latest_headlines": []
 }
 
 app = FastAPI(title="AI Trading Dashboard API")
@@ -54,6 +55,7 @@ async def listen_redis_events():
                     system_stats["news_count"] += 1
                     system_stats["latest_sentiment"] = data.get("sentiment_score", 0.0)
                     system_stats["latest_regime"] = data.get("regime", 0.0)
+                    system_stats["latest_headlines"] = data.get("headlines", [])
                 elif channel == "training:model_update":
                     system_stats["model_update_count"] += 1
                     system_stats["last_model_update_time"] = data.get("timestamp")

@@ -78,10 +78,13 @@ class MacroState(BaseModel):
     sentiment_score: float = Field(default=0.0, ge=-1.0, le=1.0)
     volatility_expectation: float = Field(default=0.5, ge=0.0)
     regime: float = 0.0
+    headlines: list[str] = Field(default_factory=list)
 
     @field_validator('*', mode='before')
     @classmethod
     def check_floats(cls, v, info):
+        if info.field_name == "headlines":
+            return v
         return check_not_nan_inf(v, info.field_name)
 
 class NewsState(BaseModel):

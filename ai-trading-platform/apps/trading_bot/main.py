@@ -401,18 +401,17 @@ class ProductionTradingBot:
                                         
                                     # Record Experience
                                     exp_data = {
-                                        "timestamp": time.time(),
+                                        "timestamp": int(time.time()),
                                         "symbol": sym,
                                         "market_state": market.features,
                                         "portfolio_state": [self.portfolio_state.wallet_balance, self.portfolio_state.equity], # Abbreviated
-                                        "position_state": [pos.quantity, pos.entry_price],
-                                        "action_type": side,
+                                        "position_before": float(pos.quantity),
+                                        "entry_price": float(pos.entry_price),
+                                        "action": side,
                                         "confidence": float(confidence),
-                                        "requested_size": float(qty_raw),
-                                        "approved_size": float(decision.adjusted_quantity),
                                         "model_version": "v1",
-                                        "reward": imm_reward,
-                                        "realized_pnl": imm_pnl
+                                        "reward": float(imm_reward),
+                                        "realized_pnl": float(imm_pnl)
                                     }
                                     await redis_manager.redis.publish("experience:completed", json.dumps(exp_data))
                                     

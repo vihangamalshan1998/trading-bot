@@ -211,10 +211,32 @@ class ProductionTradingBot:
                     # Update portfolio state with current price for RiskManager correlated exposure checks
                     if sym in self.portfolio_state.positions:
                         self.portfolio_state.positions[sym].current_price = market.mid_price
-                    
+                    # Calculate Real-Time PNL Percentage for Hard Stop Loss
+                    hard_stop_triggered = False
+                    if sym in self.portfolio_state.positions:
+                        pos_check = self.portfolio_state.positions[sym]
+                        if pos_check.quantity != 0 and pos_check.entry_price > 0:
+                            # PNL % = (Current - Entry) / Entry  (* -1 if short)
+                            pnl_pct = (market.mid_price - pos_check.entry_price) / pos_check.entry_price
+                            if pos_check.quantity < 0:
+                                pnl_pct = -pnl_pct
+                            
+                            # Leverage amplifies PNL %
+                            pnl_pct_leveraged = pnl_pct * pos_check.leverage
+                            
+                            if pnl_pct_leveraged <= -0.15: # -15% HARD STOP LOSS
+                                logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI.")
+                                hard_stop_triggered = True
+                                
                     import random
-                    if random.random() < 0.15:
-                        # Exploration Noise (15% chance to explore a random strategy)
+                    
+                    if hard_stop_triggered:
+                        # Force a MARKET CLOSE
+                        action_val = -1.0 if pos_check.quantity > 0 else 1.0
+                        confidence = 1.0
+                        target_size = 0.0
+                    elif random.random() < 0.02:
+                        # Exploration Noise (2% chance to explore a random strategy)
                         action_val = random.uniform(-1.0, 1.0)
                         confidence = random.uniform(0.3, 1.0) # Ensure it passes the 0.3 threshold to trade
                         target_size = random.uniform(0.1, 1.0)

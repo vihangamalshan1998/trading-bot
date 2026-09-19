@@ -195,6 +195,21 @@ class RiskManager:
             now,
         )
 
+        # ========================================================
+        # 6. Closing/HOLD actions
+        # ========================================================
+
+        action = order_request.action_type.upper()
+
+        if action == "HOLD" or "CLOSE" in action:
+            return RiskDecision(
+                approved=True,
+                reason="Approved",
+                adjusted_quantity=qty,
+                max_allowed_quantity=qty,
+                risk_flags=[],
+            )
+
         daily_loss = 0.0
 
         if self.daily_high_equity > 0:
@@ -214,21 +229,6 @@ class RiskManager:
 
         if drawdown >= self.max_drawdown_pct:
             return self._reject("MAX_DRAWDOWN")
-
-        # ========================================================
-        # 6. Closing/HOLD actions
-        # ========================================================
-
-        action = order_request.action_type.upper()
-
-        if action == "HOLD" or "CLOSE" in action:
-            return RiskDecision(
-                approved=True,
-                reason="Approved",
-                adjusted_quantity=qty,
-                max_allowed_quantity=qty,
-                risk_flags=[],
-            )
 
         # Only OPEN actions continue.
         if action not in {"OPEN_LONG", "OPEN_SHORT"}:

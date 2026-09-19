@@ -37,6 +37,8 @@ class NewsMacroCollector:
         headlines = [entry.title for entry in all_entries]
         combined_text = "\n".join(headlines)
         
+        logger.info(f"📰 Fetched {len(headlines)} Headlines for Gemini: {headlines[:3]}...")
+        
         if not combined_text or not settings.gemini_api_key:
             return MacroState(timestamp=time.time(), sentiment_score=0.0, volatility_expectation=0.5, regime=0.0)
 

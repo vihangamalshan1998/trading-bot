@@ -93,6 +93,9 @@ Headlines:
                 logger.info(f"MacroCollector: Found {len(news_text.splitlines())} headlines. Analyzing with Gemini...")
                 analysis = await self.analyze_sentiment(news_text)
                 
+                # Add headlines to payload for dashboard
+                analysis["headlines"] = news_text.split("\n")
+                
                 logger.info(f"MacroCollector: Analysis complete: {analysis}")
                 
                 # Publish to Redis

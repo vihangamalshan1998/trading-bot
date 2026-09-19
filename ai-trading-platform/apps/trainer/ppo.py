@@ -18,7 +18,7 @@ class PPOTrainer:
     """
     def __init__(self, model: SingleSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2):
         self.model = model
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-5)
         self.gamma = gamma
         self.clip_epsilon = clip_epsilon
         self.buffer = ReplayBuffer()

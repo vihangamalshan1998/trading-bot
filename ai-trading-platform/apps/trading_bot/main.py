@@ -212,9 +212,18 @@ class ProductionTradingBot:
                     if sym in self.portfolio_state.positions:
                         self.portfolio_state.positions[sym].current_price = market.mid_price
                     
-                    action_val = action_logits[0]
-                    confidence = (action_logits[1] + 1.0) / 2.0
-                    target_size = (action_logits[2] + 1.0) / 2.0
+                    import random
+                    if random.random() < 0.15:
+                        # Exploration Noise (15% chance to explore a random strategy)
+                        action_val = random.uniform(-1.0, 1.0)
+                        confidence = random.uniform(0.3, 1.0) # Ensure it passes the 0.3 threshold to trade
+                        target_size = random.uniform(0.1, 1.0)
+                        logger.info(f"[{sym}] EXPLORING: Applying curiosity noise to discover new strategies.")
+                    else:
+                        # Deterministic Policy (85% chance to use learned weights)
+                        action_val = action_logits[0]
+                        confidence = (action_logits[1] + 1.0) / 2.0
+                        target_size = (action_logits[2] + 1.0) / 2.0
                     
                     # 1. Determine Predicted Side (Even if confidence is low, we want to know what it *leans* towards)
                     if action_val < -0.2: predicted_side = "SHORT"

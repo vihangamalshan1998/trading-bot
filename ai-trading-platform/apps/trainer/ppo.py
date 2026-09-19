@@ -55,7 +55,10 @@ class PPOTrainer:
             # Use MSE between action and predicted action as proxy for probability
             old_log_probs = -((actions - old_action_preds) ** 2).mean(dim=-1, keepdim=True)
             
-            advantages, returns = self.compute_gae(rewards, old_values, next_values, dones)
+            # Scale and clip rewards to prevent gradient explosion
+            safe_rewards = torch.clamp(rewards / 100.0, -1.0, 1.0)
+            
+            advantages, returns = self.compute_gae(safe_rewards, old_values, next_values, dones)
             # Normalize advantages
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             

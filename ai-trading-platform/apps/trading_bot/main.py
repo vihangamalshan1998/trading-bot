@@ -401,6 +401,7 @@ class ProductionTradingBot:
                                         
                                     # Record Experience
                                     exp_data = {
+                                        "experience_id": str(uuid.uuid4()),
                                         "timestamp": int(time.time()),
                                         "symbol": sym,
                                         "market_state": market.features,

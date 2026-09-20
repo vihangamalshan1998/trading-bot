@@ -2,6 +2,97 @@ import React, { useState, useEffect, useRef } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import './App.css'
 
+// LogViewer Component (Must be outside App to prevent re-mounting on every interval)
+const LogViewer = ({ botName, title, activeTab }) => {
+  const [logs, setLogs] = useState([]);
+  const logsEndRef = useRef(null);
+  const containerRef = useRef(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
+  const handleScroll = () => {
+    if (!containerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    
+    // If user scrolls up (more than 30px from bottom), turn OFF auto-scroll.
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 30;
+    setAutoScroll(isAtBottom);
+  };
+
+  useEffect(() => {
+    if (activeTab !== 'logs') return;
+    if (!autoScroll) return; // Pause polling entirely so logs stop jumping
+    
+    const fetchLogs = async () => {
+      try {
+        const res = await fetch(`/api/logs/${botName}`);
+        const json = await res.json();
+        setLogs(json.logs || []);
+      } catch (err) {
+        console.error("Failed to fetch logs:", err);
+      }
+    };
+    fetchLogs();
+    const interval = setInterval(fetchLogs, 2000);
+    return () => clearInterval(interval);
+  }, [botName, activeTab, autoScroll]);
+
+  useEffect(() => {
+    if (autoScroll) {
+      logsEndRef.current?.scrollIntoView({ behavior: "auto" });
+    }
+  }, [logs, autoScroll]);
+
+  return (
+    <div className="terminal-container">
+      <div className="terminal-header">
+        <span className="terminal-title">{title}</span>
+        <button 
+          onClick={() => setAutoScroll(!autoScroll)}
+          style={{ 
+            background: 'transparent', 
+            border: '1px solid #555', 
+            color: autoScroll ? '#27c93f' : '#ffbd2e', 
+            borderRadius: '4px', 
+            fontSize: '10px', 
+            padding: '2px 8px', 
+            cursor: 'pointer',
+            marginLeft: '10px'
+          }}
+        >
+          {autoScroll ? '🟢 Auto-Scroll ON' : '🟡 Auto-Scroll OFF'}
+        </button>
+        <div className="terminal-dots" style={{ marginLeft: 'auto' }}>
+          <span className="dot red"></span>
+          <span className="dot yellow"></span>
+          <span className="dot green"></span>
+        </div>
+      </div>
+      <div className="terminal-body" ref={containerRef} onScroll={handleScroll}>
+        {logs.length === 0 ? <div className="log-line">Loading logs...</div> : null}
+        {logs.map((log, idx) => {
+          try {
+            const parsed = JSON.parse(log);
+            let color = '#39ff14';
+            if (parsed.level === 'ERROR' || parsed.level === 'CRITICAL') color = '#ff5f56';
+            if (parsed.level === 'WARNING') color = '#ffbd2e';
+            
+            const time = new Date(parsed.timestamp).toLocaleTimeString();
+            
+            return (
+              <div key={idx} className="log-line" style={{ color }}>
+                <span style={{color: '#8b9bb4'}}>[{time}]</span> [{parsed.level}] {parsed.message}
+              </div>
+            );
+          } catch (e) {
+            return <div key={idx} className="log-line">{log}</div>
+          }
+        })}
+        <div ref={logsEndRef} />
+      </div>
+    </div>
+  );
+};
+
 function App() {
   const [activeTab, setActiveTab] = useState('live') // 'live', 'training', 'history', 'logs'
   const [activeSubTab, setActiveSubTab] = useState('trading_bot') // 'market_collector', 'ai_trainer', 'trading_bot'
@@ -100,102 +191,7 @@ function App() {
     fetchMetrics();
     const interval = setInterval(fetchMetrics, 2000);
     return () => clearInterval(interval);
-  }, [activeTab]);
-
-  // LogViewer Component
-  const LogViewer = ({ botName, title }) => {
-    const [logs, setLogs] = useState([]);
-    const logsEndRef = useRef(null);
-    const containerRef = useRef(null);
-    const [autoScroll, setAutoScroll] = useState(true);
-
-    const handleScroll = () => {
-      if (!containerRef.current) return;
-      const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
-      
-      // If user scrolls up (more than 30px from bottom), turn OFF auto-scroll.
-      // If user scrolls to the absolute bottom, turn ON auto-scroll.
-      const isAtBottom = scrollHeight - scrollTop - clientHeight < 30;
-      setAutoScroll(isAtBottom);
-    };
-
-    useEffect(() => {
-      if (activeTab !== 'logs') return;
-      if (!autoScroll) return; // Pause polling entirely so logs stop jumping
-      
-      const fetchLogs = async () => {
-        try {
-          const res = await fetch(`/api/logs/${botName}`);
-          const json = await res.json();
-          setLogs(json.logs || []);
-        } catch (err) {
-          console.error("Failed to fetch logs:", err);
-        }
-      };
-      fetchLogs();
-      const interval = setInterval(fetchLogs, 2000);
-      return () => clearInterval(interval);
-    }, [botName, activeTab, autoScroll]);
-
-    useEffect(() => {
-      if (autoScroll) {
-        // Use 'auto' instead of 'smooth' to prevent animation jumping
-        logsEndRef.current?.scrollIntoView({ behavior: "auto" });
-      }
-    }, [logs, autoScroll]);
-
-    return (
-      <div className="terminal-container">
-        <div className="terminal-header">
-          <span className="terminal-title">{title}</span>
-          <button 
-            onClick={() => setAutoScroll(!autoScroll)}
-            style={{ 
-              background: 'transparent', 
-              border: '1px solid #555', 
-              color: autoScroll ? '#27c93f' : '#ffbd2e', 
-              borderRadius: '4px', 
-              fontSize: '10px', 
-              padding: '2px 8px', 
-              cursor: 'pointer',
-              marginLeft: '10px'
-            }}
-          >
-            {autoScroll ? '🟢 Auto-Scroll ON' : '🟡 Auto-Scroll OFF'}
-          </button>
-          <div className="terminal-dots" style={{ marginLeft: 'auto' }}>
-            <span className="dot red"></span>
-            <span className="dot yellow"></span>
-            <span className="dot green"></span>
-          </div>
-        </div>
-        <div className="terminal-body" ref={containerRef} onScroll={handleScroll}>
-          {logs.length === 0 ? <div className="log-line">Loading logs...</div> : null}
-          {logs.map((log, idx) => {
-            try {
-              // Try to parse the JSON log from Python
-              const parsed = JSON.parse(log);
-              let color = '#39ff14'; // default green
-              if (parsed.level === 'ERROR' || parsed.level === 'CRITICAL') color = '#ff5f56';
-              if (parsed.level === 'WARNING') color = '#ffbd2e';
-              
-              const time = new Date(parsed.timestamp).toLocaleTimeString();
-              
-              return (
-                <div key={idx} className="log-line" style={{ color }}>
-                  <span style={{color: '#8b9bb4'}}>[{time}]</span> [{parsed.level}] {parsed.message}
-                </div>
-              );
-            } catch (e) {
-              // Fallback if not JSON
-              return <div key={idx} className="log-line">{log}</div>
-            }
-          })}
-          <div ref={logsEndRef} />
-        </div>
-      </div>
-    );
-  };
+  // Removed internal LogViewer definition
 
   return (
     <div className="dashboard-container">
@@ -554,9 +550,9 @@ function App() {
             </div>
             
             <div className="logs-grid" style={{ display: 'block' }}>
-              {activeSubTab === 'market_collector' && <LogViewer botName="market_collector" title="Market Collector" />}
-              {activeSubTab === 'ai_trainer' && <LogViewer botName="ai_trainer" title="AI Trainer" />}
-              {activeSubTab === 'trading_bot' && <LogViewer botName="trading_bot" title="Trading Bot (Execution)" />}
+              {activeSubTab === 'market_collector' && <LogViewer activeTab={activeTab} botName="market_collector" title="Market Collector" />}
+              {activeSubTab === 'ai_trainer' && <LogViewer activeTab={activeTab} botName="ai_trainer" title="AI Trainer" />}
+              {activeSubTab === 'trading_bot' && <LogViewer activeTab={activeTab} botName="trading_bot" title="Trading Bot (Execution)" />}
             </div>
           </section>
         )}

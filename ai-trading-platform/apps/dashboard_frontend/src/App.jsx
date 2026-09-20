@@ -106,7 +106,18 @@ function App() {
   const LogViewer = ({ botName, title }) => {
     const [logs, setLogs] = useState([]);
     const logsEndRef = useRef(null);
+    const containerRef = useRef(null);
     const [autoScroll, setAutoScroll] = useState(true);
+
+    const handleScroll = () => {
+      if (!containerRef.current) return;
+      const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+      
+      // If user scrolls up (more than 30px from bottom), turn OFF auto-scroll.
+      // If user scrolls to the absolute bottom, turn ON auto-scroll.
+      const isAtBottom = scrollHeight - scrollTop - clientHeight < 30;
+      setAutoScroll(isAtBottom);
+    };
 
     useEffect(() => {
       if (activeTab !== 'logs') return;
@@ -128,7 +139,8 @@ function App() {
 
     useEffect(() => {
       if (autoScroll) {
-        logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        // Use 'auto' instead of 'smooth' to prevent animation jumping
+        logsEndRef.current?.scrollIntoView({ behavior: "auto" });
       }
     }, [logs, autoScroll]);
 
@@ -157,7 +169,7 @@ function App() {
             <span className="dot green"></span>
           </div>
         </div>
-        <div className="terminal-body">
+        <div className="terminal-body" ref={containerRef} onScroll={handleScroll}>
           {logs.length === 0 ? <div className="log-line">Loading logs...</div> : null}
           {logs.map((log, idx) => {
             try {

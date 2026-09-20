@@ -106,16 +106,7 @@ function App() {
   const LogViewer = ({ botName, title }) => {
     const [logs, setLogs] = useState([]);
     const logsEndRef = useRef(null);
-    const containerRef = useRef(null);
     const [autoScroll, setAutoScroll] = useState(true);
-
-    const handleScroll = () => {
-      if (!containerRef.current) return;
-      const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
-      // If user is within 50px of the bottom, keep auto-scroll enabled
-      const isAtBottom = scrollHeight - scrollTop - clientHeight < 50;
-      setAutoScroll(isAtBottom);
-    };
 
     useEffect(() => {
       if (activeTab !== 'logs') return;
@@ -142,14 +133,29 @@ function App() {
     return (
       <div className="terminal-container">
         <div className="terminal-header">
-          <span className="terminal-title">{title} {autoScroll ? "(Auto-Scrolling)" : "(Auto-Scroll Paused)"}</span>
-          <div className="terminal-dots">
+          <span className="terminal-title">{title}</span>
+          <button 
+            onClick={() => setAutoScroll(!autoScroll)}
+            style={{ 
+              background: 'transparent', 
+              border: '1px solid #555', 
+              color: autoScroll ? '#27c93f' : '#ffbd2e', 
+              borderRadius: '4px', 
+              fontSize: '10px', 
+              padding: '2px 8px', 
+              cursor: 'pointer',
+              marginLeft: '10px'
+            }}
+          >
+            {autoScroll ? '🟢 Auto-Scroll ON' : '🟡 Auto-Scroll OFF'}
+          </button>
+          <div className="terminal-dots" style={{ marginLeft: 'auto' }}>
             <span className="dot red"></span>
             <span className="dot yellow"></span>
             <span className="dot green"></span>
           </div>
         </div>
-        <div className="terminal-body" ref={containerRef} onScroll={handleScroll}>
+        <div className="terminal-body">
           {logs.length === 0 ? <div className="log-line">Loading logs...</div> : null}
           {logs.map((log, idx) => {
             try {

@@ -138,9 +138,26 @@ function App() {
         </div>
         <div className="terminal-body">
           {logs.length === 0 ? <div className="log-line">Loading logs...</div> : null}
-          {logs.map((log, idx) => (
-            <div key={idx} className="log-line">{log}</div>
-          ))}
+          {logs.map((log, idx) => {
+            try {
+              // Try to parse the JSON log from Python
+              const parsed = JSON.parse(log);
+              let color = '#39ff14'; // default green
+              if (parsed.level === 'ERROR' || parsed.level === 'CRITICAL') color = '#ff5f56';
+              if (parsed.level === 'WARNING') color = '#ffbd2e';
+              
+              const time = new Date(parsed.timestamp).toLocaleTimeString();
+              
+              return (
+                <div key={idx} className="log-line" style={{ color }}>
+                  <span style={{color: '#8b9bb4'}}>[{time}]</span> [{parsed.level}] {parsed.message}
+                </div>
+              );
+            } catch (e) {
+              // Fallback if not JSON
+              return <div key={idx} className="log-line">{log}</div>
+            }
+          })}
           <div ref={logsEndRef} />
         </div>
       </div>

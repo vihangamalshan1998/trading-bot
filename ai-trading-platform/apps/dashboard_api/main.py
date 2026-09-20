@@ -4,6 +4,7 @@ import json
 import uvicorn
 import asyncio
 import os
+from fastapi.responses import FileResponse
 from core.db.redis import redis_manager
 
 # Cache the last 50 metrics in memory
@@ -137,9 +138,22 @@ async def get_bot_logs(bot_name: str):
     try:
         with open(log_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            return {"logs": lines[-100:]}
+            return {"logs": lines[-1000:]}
     except Exception as e:
         return {"logs": [f"Error reading logs: {e}"]}
+
+@app.get("/api/logs/download/{bot_name}")
+async def download_bot_logs(bot_name: str):
+    """Downloads the full log file for the given bot."""
+    allowed_bots = ["market_collector", "ai_trainer", "trading_bot"]
+    if bot_name not in allowed_bots:
+        return {"error": "Invalid bot name requested."}
+        
+    log_path = f"logs/{bot_name}.log"
+    if not os.path.exists(log_path):
+        return {"error": "Log file not found"}
+        
+    return FileResponse(path=log_path, filename=f"{bot_name}.log", media_type="text/plain")
 
 if __name__ == "__main__":
     uvicorn.run("apps.dashboard_api.main:app", host="0.0.0.0", port=8000, reload=True)

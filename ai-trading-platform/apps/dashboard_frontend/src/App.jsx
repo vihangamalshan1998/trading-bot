@@ -61,6 +61,21 @@ const LogViewer = ({ botName, title, activeTab }) => {
         >
           {autoScroll ? '🟢 Auto-Scroll ON' : '🟡 Auto-Scroll OFF'}
         </button>
+        <button 
+          onClick={() => window.open(`/api/logs/download/${botName}`, '_blank')}
+          style={{ 
+            background: 'transparent', 
+            border: '1px solid #8b9bb4', 
+            color: '#8b9bb4', 
+            borderRadius: '4px', 
+            fontSize: '10px', 
+            padding: '2px 8px', 
+            cursor: 'pointer',
+            marginLeft: '10px'
+          }}
+        >
+          📥 Download Full Log
+        </button>
         <div className="terminal-dots" style={{ marginLeft: 'auto' }}>
           <span className="dot red"></span>
           <span className="dot yellow"></span>

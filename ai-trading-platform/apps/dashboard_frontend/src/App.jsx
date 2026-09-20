@@ -191,6 +191,7 @@ function App() {
     fetchMetrics();
     const interval = setInterval(fetchMetrics, 2000);
     return () => clearInterval(interval);
+  }, [activeTab]);
   // Removed internal LogViewer definition
 
   return (

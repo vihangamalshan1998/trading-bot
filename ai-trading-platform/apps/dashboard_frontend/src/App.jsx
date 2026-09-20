@@ -4,6 +4,7 @@ import './App.css'
 
 function App() {
   const [activeTab, setActiveTab] = useState('live') // 'live', 'training', 'history', 'logs'
+  const [activeSubTab, setActiveSubTab] = useState('trading_bot') // 'market_collector', 'ai_trainer', 'trading_bot'
   
   // Live Trading State
   const [data, setData] = useState({
@@ -105,6 +106,16 @@ function App() {
   const LogViewer = ({ botName, title }) => {
     const [logs, setLogs] = useState([]);
     const logsEndRef = useRef(null);
+    const containerRef = useRef(null);
+    const [autoScroll, setAutoScroll] = useState(true);
+
+    const handleScroll = () => {
+      if (!containerRef.current) return;
+      const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+      // If user is within 50px of the bottom, keep auto-scroll enabled
+      const isAtBottom = scrollHeight - scrollTop - clientHeight < 50;
+      setAutoScroll(isAtBottom);
+    };
 
     useEffect(() => {
       if (activeTab !== 'logs') return;
@@ -123,20 +134,22 @@ function App() {
     }, [botName, activeTab]);
 
     useEffect(() => {
-      logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, [logs]);
+      if (autoScroll) {
+        logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
+    }, [logs, autoScroll]);
 
     return (
       <div className="terminal-container">
         <div className="terminal-header">
-          <span className="terminal-title">{title}</span>
+          <span className="terminal-title">{title} {autoScroll ? "(Auto-Scrolling)" : "(Auto-Scroll Paused)"}</span>
           <div className="terminal-dots">
             <span className="dot red"></span>
             <span className="dot yellow"></span>
             <span className="dot green"></span>
           </div>
         </div>
-        <div className="terminal-body">
+        <div className="terminal-body" ref={containerRef} onScroll={handleScroll}>
           {logs.length === 0 ? <div className="log-line">Loading logs...</div> : null}
           {logs.map((log, idx) => {
             try {
@@ -496,11 +509,34 @@ function App() {
 
         {activeTab === 'logs' && (
           <section className="glass-panel full-width">
-            <h3>Live System Logs</h3>
-            <div className="logs-grid">
-              <LogViewer botName="market_collector" title="Market Collector" />
-              <LogViewer botName="ai_trainer" title="AI Trainer" />
-              <LogViewer botName="trading_bot" title="Trading Bot (Execution)" />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+              <h3>Live System Logs</h3>
+              <div className="nav-tabs" style={{ marginBottom: 0 }}>
+                <button 
+                  className={`tab-btn ${activeSubTab === 'market_collector' ? 'active' : ''}`}
+                  onClick={() => setActiveSubTab('market_collector')}
+                >
+                  Market Collector
+                </button>
+                <button 
+                  className={`tab-btn ${activeSubTab === 'ai_trainer' ? 'active' : ''}`}
+                  onClick={() => setActiveSubTab('ai_trainer')}
+                >
+                  AI Trainer
+                </button>
+                <button 
+                  className={`tab-btn ${activeSubTab === 'trading_bot' ? 'active' : ''}`}
+                  onClick={() => setActiveSubTab('trading_bot')}
+                >
+                  Trading Bot
+                </button>
+              </div>
+            </div>
+            
+            <div className="logs-grid" style={{ display: 'block' }}>
+              {activeSubTab === 'market_collector' && <LogViewer botName="market_collector" title="Market Collector" />}
+              {activeSubTab === 'ai_trainer' && <LogViewer botName="ai_trainer" title="AI Trainer" />}
+              {activeSubTab === 'trading_bot' && <LogViewer botName="trading_bot" title="Trading Bot (Execution)" />}
             </div>
           </section>
         )}

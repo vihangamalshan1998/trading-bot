@@ -110,6 +110,8 @@ function App() {
 
     useEffect(() => {
       if (activeTab !== 'logs') return;
+      if (!autoScroll) return; // Pause polling entirely so logs stop jumping
+      
       const fetchLogs = async () => {
         try {
           const res = await fetch(`/api/logs/${botName}`);
@@ -122,7 +124,7 @@ function App() {
       fetchLogs();
       const interval = setInterval(fetchLogs, 2000);
       return () => clearInterval(interval);
-    }, [botName, activeTab]);
+    }, [botName, activeTab, autoScroll]);
 
     useEffect(() => {
       if (autoScroll) {

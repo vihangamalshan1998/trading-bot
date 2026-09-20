@@ -7,7 +7,7 @@ import json
 import time
 from core.db.redis import redis_manager
 from core.ai.replay_buffer import ReplayBuffer
-from core.logging.logger import logger
+from core.logging.logger import logger, set_log_file
 from apps.research.model import SingleSymbolActorCritic
 from core.ai.registry import ModelRegistry
 
@@ -123,6 +123,7 @@ class PPOTrainer:
             pass
 
 async def run_training_loop():
+    set_log_file("logs/ai_trainer.log")
     logger.info("Initializing PPO Training Engine...")
     
     # We need to initialize the model first

@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import './App.css'
 
 function App() {
-  const [activeTab, setActiveTab] = useState('live') // 'live' or 'training'
+  const [activeTab, setActiveTab] = useState('live') // 'live', 'training', 'history', 'logs'
   
   // Live Trading State
   const [data, setData] = useState({
@@ -101,6 +101,52 @@ function App() {
     return () => clearInterval(interval);
   }, [activeTab]);
 
+  // LogViewer Component
+  const LogViewer = ({ botName, title }) => {
+    const [logs, setLogs] = useState([]);
+    const logsEndRef = useRef(null);
+
+    useEffect(() => {
+      if (activeTab !== 'logs') return;
+      const fetchLogs = async () => {
+        try {
+          const res = await fetch(`/api/logs/${botName}`);
+          const json = await res.json();
+          setLogs(json.logs || []);
+        } catch (err) {
+          console.error("Failed to fetch logs:", err);
+        }
+      };
+      fetchLogs();
+      const interval = setInterval(fetchLogs, 2000);
+      return () => clearInterval(interval);
+    }, [botName, activeTab]);
+
+    useEffect(() => {
+      logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [logs]);
+
+    return (
+      <div className="terminal-container">
+        <div className="terminal-header">
+          <span className="terminal-title">{title}</span>
+          <div className="terminal-dots">
+            <span className="dot red"></span>
+            <span className="dot yellow"></span>
+            <span className="dot green"></span>
+          </div>
+        </div>
+        <div className="terminal-body">
+          {logs.length === 0 ? <div className="log-line">Loading logs...</div> : null}
+          {logs.map((log, idx) => (
+            <div key={idx} className="log-line">{log}</div>
+          ))}
+          <div ref={logsEndRef} />
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="dashboard-container">
       <header className="glass-header">
@@ -127,6 +173,12 @@ function App() {
             onClick={() => setActiveTab('history')}
           >
             Positions & History
+          </button>
+          <button 
+            className={`tab-btn ${activeTab === 'logs' ? 'active' : ''}`}
+            onClick={() => setActiveTab('logs')}
+          >
+            Live Logs
           </button>
         </div>
         
@@ -423,6 +475,17 @@ function App() {
               )}
             </section>
           </>
+        )}
+
+        {activeTab === 'logs' && (
+          <section className="glass-panel full-width">
+            <h3>Live System Logs</h3>
+            <div className="logs-grid">
+              <LogViewer botName="market_collector" title="Market Collector" />
+              <LogViewer botName="ai_trainer" title="AI Trainer" />
+              <LogViewer botName="trading_bot" title="Trading Bot (Execution)" />
+            </div>
+          </section>
         )}
       </main>
     </div>

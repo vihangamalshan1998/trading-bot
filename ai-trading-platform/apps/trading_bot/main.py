@@ -13,7 +13,7 @@ from apps.research.model import SingleSymbolActorCritic
 from core.risk.risk_manager import RiskManager
 from core.exchange.binance_client import BinanceFuturesAdapter
 from core.exchange.symbol_registry import registry
-from core.logging.logger import logger
+from core.logging.logger import logger, set_log_file
 from core.ai.memory import EventMemoryBuffer
 from core.schemas.state_schema import MarketState, PortfolioState, PositionState, MacroState, OrderRequest
 from core.config.settings import settings
@@ -467,6 +467,7 @@ class ProductionTradingBot:
         self.running = False
 
 if __name__ == "__main__":
+    set_log_file("logs/trading_bot.log")
     from core.config.settings import settings
     bot = ProductionTradingBot(symbols=settings.symbol_universe)
     try:

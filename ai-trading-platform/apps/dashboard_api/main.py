@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import uvicorn
 import asyncio
+import os
 from core.db.redis import redis_manager
 
 # Cache the last 50 metrics in memory
@@ -121,6 +122,24 @@ async def get_trade_history():
     raw_history = await redis_manager.redis.lrange("dashboard:trade_history", 0, -1)
     history = [json.loads(item) for item in raw_history]
     return {"history": history}
+
+@app.get("/api/logs/{bot_name}")
+async def get_bot_logs(bot_name: str):
+    """Returns the last 50 lines of the requested bot's log file."""
+    allowed_bots = ["market_collector", "ai_trainer", "trading_bot"]
+    if bot_name not in allowed_bots:
+        return {"logs": ["Invalid bot name requested."]}
+        
+    log_path = f"logs/{bot_name}.log"
+    if not os.path.exists(log_path):
+        return {"logs": [f"Log file not found: {log_path} (Bot may not have started yet)"]}
+        
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            return {"logs": lines[-100:]}
+    except Exception as e:
+        return {"logs": [f"Error reading logs: {e}"]}
 
 if __name__ == "__main__":
     uvicorn.run("apps.dashboard_api.main:app", host="0.0.0.0", port=8000, reload=True)

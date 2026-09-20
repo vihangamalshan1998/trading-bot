@@ -3,9 +3,10 @@ import sys
 import signal
 
 from apps.market_collector.service import MarketCollectorService
-from core.logging.logger import logger
+from core.logging.logger import logger, set_log_file
 
 async def main():
+    set_log_file("logs/market_collector.log")
     service = MarketCollectorService()
     
     # Graceful shutdown handler

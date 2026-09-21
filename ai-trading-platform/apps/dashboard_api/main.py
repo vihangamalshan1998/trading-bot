@@ -159,9 +159,11 @@ import subprocess
 
 @app.post("/api/system/pm2/stop")
 async def stop_pm2():
-    """Emergency stop all pm2 processes"""
+    """Emergency stop all pm2 processes except the dashboard itself"""
     try:
-        result = subprocess.run("pm2 stop all", shell=True, capture_output=True, text=True)
+        # Explicitly name the bots so we don't kill the dashboard-api
+        bots_to_kill = "market-collector macro-collector ai-trainer trading-bot"
+        result = subprocess.run(f"pm2 stop {bots_to_kill}", shell=True, capture_output=True, text=True)
         if result.returncode == 0:
             return {"status": "success", "message": "All bots stopped successfully."}
         else:
@@ -171,9 +173,10 @@ async def stop_pm2():
 
 @app.post("/api/system/pm2/restart")
 async def restart_pm2():
-    """Restart all pm2 processes"""
+    """Restart all pm2 processes except dashboard"""
     try:
-        result = subprocess.run("pm2 restart all", shell=True, capture_output=True, text=True)
+        bots_to_restart = "market-collector macro-collector ai-trainer trading-bot"
+        result = subprocess.run(f"pm2 restart {bots_to_restart}", shell=True, capture_output=True, text=True)
         if result.returncode == 0:
             return {"status": "success", "message": "All bots restarted successfully."}
         else:

@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import time
 import os
+import collections
 from typing import Dict, Any
 
 from core.db.redis import redis_manager
@@ -76,6 +77,10 @@ class ProductionTradingBot:
         )
         self.macro_state = MacroState(timestamp=time.time())
         self.market_states: Dict[str, MarketState] = {}
+        
+        # Phase 12: LSTM Sliding Window Sequence (120 steps * 5s = 10 minutes)
+        self.sequence_length = 120
+        self.state_history = collections.defaultdict(lambda: collections.deque(maxlen=self.sequence_length))
         
     async def listen_macro(self):
         await self.redis.connect()
@@ -209,7 +214,18 @@ class ProductionTradingBot:
                     if sym not in self.market_states:
                         continue
                         
-                    state_tensor, macro_features = self._build_state_vector(sym)
+                    state_vector, macro_features = self._build_state_vector(sym)
+                    
+                    # 1b. Update Sliding Window History
+                    self.state_history[sym].append(state_vector.squeeze(0).tolist()) # Remove batch dim, convert to list
+                    
+                    # Pad sequence if we don't have enough history yet
+                    seq = list(self.state_history[sym])
+                    while len(seq) < self.sequence_length:
+                        seq.insert(0, seq[0] if len(seq) > 0 else state_vector.squeeze(0).tolist())
+                        
+                    # Forward Pass (shape: batch=1, seq_len=120, feature=41)
+                    state_tensor = torch.tensor([seq], dtype=torch.float32)
                     
                     with torch.no_grad():
                         action_logits, expected_return = self.model(state_tensor)
@@ -433,9 +449,13 @@ class ProductionTradingBot:
                                         "experience_id": str(uuid.uuid4()),
                                         "timestamp": int(time.time()),
                                         "symbol": sym,
-                                        "market_state": market.features,
-                                        "macro_state": macro_features,
-                                        "portfolio_state": [self.portfolio_state.wallet_balance, self.portfolio_state.equity], # Abbreviated
+                                        "market_state": seq, # Save full 2D sequence [120, 41]
+                                        "macro_state": None, 
+                                        "portfolio_state": None, 
+                                        "derivatives_state": {
+                                            "target_size": float(target_size),
+                                            "price_offset": float(price_offset)
+                                        },
                                         "position_before": float(pos.quantity),
                                         "entry_price": float(pos.entry_price),
                                         "action": side,

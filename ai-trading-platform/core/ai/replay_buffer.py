@@ -96,22 +96,40 @@ class ReplayBuffer:
         states, actions, rewards, next_states, dones = [], [], [], [], []
         
         for exp in batch:
-            # Flat state concatenation
-            state = []
-            if exp.portfolio_state: state.extend(exp.portfolio_state)
-            if exp.market_state: state.extend(exp.market_state)
-            state.append(exp.position_before or 0.0)
-            if exp.macro_state: state.extend(exp.macro_state)
-            else: state.extend([0.0] * 13) # Time (2), Funding (1), Blanks (10)
+            # Check if this experience stores a 2D Sliding Window Sequence
+            if exp.market_state and isinstance(exp.market_state, list) and len(exp.market_state) > 0 and isinstance(exp.market_state[0], list):
+                state = exp.market_state
+                # Force pad to 120 steps just in case it's a legacy sequence (e.g. 12 steps)
+                while len(state) < 120:
+                    state.insert(0, state[0])
+            else:
+                # Flat state concatenation (Legacy 1D)
+                state = []
+                if exp.portfolio_state: state.extend(exp.portfolio_state)
+                if exp.market_state: state.extend(exp.market_state)
+                state.append(exp.position_before or 0.0)
+                if exp.macro_state: state.extend(exp.macro_state)
+                else: state.extend([0.0] * 13) # Time (2), Funding (1), Blanks (10)
+                
+                # FAKE SEQUENCE: Pad Legacy 1D state to 120 steps to prevent PyTorch ValueError!
+                state = [state] * 120
             
             n_state = exp.next_state if getattr(exp, "next_state", None) else state # fallback
             
             # 4 outputs for Actor Head: [Action, Confidence, Target_Size, Price_Offset]
-            act = [0.0, exp.confidence or 0.0, 0.0, 0.0]
+            target_size = exp.derivatives_state.get("target_size", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
+            price_offset = exp.derivatives_state.get("price_offset", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
+            
+            # Revert [0, 1] stored values back to [-1, 1] for neural network tanh targets!
+            raw_confidence = (exp.confidence * 2.0) - 1.0 if exp.confidence is not None else 0.0
+            raw_target_size = (target_size * 2.0) - 1.0 if target_size > 0 else 0.0
+            raw_price_offset = (price_offset * 2.0) - 1.0 if price_offset > 0 else 0.0
+            
+            act = [0.0, raw_confidence, raw_target_size, raw_price_offset]
             if exp.action == "OPEN_LONG": act[0] = 0.5
             elif exp.action == "OPEN_SHORT": act[0] = -0.5
-            elif exp.action == "CLOSE_LONG": act[0] = -0.1
-            elif exp.action == "CLOSE_SHORT": act[0] = 0.1
+            elif exp.action == "CLOSE_LONG": act[0] = -0.5
+            elif exp.action == "CLOSE_SHORT": act[0] = 0.5
             
             states.append(state)
             actions.append(act)

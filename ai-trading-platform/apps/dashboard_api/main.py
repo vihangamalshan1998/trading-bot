@@ -161,19 +161,25 @@ import subprocess
 async def stop_pm2():
     """Emergency stop all pm2 processes"""
     try:
-        subprocess.run(["pm2", "stop", "all"], check=True)
-        return {"status": "success", "message": "All bots stopped successfully."}
+        result = subprocess.run("pm2 stop all", shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            return {"status": "success", "message": "All bots stopped successfully."}
+        else:
+            return {"status": "error", "message": f"PM2 Error: {result.stderr}"}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to stop bots: {e}"}
+        return {"status": "error", "message": f"Failed to stop bots: {str(e)}"}
 
 @app.post("/api/system/pm2/restart")
 async def restart_pm2():
     """Restart all pm2 processes"""
     try:
-        subprocess.run(["pm2", "restart", "all"], check=True)
-        return {"status": "success", "message": "All bots restarted successfully."}
+        result = subprocess.run("pm2 restart all", shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            return {"status": "success", "message": "All bots restarted successfully."}
+        else:
+            return {"status": "error", "message": f"PM2 Error: {result.stderr}"}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to restart bots: {e}"}
+        return {"status": "error", "message": f"Failed to restart bots: {str(e)}"}
 
 if __name__ == "__main__":
     uvicorn.run("apps.dashboard_api.main:app", host="0.0.0.0", port=8000, reload=True)

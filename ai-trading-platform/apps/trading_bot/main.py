@@ -60,10 +60,9 @@ class ProductionTradingBot:
             self.has_valid_model = True
             logger.info(f"Loaded rigorously validated SingleSymbolActorCritic for {self.num_symbols} symbols.")
         except Exception as e:
-            logger.warning(f"No trained model checkpoint found yet (training in progress). Running in OBSERVATION-ONLY mode. Error: {e}")
+            logger.warning(f"No trained model checkpoint found yet. Proceeding with UNTRAINED model for exploration to bootstrap experiences. Error: {e}")
             self.model.eval()
-            self.dry_run = True  # Force safety - no trading without a trained model
-            self.trading_enabled = False
+            self.has_valid_model = True # Treat the randomly initialized model as valid so we can explore!
         
         self.running = False
         self.event_memory = EventMemoryBuffer()

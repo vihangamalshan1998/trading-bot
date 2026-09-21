@@ -350,6 +350,8 @@ class ProductionTradingBot:
                                     tick_size = sym_config.tick_size if hasattr(sym_config, 'tick_size') else market.mid_price * 0.0001
                                     offset_amount = (price_offset * 10) * tick_size
                                     
+                                    binance_side = "BUY" if side in ["OPEN_LONG", "CLOSE_SHORT"] else "SELL"
+                                    
                                     if binance_side == "BUY":
                                         limit_price = market.mid_price - offset_amount
                                     else:

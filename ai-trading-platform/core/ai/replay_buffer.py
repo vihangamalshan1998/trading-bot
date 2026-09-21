@@ -101,11 +101,13 @@ class ReplayBuffer:
             if exp.portfolio_state: state.extend(exp.portfolio_state)
             if exp.market_state: state.extend(exp.market_state)
             state.append(exp.position_before or 0.0)
+            if exp.macro_state: state.extend(exp.macro_state)
+            else: state.extend([0.0] * 13) # Time (2), Funding (1), Blanks (10)
             
             n_state = exp.next_state if getattr(exp, "next_state", None) else state # fallback
             
-            # Simple discrete/continuous action mock parse
-            act = [0.0, exp.confidence or 0.0, 0.0]
+            # 4 outputs for Actor Head: [Action, Confidence, Target_Size, Price_Offset]
+            act = [0.0, exp.confidence or 0.0, 0.0, 0.0]
             if exp.action == "OPEN_LONG": act[0] = 0.5
             elif exp.action == "OPEN_SHORT": act[0] = -0.5
             elif exp.action == "CLOSE_LONG": act[0] = -0.1

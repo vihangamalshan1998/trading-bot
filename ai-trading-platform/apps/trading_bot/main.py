@@ -52,7 +52,7 @@ class ProductionTradingBot:
         
         # 4. Strict Model Checkpoint Loading (graceful if no checkpoint yet)
         self.has_valid_model = False
-        self.model = SingleSymbolActorCritic(input_dim=28)
+        self.model = SingleSymbolActorCritic(input_dim=41)
         try:
             # This calls the strictly validated loader that checks architecture and active status
             self.model = self.registry.load_model(self.model)
@@ -110,7 +110,7 @@ class ProductionTradingBot:
                 except Exception as e:
                     logger.error(f"Error parsing market state for {symbol}: {e}")
                     
-    def _build_state_vector(self, symbol: str) -> torch.Tensor:
+    def _build_state_vector(self, symbol: str) -> tuple[torch.Tensor, list]:
         obs = []
         
         # 1. Portfolio (2 dims)
@@ -126,7 +126,17 @@ class ProductionTradingBot:
         pos = self.portfolio_state.positions[symbol]
         obs.append(float(pos.quantity))
         
-        return torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+        # 4. Macro State (13 dims: 2 Time + 1 Funding + 10 Blank)
+        current_hour = time.localtime().tm_hour
+        current_min = time.localtime().tm_min
+        minute_of_day = current_hour * 60 + current_min
+        time_sin = np.sin(2 * np.pi * minute_of_day / 1440.0)
+        time_cos = np.cos(2 * np.pi * minute_of_day / 1440.0)
+        
+        macro_features = [float(time_sin), float(time_cos), 0.0] + [0.0] * 10
+        obs.extend(macro_features)
+        
+        return torch.tensor(obs, dtype=torch.float32).unsqueeze(0), macro_features
                 
     async def sync_dashboard(self):
         """Periodically fetches live positions from Binance and publishes to dashboard."""
@@ -200,7 +210,7 @@ class ProductionTradingBot:
                     if sym not in self.market_states:
                         continue
                         
-                    state_tensor = self._build_state_vector(sym)
+                    state_tensor, macro_features = self._build_state_vector(sym)
                     
                     with torch.no_grad():
                         action_logits, expected_return = self.model(state_tensor)
@@ -240,12 +250,14 @@ class ProductionTradingBot:
                         action_val = random.uniform(-1.0, 1.0)
                         confidence = random.uniform(0.3, 1.0) # Ensure it passes the 0.3 threshold to trade
                         target_size = random.uniform(0.1, 1.0)
+                        price_offset = random.uniform(0.0, 1.0) # Limit Order Offset
                         logger.info(f"[{sym}] EXPLORING: Applying curiosity noise to discover new strategies.")
                     else:
                         # Deterministic Policy (85% chance to use learned weights)
                         action_val = action_logits[0]
                         confidence = (action_logits[1] + 1.0) / 2.0
                         target_size = (action_logits[2] + 1.0) / 2.0
+                        price_offset = (action_logits[3] + 1.0) / 2.0
                     
                     # 1. Determine Predicted Side (Even if confidence is low, we want to know what it *leans* towards)
                     if action_val < -0.2: predicted_side = "SHORT"
@@ -257,6 +269,7 @@ class ProductionTradingBot:
                         "confidence": float(confidence),
                         "action_val": float(action_val),
                         "target_size": float(target_size),
+                        "price_offset": float(price_offset),
                         "predicted_side": predicted_side
                     }
                     asyncio.create_task(redis_manager.redis.set(f"ai:state:{sym}", json.dumps(ai_state_data)))
@@ -331,10 +344,24 @@ class ProductionTradingBot:
                                     except Exception as e:
                                         logger.warning(f"[{sym}] Could not set leverage (might already be set): {e}")
 
-                                    # Execute on Binance
-                                    client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
-                                    binance_side = "BUY" if side in ["OPEN_LONG", "CLOSE_SHORT"] else "SELL"
+                                    # Calculate LIMIT order price using offset
+                                    # Price Offset [0, 1] mapped to spread (e.g. 0 to 10 ticks away)
+                                    tick_size = sym_config.tick_size if hasattr(sym_config, 'tick_size') else market.mid_price * 0.0001
+                                    offset_amount = (price_offset * 10) * tick_size
                                     
+                                    if binance_side == "BUY":
+                                        limit_price = market.mid_price - offset_amount
+                                    else:
+                                        limit_price = market.mid_price + offset_amount
+                                        
+                                    limit_price = round(limit_price, 4) # Temporary formatting
+                                    
+                                    # Execute on Binance (Simulating Limit for now via API)
+                                    client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
+                                    
+                                    # order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id)
+                                    # Since Limit orders aren't fully implemented in the mock adapter yet, we just log the intent and use market.
+                                    logger.info(f"[{sym}] LIMIT INTENT: {binance_side} at {limit_price:.4f} (Offset: {offset_amount:.4f})")
                                     order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id)
                                     logger.info(f"[{sym}] ORDER SUCCESS: {order_res.get('orderId')}")
                                     
@@ -405,6 +432,7 @@ class ProductionTradingBot:
                                         "timestamp": int(time.time()),
                                         "symbol": sym,
                                         "market_state": market.features,
+                                        "macro_state": macro_features,
                                         "portfolio_state": [self.portfolio_state.wallet_balance, self.portfolio_state.equity], # Abbreviated
                                         "position_before": float(pos.quantity),
                                         "entry_price": float(pos.entry_price),

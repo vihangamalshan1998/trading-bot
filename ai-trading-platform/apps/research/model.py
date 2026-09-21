@@ -141,27 +141,36 @@ class MultiSymbolActorCritic(nn.Module):
 
 class SingleSymbolActorCritic(nn.Module):
     """
-    ActorCritic for a single symbol state (e.g. 29-dim from historical downloader).
+    Phase 2 Upgrade: ActorCritic for a single symbol state with LSTM Memory and Limit Orders.
+    Input dims: 41 (2 Portfolio + 25 Market + 1 Position + 2 Time + 1 Funding Rate + 10 Blank)
     """
-    def __init__(self, input_dim: int = 28, hidden_dim: int = 128):
+    def __init__(self, input_dim: int = 41, hidden_dim: int = 128):
         super().__init__()
         
         self.shared_norm = nn.LayerNorm(input_dim)
-        self.shared_fc1 = nn.Linear(input_dim, hidden_dim)
-        self.shared_fc2 = nn.Linear(hidden_dim, hidden_dim)
         
-        # Actor Head: action, confidence, size
-        self.actor_fc = nn.Linear(hidden_dim, 3)
+        # Replace Linear layers with an LSTM core
+        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, batch_first=True)
+        
+        # Actor Head: action, confidence, size, price_offset (4 outputs)
+        self.actor_fc = nn.Linear(hidden_dim, 4)
         
         # Critic Head
         self.critic_fc = nn.Linear(hidden_dim, 1)
         
     def forward(self, x: torch.Tensor):
+        # Support both (batch_size, input_dim) and (batch_size, seq_len, input_dim)
+        if x.dim() == 2:
+            x = x.unsqueeze(1) # (batch_size, 1, input_dim)
+            
         x = self.shared_norm(x)
-        x = F.relu(self.shared_fc1(x))
-        x = F.relu(self.shared_fc2(x))
         
-        actor_out = torch.tanh(self.actor_fc(x))
-        critic_out = self.critic_fc(x)
+        lstm_out, _ = self.lstm(x)
+        
+        # Take the output from the last time step in the sequence
+        last_out = lstm_out[:, -1, :]
+        
+        actor_out = torch.tanh(self.actor_fc(last_out))
+        critic_out = self.critic_fc(last_out)
         
         return actor_out, critic_out

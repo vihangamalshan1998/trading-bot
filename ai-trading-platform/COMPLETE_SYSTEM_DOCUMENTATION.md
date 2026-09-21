@@ -62,14 +62,15 @@ At the very top sits `run_system.py`.
     *   If the unrealized loss drops below the `maintenance_margin_rate`, it simulates a **Liquidation**, instantly wiping the position and slapping the AI with a massive negative reward penalty. 
     *   It supports trading `N` symbols at the exact same time (cross-margin).
 
-### 4.2 Latent World Model (`apps/research/world_model.py`)
-*   **Purpose**: The "Brain" of the operation. Inspired by Google Deepmind's DreamerV3. Instead of just reacting to the current price, this AI learns how the market works.
+### 4.2 Latent World Model (`apps/research/world_model.py` / `model.py`)
+*   **Purpose**: The "Brain" of the operation. In V2, we upgraded to an **LSTM (Long Short-Term Memory)** architecture. Instead of just reacting to the current price, this AI learns how the market works over a 10-minute historical context window.
 *   **Logic**:
-    1.  **Encoder**: Takes the massive raw array of prices, spreads, and macro events and compresses it into a small, dense vector called the `latent_state`.
-    2.  **Recurrent Memory (GRU)**: A type of memory node. It takes the previous hidden state and the current latent state to maintain a running memory of the chart's history.
-    3.  **Transition Model**: The most important part. It tries to predict what the *next* latent state will be before it even happens. It learns to "dream" market movements.
-    4.  **Decoder**: Takes the "dream" and tries to reconstruct the actual prices and predict the expected PnL (Reward).
-    5.  **Policy**: The actual trading logic. It looks at the "dream" and decides whether to BUY, SELL, or HOLD.
+    1.  **3D Tensor Input**: Takes a massive `[Batch, 120, 41]` tensor representing a 10-minute sliding window (120 steps). Each step contains 41 features (31 live market data points + 10 placeholder `0.0` slots for future alt-data).
+    2.  **Encoder**: Takes the massive array of prices, spreads, and macro events and compresses it into a small, dense vector called the `latent_state`.
+    3.  **LSTM Layer**: A type of memory node. It takes the previous hidden state and the current latent state to maintain a running memory of the chart's history, tracking velocity and momentum.
+    4.  **Transition Model**: The most important part. It tries to predict what the *next* latent state will be before it even happens. It learns to "dream" market movements.
+    5.  **Decoder**: Takes the "dream" and tries to reconstruct the actual prices and predict the expected PnL (Reward).
+    6.  **Policy**: The actual trading logic. It looks at the "dream" and decides whether to BUY, SELL, or HOLD.
 
 ### 4.3 Offline Training Loop (`apps/research/train_world_model.py`)
 *   **Purpose**: To teach the World Model how to trade using historical data.
@@ -103,12 +104,13 @@ At the very top sits `run_system.py`.
 *   **Logic**: 
     1. It connects to the Redis streams fed by the `Market Data Collector`.
     2. It pulls the latest Macro Events from the `Event Memory System`.
-    3. It concatenates this data into the strict 9-dim tensor required by PyTorch.
-    4. It queries the `LatentWorldModel` for an action (e.g., `OPEN_LONG`).
-    5. It passes the action through the `RiskManager`.
-    6. If approved, it queries the `SymbolRegistry` to format the price/quantity perfectly.
-    7. Finally, it fires the trade to the `BinanceFuturesClient`.
-    8. It logs the result in the `ReplayBuffer`.
+    3. It concatenates this data into a 41-dimensional vector, padding the 10 placeholder slots with `0.0`.
+    4. It pushes this vector into a `collections.deque(maxlen=120)` to maintain a sliding 10-minute window.
+    5. It feeds the massive 2D matrix into the `LSTM Model` for an action (e.g., `OPEN_LONG`).
+    6. It passes the action through the `RiskManager`.
+    7. If approved, it queries the `SymbolRegistry` to format the price/quantity perfectly.
+    8. Finally, it fires the trade to the `BinanceFuturesClient`.
+    9. It logs the result (including the massive 120-step matrix) into the `ReplayBuffer` for offline/online PPO training.
     *(This entire loop runs asynchronously thousands of times per minute, reacting instantly to market shifts).*
 
 ---

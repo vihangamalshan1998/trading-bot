@@ -26,21 +26,29 @@ Raw data is useless to an AI without context. The event is passed to the `Featur
 - The Order Book updates its local bids/asks in-memory.
 - The Feature Engine instantly recalculates critical micro-structural indicators: **Spread Basis Points**, **Order Book Imbalance**, and **Rolling VWAP** (Volume Weighted Average Price).
 
-### Step C: State Broadcasting & Persistence
-Once features are calculated:
-1. **The Fast Path (Live Inference):** The state is serialized and pushed to a local **Redis** instance (`market:state:BTCUSDT`).
-2. **The Slow Path (Experience Storage):** The state is buffered in memory. Once 50 updates accumulate, they are bulk-inserted into **MySQL** via SQLAlchemy. *Batching is critical to prevent SQL transaction locks from stalling the WebSocket listener.*
+### Step C: The V2 Memory Buffer (Sliding Window)
+In the V1 architecture, the AI only looked at a single static snapshot (a 1D array of 31 features). In the new **V2 Architecture**, the system constructs a continuous **10-minute movie** of the market:
+1. Every 5 seconds, the Feature Engine generates a new row of 41 features (31 active market data points + 10 pre-allocated slots for future external sensors).
+2. The `ReplayBuffer` utilizes a `collections.deque(maxlen=120)` to maintain a sliding window of the last 120 snapshots (120 steps × 5 seconds = 10 minutes).
+3. This creates a massive 2D matrix representing velocity, momentum, and historical context.
 
-### Step D: AI Inference (The Brain)
+### Step D: State Broadcasting & Persistence
+Once the sliding window is updated:
+1. **The Fast Path (Live Inference):** The entire 120-step sequence is serialized and pushed to a local **Redis** instance (`market:state:BTCUSDT`).
+2. **The Slow Path (Experience Storage):** When a trade occurs, the entire 120x41 matrix is batched into an `Experience` object. Once 64 experiences accumulate, they are bulk-inserted into **MySQL** via SQLAlchemy into the `market_state` column. *Batching is critical to prevent SQL transaction locks from stalling the WebSocket listener.*
+
+
+
+### Step E: AI Inference (The Brain)
 Running in a completely separate process, the `TradingBotService` constantly monitors the Redis state bus. 
-1. It pulls the latest feature vector.
-2. It feeds the vector into `AITradingStrategy`, which loads a pre-trained **PyTorch** Neural Network.
-3. The network runs a `forward()` pass and outputs a deterministic action: **Buy**, **Sell**, or **Hold**.
+1. It pulls the latest feature matrix (the 120-step sliding window).
+2. It feeds the massive 3D tensor (`[Batch, 120, 41]`) into `AITradingStrategy`, which loads a pre-trained **PyTorch LSTM Neural Network**.
+3. The LSTM network runs a `forward()` pass, evaluating the momentum and order book shifts, and outputs a deterministic action: **Buy**, **Sell**, or **Hold**.
 
-### Step E: Safety & Execution
+### Step F: Safety & Execution
 If the AI decides to "Buy", the intent is intercepted by the `RiskManager`.
 - The Risk Manager evaluates the order against hard-coded constraints: *Does this exceed our $1000 max position size? Are we in a deep daily drawdown? Is the price a fat-finger error?*
-- If approved, the asynchronous `BinanceSpotAdapter` submits the actual cryptographic POST request to the Binance API to execute the trade.
+- If approved, the asynchronous `BinanceSpotAdapter` (or `BinanceFuturesAdapter`) submits the actual cryptographic POST request to the Binance API to execute the trade.
 
 ---
 

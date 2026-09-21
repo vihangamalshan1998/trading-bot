@@ -30,24 +30,26 @@ The backbone of the system. It connects to the `wss://stream.testnet.binance.vis
 It utilizes Python's `asyncio` to simultaneously process `depthUpdate` events (which route into the `OrderBookBuilder`) and `aggTrade` events (which route into the `FeatureEngine`).
 
 ### 2. Feature Engine (`apps/feature_engine`)
-Takes the raw Level 2 Order Book state and trades, and derives predictive features:
-- **Spread BPS**: Distance between Best Ask and Best Bid.
-- **Mid Price**: Average of Best Bid/Ask.
-- **Micro Price**: Volume-weighted mid price.
-- **Imbalance**: Ratio of Bid volume to total Bid/Ask volume at the top of the book.
-- **VWAP**: Rolling Volume Weighted Average Price based on recent trades.
+Takes the raw Level 2 Order Book state and trades, and derives predictive features into a **41-dimension array**:
+- **Live Features (31):**
+  - **Spread BPS**: Distance between Best Ask and Best Bid.
+  - **Mid Price**: Average of Best Bid/Ask.
+  - **Micro Price**: Volume-weighted mid price.
+  - **Imbalance**: Ratio of Bid volume to total Bid/Ask volume at the top of the book.
+  - **VWAP**: Rolling Volume Weighted Average Price based on recent trades.
+- **Placeholder Features (10):** Pre-allocated slots (default `0.0`) designed to accept future alternative data (Twitter sentiment, Whale movements) without requiring a database reset or model retraining.
 
 ### 3. Redis State Bus (`core/db/redis.py`)
 To prevent the Trading Bot from needing its own redundant WebSocket connections (which can trigger rate limits), the `MarketCollector` serializes the output of the `FeatureEngine` into a JSON dictionary and pushes it to Redis (`market:state:BTCUSDT`) every second. 
 
 ### 4. Experience MySQL Storage (`core/db/repository.py`)
-Because line-by-line SQL inserts would crash the async event loop at high frequencies, the `MarketFeatureRepository` buffers the features into memory. Once `batch_size` (e.g. 50) is hit, it executes a high-speed bulk `session.add_all()` to push the history to MySQL for offline training.
+Because line-by-line SQL inserts would crash the async event loop at high frequencies, the `ReplayBuffer` utilizes a `collections.deque(maxlen=120)` to maintain a sliding window. Once a trade action occurs, it takes the entire 120x41 2D matrix (a 10-minute snapshot) and saves it as a JSON payload in MySQL for offline training.
 
 ### 5. Risk Manager (`core/risk`)
 Positioned deliberately as a firewall between the `TradingBot` and the `BinanceSpotAdapter`. It tracks simulated daily PnL and total `max_position_usd` inventory. If the AI hallucinates a massive order, the `RiskManager.approve_order()` will reject it before it hits the network.
 
-### 6. RL Engine (`apps/research`)
+### 6. RL Engine (`apps/research` & `apps/trainer`)
 A self-contained Sandbox mirroring the live environment.
-- **`SpotTradingEnv`**: An OpenAI `gymnasium` environment that calculates MTM portfolio value and standardizes the AI action space to 0, 1, 2.
-- **`TradingNet`**: A PyTorch MLP neural network.
-- **`train.py`**: A Policy Gradient (REINFORCE) loop that teaches the `TradingNet` to maximize profits and minimize drawdowns, saving the resulting `.pth` checkpoint.
+- **`ReplayBuffer`**: Pulls historical 120-step matrices and dynamically pads any legacy records to ensure consistent sequence lengths.
+- **`TradingNet (V2)`**: A PyTorch **LSTM (Long Short-Term Memory)** neural network that processes 3D Tensors of shape `[Batch, 120, 41]`. This allows the AI to learn velocity, momentum, and complex temporal patterns.
+- **`ppo.py`**: A Proximal Policy Optimization (PPO) loop that teaches the `TradingNet` to maximize profits by learning from both historical simulations and live continuous trades, saving the resulting `.pth` checkpoint.

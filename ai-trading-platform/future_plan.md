@@ -16,3 +16,4 @@ The AI Model now outputs a `price_offset` decision specifically designed for Lim
 Right now, we use Gemini for News. We could make it more advanced by plugging in additional data streams:
 - **X (Twitter) Firehose APIs:** To detect when major influencers (like Elon Musk) tweet about specific coins (e.g., DOGE) for instant momentum trading.
 - **On-Chain Data APIs:** To track massive whale movements. For example, detecting when 10,000 BTC moves out of a cold wallet onto an exchange, allowing the AI to predict and short a massive dump before it happens.
+> **V2 Note:** The V2 architecture has successfully pre-baked 10 placeholder (`0.0`) slots directly into the 41-feature tensor. This means when we physically connect these API data streams in the future, they will simply overwrite the `0.0`s. **The model will NOT need to be deleted or rebuilt.**

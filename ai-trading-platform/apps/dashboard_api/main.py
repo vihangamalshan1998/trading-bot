@@ -155,5 +155,25 @@ async def download_bot_logs(bot_name: str):
         
     return FileResponse(path=log_path, filename=f"{bot_name}.log", media_type="text/plain")
 
+import subprocess
+
+@app.post("/api/system/pm2/stop")
+async def stop_pm2():
+    """Emergency stop all pm2 processes"""
+    try:
+        subprocess.run(["pm2", "stop", "all"], check=True)
+        return {"status": "success", "message": "All bots stopped successfully."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to stop bots: {e}"}
+
+@app.post("/api/system/pm2/restart")
+async def restart_pm2():
+    """Restart all pm2 processes"""
+    try:
+        subprocess.run(["pm2", "restart", "all"], check=True)
+        return {"status": "success", "message": "All bots restarted successfully."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to restart bots: {e}"}
+
 if __name__ == "__main__":
     uvicorn.run("apps.dashboard_api.main:app", host="0.0.0.0", port=8000, reload=True)

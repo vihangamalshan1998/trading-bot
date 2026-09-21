@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import Swal from 'sweetalert2'
 import './App.css'
 
 // LogViewer Component (Must be outside App to prevent re-mounting on every interval)
@@ -209,6 +210,36 @@ function App() {
   }, [activeTab]);
   // Removed internal LogViewer definition
 
+  // System Controls (PM2)
+  const handleSystemAction = (action) => {
+    const isStop = action === 'stop';
+    Swal.fire({
+      title: isStop ? 'EMERGENCY STOP?' : 'Restart System?',
+      text: isStop 
+        ? "This will instantly kill all trading bots and background processes! Are you sure?"
+        : "This will restart all PM2 processes. Trading will briefly pause.",
+      icon: isStop ? 'error' : 'warning',
+      showCancelButton: true,
+      confirmButtonColor: isStop ? '#d33' : '#f39c12',
+      cancelButtonColor: '#3085d6',
+      confirmButtonText: isStop ? 'YES, KILL EVERYTHING!' : 'Yes, restart it!'
+    }).then(async (result) => {
+      if (result.isConfirmed) {
+        try {
+          const res = await fetch(`/api/system/pm2/${action}`, { method: 'POST' });
+          const data = await res.json();
+          if (data.status === 'success') {
+            Swal.fire('Success!', data.message, 'success');
+          } else {
+            Swal.fire('Error!', data.message, 'error');
+          }
+        } catch (err) {
+          Swal.fire('Error!', 'Failed to communicate with backend.', 'error');
+        }
+      }
+    });
+  };
+
   return (
     <div className="dashboard-container">
       <header className="glass-header">
@@ -241,6 +272,21 @@ function App() {
             onClick={() => setActiveTab('logs')}
           >
             Live Logs
+          </button>
+        </div>
+
+        <div className="system-controls" style={{ display: 'flex', gap: '10px', marginLeft: 'auto', marginRight: '20px' }}>
+          <button 
+            onClick={() => handleSystemAction('stop')}
+            style={{ backgroundColor: '#ff4757', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+          >
+            dYYa KILL SWITCH
+          </button>
+          <button 
+            onClick={() => handleSystemAction('restart')}
+            style={{ backgroundColor: '#ffa502', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+          >
+            dYY Restart Bots
           </button>
         </div>
         

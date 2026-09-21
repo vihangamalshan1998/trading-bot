@@ -233,7 +233,7 @@ class ProductionTradingBot:
                             # Leverage amplifies PNL %
                             pnl_pct_leveraged = pnl_pct * pos_check.leverage
                             
-                            if pnl_pct_leveraged <= -0.15: # -15% HARD STOP LOSS
+                            if pnl_pct_leveraged <= -0.10: # -10% HARD STOP LOSS
                                 logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI.")
                                 hard_stop_triggered = True
                                 

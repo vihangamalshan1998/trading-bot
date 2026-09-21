@@ -13,7 +13,7 @@ class ModelRegistry:
 
     def validate_dimension(self, model, num_symbols: int):
         if model.__class__.__name__ == "SingleSymbolActorCritic":
-            expected_dim = 28
+            expected_dim = 41
         else:
             expected_dim = get_expected_observation_dimension(num_symbols)
             
@@ -21,6 +21,8 @@ class ModelRegistry:
 
         if hasattr(model, "shared_fc1"):
             input_layer = model.shared_fc1
+        elif hasattr(model, "lstm"):
+            input_layer = model.lstm
         elif hasattr(model, "fc1"):
             input_layer = model.fc1
         elif hasattr(model, "encoder"):
@@ -39,7 +41,7 @@ class ModelRegistry:
         actual_input_dim = getattr(
             input_layer,
             "in_features",
-            None,
+            getattr(input_layer, "input_size", None)
         )
 
         if actual_input_dim != expected_dim:

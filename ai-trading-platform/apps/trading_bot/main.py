@@ -186,7 +186,7 @@ class ProductionTradingBot:
                     }
                     await redis_manager.redis.set("dashboard:portfolio", json.dumps(dashboard_data))
             except Exception as e:
-                pass # Fail silently so it doesn't crash the bot
+                logger.error(f"Dashboard sync failed: {e}")
             await asyncio.sleep(5.0)
 
     async def inference_loop(self):
@@ -245,6 +245,7 @@ class ProductionTradingBot:
                         action_val = -1.0 if pos_check.quantity > 0 else 1.0
                         confidence = 1.0
                         target_size = 0.0
+                        price_offset = 0.0 # Force immediate execution (0 offset)
                     elif random.random() < 0.02:
                         # Exploration Noise (2% chance to explore a random strategy)
                         action_val = random.uniform(-1.0, 1.0)

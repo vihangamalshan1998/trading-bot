@@ -161,8 +161,8 @@ import subprocess
 async def stop_pm2():
     """Emergency stop all pm2 processes except the dashboard itself"""
     try:
-        # Explicitly name the bots so we don't kill the dashboard-api
-        bots_to_kill = "market-collector macro-collector ai-trainer trading-bot"
+        # Explicitly name ONLY the trading bot to kill
+        bots_to_kill = "trading-bot"
         result = subprocess.run(f"pm2 stop {bots_to_kill}", shell=True, capture_output=True, text=True)
         if result.returncode == 0:
             return {"status": "success", "message": "All bots stopped successfully."}

@@ -406,7 +406,9 @@ class ProductionTradingBot:
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
                                     
                                     logger.info(f"[{sym}] LIMIT INTENT: {binance_side} at {limit_price_str} (Offset: {offset_amount:.4f})")
-                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTC")
+                                    
+                                    is_closing = "CLOSE" in side
+                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTC", reduce_only=is_closing)
                                     
                                     actual_order_id = order_res.get('orderId') or client_order_id
                                     logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")
@@ -515,6 +517,14 @@ class ProductionTradingBot:
     async def start(self):
         self.running = True
         await registry.initialize_from_exchange(self.binance)
+        
+        # Cancel all open orders on startup to ensure a clean slate and free up margin
+        try:
+            for sym in self.symbols:
+                await self.binance.cancel_all_orders(sym)
+            logger.info("Cleared all pre-existing open orders on startup.")
+        except Exception as e:
+            logger.warning(f"Failed to clear open orders on startup: {e}")
         
         # Fetch actual account balance to allow RiskManager to approve trades
         try:

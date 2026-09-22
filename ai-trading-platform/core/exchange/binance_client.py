@@ -102,7 +102,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         params = {"symbol": symbol}
         return await self._request("GET", "/fapi/v1/openOrders", signed=True, params=params)
         
-    async def create_order(self, symbol: str, side: str, quantity: float, client_order_id: str, order_type: str = "MARKET", price: float = None, time_in_force: str = None) -> Dict[str, Any]:
+    async def create_order(self, symbol: str, side: str, quantity: float, client_order_id: str, order_type: str = "MARKET", price: str = None, time_in_force: str = None, reduce_only: bool = False) -> Dict[str, Any]:
         """Places a live order with idempotency using client_order_id."""
         params = {
             "symbol": symbol,
@@ -111,6 +111,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             "quantity": f"{quantity}",
             "newClientOrderId": client_order_id
         }
+        if reduce_only:
+            params["reduceOnly"] = "true"
         if order_type.upper() == "LIMIT":
             if price is None:
                 raise ValueError("Limit orders require a price")
@@ -128,6 +130,12 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         }
         logger.info(f"Cancelling Order: {params}")
         return await self._request("DELETE", "/fapi/v1/order", signed=True, params=params)
+
+    async def cancel_all_orders(self, symbol: str) -> Dict[str, Any]:
+        """Cancels all active orders for a symbol."""
+        params = {"symbol": symbol}
+        logger.info(f"Cancelling all orders for: {symbol}")
+        return await self._request("DELETE", "/fapi/v1/allOpenOrders", signed=True, params=params)
 
     async def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
         """Sets the leverage for a symbol."""

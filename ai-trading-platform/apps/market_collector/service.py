@@ -33,6 +33,7 @@ class MarketCollectorService:
         self.feature_engines: Dict[str, FeatureEngine] = {sym: FeatureEngine() for sym in self.active_symbols}
         self.ai_engines: Dict[str, AIEngine] = {sym: AIEngine(sym) for sym in self.active_symbols}
         self._update_counters: Dict[str, int] = {sym: 0 for sym in self.active_symbols}
+        self._funding_rates: Dict[str, float] = {sym: 0.0 for sym in self.active_symbols}  # Live funding rates
         
         self.repository = MarketFeatureRepository(batch_size=50)
 
@@ -90,7 +91,7 @@ class MarketCollectorService:
                 features["volume"] = 0.0
                 features["vwap"] = features["vwap_recent"] or features["mid_price"]
                 features["volatility"] = 0.0
-                features["funding_rate"] = 0.0
+                features["funding_rate"] = self._funding_rates.get(symbol, 0.0)  # Inject live funding rate
                 features["features"] = ai_features_array
                 
                 # Push to Redis asynchronously
@@ -105,12 +106,14 @@ class MarketCollectorService:
             self.feature_engines[symbol].add_trade(payload)
             
         elif event_type == "markPriceUpdate":
-            # Extract funding rate and mark price, push to Redis
+            # Extract funding rate and mark price, push to Redis AND update local cache
+            funding_rate = float(payload.get("r", 0.0))
+            self._funding_rates[symbol] = funding_rate  # Cache for next MarketState publish
             state_key = f"derivatives:state:{symbol}"
             deriv_state = {
                 "mark_price": float(payload.get("p", 0.0)),
                 "index_price": float(payload.get("i", 0.0)),
-                "funding_rate": float(payload.get("r", 0.0)),
+                "funding_rate": funding_rate,
                 "next_funding_time": payload.get("T", 0)
             }
             asyncio.create_task(redis_manager.set_state(state_key, deriv_state, ttl_seconds=60))

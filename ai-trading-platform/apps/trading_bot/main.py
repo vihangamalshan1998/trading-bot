@@ -133,14 +133,29 @@ class ProductionTradingBot:
         pos = self.portfolio_state.positions[symbol]
         obs.append(float(pos.quantity))
         
-        # 4. Macro State (13 dims: 2 Time + 1 Funding + 10 Blank)
+        # 4. Macro State (13 dims: 2 Time + 3 Gemini + 1 Funding Rate + 7 Reserved)
         current_hour = time.localtime().tm_hour
         current_min = time.localtime().tm_min
         minute_of_day = current_hour * 60 + current_min
         time_sin = np.sin(2 * np.pi * minute_of_day / 1440.0)
         time_cos = np.cos(2 * np.pi * minute_of_day / 1440.0)
         
-        macro_features = [float(time_sin), float(time_cos), 0.0] + [0.0] * 10
+        # Slot 1-2: Time Encoding (already used)
+        # Slot 3: Gemini Sentiment Score (-1.0 Bearish → 1.0 Bullish)
+        # Slot 4: Gemini Volatility Expectation (0.0 Calm → 1.0 Panic)
+        # Slot 5: Macro Regime (-1.0 Bear, 0.0 Neutral, 1.0 Bull)
+        # Slot 6: Live Binance Funding Rate (negative = shorts pay, positive = longs pay)
+        # Slots 7-13: Reserved for Twitter / On-Chain data (future Phase 5)
+        funding_rate = self.market_states[symbol].funding_rate if symbol in self.market_states else 0.0
+        macro_features = [
+            float(time_sin),
+            float(time_cos),
+            float(self.macro_state.sentiment_score),      # Gemini sentiment
+            float(self.macro_state.volatility_expectation), # Gemini volatility
+            float(self.macro_state.regime),               # Bull/Bear regime
+            float(funding_rate),                          # Live Binance Funding Rate
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0           # 7 reserved slots
+        ]
         obs.extend(macro_features)
         
         return torch.tensor(obs, dtype=torch.float32).unsqueeze(0), macro_features

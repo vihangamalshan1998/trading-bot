@@ -390,7 +390,7 @@ class ProductionTradingBot:
 
                                     # Calculate LIMIT order price using offset
                                     # Price Offset [0, 1] mapped to spread (e.g. 0 to 10 ticks away)
-                                    tick_size = sym_config.tick_size if hasattr(sym_config, 'tick_size') else market.mid_price * 0.0001
+                                    tick_size = 10 ** -sym_config.price_precision
                                     offset_amount = (price_offset * 10) * tick_size
                                     
                                     binance_side = "BUY" if side in ["OPEN_LONG", "CLOSE_SHORT"] else "SELL"
@@ -400,13 +400,13 @@ class ProductionTradingBot:
                                     else:
                                         limit_price = market.mid_price + offset_amount
                                         
-                                    limit_price = round(limit_price, 4) # Temporary formatting
+                                    limit_price_str = sym_config.format_price(limit_price)
                                     
                                     # Execute on Binance (Real LIMIT Order)
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
                                     
-                                    logger.info(f"[{sym}] LIMIT INTENT: {binance_side} at {limit_price:.4f} (Offset: {offset_amount:.4f})")
-                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price, time_in_force="GTC")
+                                    logger.info(f"[{sym}] LIMIT INTENT: {binance_side} at {limit_price_str} (Offset: {offset_amount:.4f})")
+                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTC")
                                     
                                     actual_order_id = order_res.get('orderId') or client_order_id
                                     logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")

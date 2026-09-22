@@ -114,7 +114,7 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         if order_type.upper() == "LIMIT":
             if price is None:
                 raise ValueError("Limit orders require a price")
-            params["price"] = f"{price:.4f}"
+            params["price"] = f"{price}"
             params["timeInForce"] = time_in_force or "GTC"
             
         logger.info(f"Placing Order: {params}")

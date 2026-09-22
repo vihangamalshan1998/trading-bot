@@ -366,7 +366,7 @@ function App() {
       <main className="dashboard-grid">
         {activeTab === 'live' && (
           <>
-            <div className="top-dashboard-row">
+            <div className="top-dashboard-row" style={{ gridColumn: '1 / -1' }}>
               <section className="glass-panel stat-panel flex-2">
                 <h3>Macro Sentiment & News</h3>
                 <div className="stat-grid">

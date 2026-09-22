@@ -390,7 +390,7 @@ class ProductionTradingBot:
 
                                     # Calculate LIMIT order price using offset
                                     # Price Offset [0, 1] mapped to spread (e.g. 0 to 10 ticks away)
-                                    tick_size = 10 ** -sym_config.price_precision
+                                    tick_size = sym_config.tick_size
                                     offset_amount = (price_offset * 10) * tick_size
                                     
                                     binance_side = "BUY" if side in ["OPEN_LONG", "CLOSE_SHORT"] else "SELL"

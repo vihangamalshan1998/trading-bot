@@ -35,6 +35,7 @@ class SymbolConfig:
         self.min_quantity: float = 0.001
         self.max_quantity: float = 1000.0
         self.min_notional: float = 5.0
+        self.tick_size: float = 0.01
         
         # New additions for Phase 2
         self.metadata = SymbolMetadata(symbol)
@@ -48,9 +49,11 @@ class SymbolConfig:
         return format_str.format(truncated)
         
     def format_price(self, price: float) -> str:
-        """Truncates price to the strictly allowed precision."""
-        factor = 10 ** self.price_precision
-        truncated = math.floor(price * factor) / factor
+        """Truncates price to the strictly allowed tick size."""
+        # Truncate to nearest tick size to avoid rounding up
+        # We add a tiny epsilon to handle floating point math errors before flooring
+        ticks = math.floor((price + 1e-10) / self.tick_size)
+        truncated = ticks * self.tick_size
         format_str = f"{{:.{self.price_precision}f}}"
         return format_str.format(truncated)
 
@@ -83,6 +86,8 @@ class SymbolRegistry:
                         config.max_quantity = float(f["maxQty"])
                     elif f["filterType"] == "MIN_NOTIONAL":
                         config.min_notional = float(f["notional"])
+                    elif f["filterType"] == "PRICE_FILTER":
+                        config.tick_size = float(f["tickSize"])
                         
                 self._symbols[sym] = config
                 

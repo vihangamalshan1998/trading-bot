@@ -412,7 +412,7 @@ function App() {
                 
                 <section className="glass-panel stat-panel" style={{ flex: '1 1 auto', overflowY: 'auto', maxHeight: '500px' }}>
                   <h3>Live Open Positions</h3>
-                  {(!data.portfolio_state.positions || Object.keys(data.portfolio_state.positions).length === 0) ? (
+                  {(!data?.portfolio_state?.positions || Object.keys(data.portfolio_state.positions).length === 0) ? (
                     <div className="empty-state" style={{ padding: '2rem 1rem' }}>
                       <p>No active positions.</p>
                       <small>AI is scanning for optimal entry points...</small>

@@ -400,14 +400,48 @@ function App() {
                 )}
               </section>
 
-              <section className="glass-panel stat-panel flex-1">
-                 <h3>Maker Fee Analytics</h3>
-                 <div className="fee-saved-container">
-                    <div className="fee-saved-amount profit">${savedFees.toFixed(2)}</div>
-                    <div className="fee-saved-label">Capital Saved via AI Limit Orders</div>
-                    <div className="fee-saved-subtitle">Bypassed Taker Fees (0.05% → 0.02%)</div>
-                 </div>
-              </section>
+              <div className="flex-1" style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+                <section className="glass-panel stat-panel" style={{ flex: '0 0 auto' }}>
+                   <h3 style={{ marginBottom: '1rem' }}>Maker Fee Analytics</h3>
+                   <div className="fee-saved-container" style={{ padding: '1rem' }}>
+                      <div className="fee-saved-amount profit" style={{ fontSize: '2rem' }}>${savedFees.toFixed(2)}</div>
+                      <div className="fee-saved-label" style={{ fontSize: '0.9rem' }}>Capital Saved via AI Limit Orders</div>
+                      <div className="fee-saved-subtitle" style={{ fontSize: '0.7rem' }}>Bypassed Taker Fees (0.05% → 0.02%)</div>
+                   </div>
+                </section>
+                
+                <section className="glass-panel stat-panel" style={{ flex: '1 1 auto', overflowY: 'auto', maxHeight: '500px' }}>
+                  <h3>Live Open Positions</h3>
+                  {(!data.portfolio_state.positions || Object.keys(data.portfolio_state.positions).length === 0) ? (
+                    <div className="empty-state" style={{ padding: '2rem 1rem' }}>
+                      <p>No active positions.</p>
+                      <small>AI is scanning for optimal entry points...</small>
+                    </div>
+                  ) : (
+                    <div className="position-list">
+                      {Object.entries(data.portfolio_state.positions).map(([sym, pos], idx) => {
+                        if (pos.quantity === 0) return null;
+                        const isLong = pos.quantity > 0;
+                        const pnlClass = pos.unrealized_pnl >= 0 ? 'profit' : 'loss';
+                        return (
+                          <div key={idx} className={`position-card ${isLong ? 'long' : 'short'}`}>
+                            <div className="pos-header">
+                              <span className="symbol">{sym}</span>
+                              <span className="side">{isLong ? 'LONG' : 'SHORT'}</span>
+                            </div>
+                            <div className="pos-details">
+                              <span>Size: {Math.abs(pos.quantity).toFixed(4)}</span>
+                              <span className={pnlClass}>
+                                {pos.unrealized_pnl >= 0 ? '+' : ''}{pos.unrealized_pnl.toFixed(2)} USDT
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              </div>
             </div>
 
             <section className="glass-panel market-panel full-width">

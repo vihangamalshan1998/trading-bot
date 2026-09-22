@@ -412,27 +412,27 @@ function App() {
                 
                 <section className="glass-panel stat-panel" style={{ flex: '1 1 auto', overflowY: 'auto', maxHeight: '500px' }}>
                   <h3>Live Open Positions</h3>
-                  {(!data?.portfolio_state?.positions || Object.keys(data.portfolio_state.positions).length === 0) ? (
+                  {(!data.positions || data.positions.length === 0) ? (
                     <div className="empty-state" style={{ padding: '2rem 1rem' }}>
                       <p>No active positions.</p>
                       <small>AI is scanning for optimal entry points...</small>
                     </div>
                   ) : (
                     <div className="position-list">
-                      {Object.entries(data.portfolio_state.positions).map(([sym, pos], idx) => {
+                      {data.positions.map((pos, idx) => {
                         if (pos.quantity === 0) return null;
-                        const isLong = pos.quantity > 0;
-                        const pnlClass = pos.unrealized_pnl >= 0 ? 'profit' : 'loss';
+                        const isLong = pos.side.toUpperCase().includes("LONG");
+                        const pnlClass = pos.pnl >= 0 ? 'profit' : 'loss';
                         return (
                           <div key={idx} className={`position-card ${isLong ? 'long' : 'short'}`}>
                             <div className="pos-header">
-                              <span className="symbol">{sym}</span>
-                              <span className="side">{isLong ? 'LONG' : 'SHORT'}</span>
+                              <span className="symbol">{pos.symbol}</span>
+                              <span className="side">{pos.side}</span>
                             </div>
                             <div className="pos-details">
                               <span>Size: {Math.abs(pos.quantity).toFixed(4)}</span>
                               <span className={pnlClass}>
-                                {pos.unrealized_pnl >= 0 ? '+' : ''}{pos.unrealized_pnl.toFixed(2)} USDT
+                                {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT
                               </span>
                             </div>
                           </div>
@@ -487,6 +487,13 @@ function App() {
                             <div className="progress-bar" style={{ width: `${(state.ai_confidence || 0) * 100}%` }}></div>
                           </div>
                           <span>{((state.ai_confidence || 0) * 100).toFixed(1)}%</span>
+                        </div>
+                        <div className="ai-brain-metric">
+                          <span>Target Size:</span>
+                          <div className="progress-bar-container">
+                            <div className="progress-bar alloc" style={{ width: `${(state.ai_target_size || 0) * 100}%` }}></div>
+                          </div>
+                          <span>{((state.ai_target_size || 0) * 100).toFixed(1)}%</span>
                         </div>
                         
                         <div className="brain-map-wrapper">

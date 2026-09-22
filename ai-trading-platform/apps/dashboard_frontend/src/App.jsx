@@ -3,7 +3,79 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsi
 import Swal from 'sweetalert2'
 import './App.css'
 
-// LogViewer Component (Must be outside App to prevent re-mounting on every interval)
+// --- New Feature: Neural Brain Map ---
+const NeuralBrainMap = ({ stateVector }) => {
+  if (!stateVector || stateVector.length === 0) return <div className="brain-map-empty">Awaiting Neural Signals...</div>;
+  
+  return (
+    <div className="neural-brain-map">
+      <div className="brain-grid">
+        {stateVector.map((val, idx) => {
+          // Normalize intensity for color
+          let intensity = Math.min(Math.abs(val), 1.0);
+          if (idx >= 2 && idx <= 26) {
+             // Market features might be scaled differently, we just cap for visual effect
+             intensity = Math.min(Math.abs(val) / 5.0, 1.0);
+          } else if (idx >= 30) {
+             // Macro slots
+             intensity = Math.min(Math.abs(val) * 2, 1.0);
+          }
+          
+          let colorClass = "neutral";
+          if (val > 0.01) colorClass = "positive";
+          if (val < -0.01) colorClass = "negative";
+          if (Math.abs(val) < 0.000001) colorClass = "empty";
+          
+          return (
+            <div key={idx} className={`brain-node ${colorClass}`} style={{ opacity: colorClass !== 'empty' ? 0.3 + (intensity * 0.7) : 0.2 }} title={`Slot ${idx}: ${val}`}></div>
+          )
+        })}
+      </div>
+      <div className="brain-legend">
+        <span>Portfolio (0-1)</span>
+        <span>Market Data (2-26)</span>
+        <span>Position (27)</span>
+        <span>Alt-Data (28-40)</span>
+      </div>
+    </div>
+  );
+};
+
+// --- New Feature: Funding Rate Speedometer ---
+const FundingGauge = ({ rate }) => {
+  // Normalize rate between -0.001 and +0.001 for gauge rotation
+  const clampedRate = Math.max(-0.001, Math.min(0.001, rate));
+  // Map -0.001 to -90deg, 0 to 0deg, +0.001 to +90deg
+  const rotation = (clampedRate / 0.001) * 90;
+  
+  let status = "NORMAL";
+  let color = "#27c93f"; // Green
+  
+  if (rate > 0.0001) {
+     status = "OVER-LEVERAGED (LONG)";
+     color = "#ff5f56"; // Red
+  } else if (rate < -0.0001) {
+     status = "OVER-LEVERAGED (SHORT)";
+     color = "#ff5f56"; // Red
+  } else if (rate === 0.0001) {
+     status = "BASELINE";
+     color = "#ffbd2e"; // Yellow
+  }
+
+  return (
+    <div className="funding-gauge-container">
+      <div className="gauge-label">Live Funding Rate</div>
+      <div className="gauge">
+        <div className="gauge-bg"></div>
+        <div className="gauge-needle" style={{ transform: `rotate(${rotation}deg)` }}></div>
+      </div>
+      <div className="gauge-value" style={{ color: color }}>{(rate * 100).toFixed(4)}%</div>
+      <div className="gauge-status">{status}</div>
+    </div>
+  );
+};
+
+
 const LogViewer = ({ botName, title, activeTab }) => {
   const [logs, setLogs] = useState([]);
   const logsEndRef = useRef(null);
@@ -13,15 +85,13 @@ const LogViewer = ({ botName, title, activeTab }) => {
   const handleScroll = () => {
     if (!containerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
-    
-    // If user scrolls up (more than 30px from bottom), turn OFF auto-scroll.
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 30;
     setAutoScroll(isAtBottom);
   };
 
   useEffect(() => {
     if (activeTab !== 'logs') return;
-    if (!autoScroll) return; // Pause polling entirely so logs stop jumping
+    if (!autoScroll) return; 
     
     const fetchLogs = async () => {
       try {
@@ -112,27 +182,26 @@ const LogViewer = ({ botName, title, activeTab }) => {
 function App() {
   const [activeTab, setActiveTab] = useState('live') // 'live', 'training', 'history', 'logs'
   const [activeSubTab, setActiveSubTab] = useState('trading_bot') // 'market_collector', 'ai_trainer', 'trading_bot'
+  const [expandedTradeIdx, setExpandedTradeIdx] = useState(null);
   
-  // Live Trading State
   const [data, setData] = useState({
     equity: 0.0,
     positions: [],
     market_states: {}
   });
 
-  // System Stats (Macro & Model)
   const [systemStats, setSystemStats] = useState({
     news_count: 0,
     latest_sentiment: 0.0,
     latest_regime: 0.0,
     model_update_count: 0,
-    last_model_update_time: null
+    last_model_update_time: null,
+    latest_headlines: []
   });
 
-  // Training State
   const [trainingMetrics, setTrainingMetrics] = useState([]);
+  const [tradeHistory, setTradeHistory] = useState([]);
 
-  // Fetch Live Trading Updates & System Stats
   useEffect(() => {
     const fetchLiveState = async () => {
       try {
@@ -163,10 +232,8 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const [tradeHistory, setTradeHistory] = useState([]);
-
   useEffect(() => {
-    if (activeTab !== 'history') return;
+    if (activeTab !== 'history' && activeTab !== 'live') return;
     
     const fetchHistory = async () => {
       try {
@@ -183,7 +250,6 @@ function App() {
     return () => clearInterval(interval);
   }, [activeTab]);
 
-  // Fetch Training Metrics from API
   useEffect(() => {
     if (activeTab !== 'training') return;
     
@@ -191,13 +257,10 @@ function App() {
       try {
         const res = await fetch("/api/training");
         const json = await res.json();
-        
-        // Format timestamp for display
         const formatted = json.metrics.map((m, idx) => ({
           ...m,
           name: `Step ${idx}`,
         }));
-        
         setTrainingMetrics(formatted);
       } catch (err) {
         console.error("Failed to fetch training metrics:", err);
@@ -208,9 +271,7 @@ function App() {
     const interval = setInterval(fetchMetrics, 2000);
     return () => clearInterval(interval);
   }, [activeTab]);
-  // Removed internal LogViewer definition
 
-  // System Controls (PM2)
   const handleSystemAction = (action) => {
     const isStop = action === 'stop';
     Swal.fire({
@@ -227,11 +288,11 @@ function App() {
       if (result.isConfirmed) {
         try {
           const res = await fetch(`/api/system/pm2/${action}`, { method: 'POST' });
-          const data = await res.json();
-          if (data.status === 'success') {
-            Swal.fire('Success!', data.message, 'success');
+          const json = await res.json();
+          if (json.status === 'success') {
+            Swal.fire('Success!', json.message, 'success');
           } else {
-            Swal.fire('Error!', data.message, 'error');
+            Swal.fire('Error!', json.message, 'error');
           }
         } catch (err) {
           Swal.fire('Error!', 'Failed to communicate with backend.', 'error');
@@ -240,37 +301,41 @@ function App() {
     });
   };
 
+  const toggleAccordion = (idx) => {
+    if (expandedTradeIdx === idx) {
+      setExpandedTradeIdx(null);
+    } else {
+      setExpandedTradeIdx(idx);
+    }
+  }
+
+  // --- Calculate Maker Fee Analytics ---
+  const totalVolume = tradeHistory.reduce((acc, trade) => {
+      const px = trade.entry_price || trade.price || 0;
+      return acc + (trade.quantity * px);
+  }, 0);
+  // Taker fee: 0.05%, Maker fee: 0.02%. Savings = 0.03%
+  const savedFees = totalVolume * 0.0003;
+
   return (
     <div className="dashboard-container">
       <header className="glass-header">
         <div className="header-title">
           <div className="pulse-indicator"></div>
-          <h1>AI Trading Platform</h1>
+          <h1>AI Trading Terminal <span className="version-badge">v5.0</span></h1>
         </div>
         
         <div className="nav-tabs">
-          <button 
-            className={`tab-btn ${activeTab === 'live' ? 'active' : ''}`}
-            onClick={() => setActiveTab('live')}
-          >
+          <button className={`tab-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => setActiveTab('live')}>
             Live Market & Macro
           </button>
-          <button 
-            className={`tab-btn ${activeTab === 'training' ? 'active' : ''}`}
-            onClick={() => setActiveTab('training')}
-          >
+          <button className={`tab-btn ${activeTab === 'training' ? 'active' : ''}`} onClick={() => setActiveTab('training')}>
             Brain & Training
           </button>
-          <button 
-            className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`}
-            onClick={() => setActiveTab('history')}
-          >
+          <button className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`} onClick={() => setActiveTab('history')}>
             Positions & History
           </button>
-          <button 
-            className={`tab-btn ${activeTab === 'logs' ? 'active' : ''}`}
-            onClick={() => setActiveTab('logs')}
-          >
+          <button className={`tab-btn ${activeTab === 'logs' ? 'active' : ''}`} onClick={() => setActiveTab('logs')}>
             Live Logs
           </button>
         </div>
@@ -278,15 +343,15 @@ function App() {
         <div className="system-controls" style={{ display: 'flex', gap: '10px', marginLeft: 'auto', marginRight: '20px' }}>
           <button 
             onClick={() => handleSystemAction('stop')}
-            style={{ backgroundColor: '#ff4757', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+            style={{ backgroundColor: 'rgba(255, 71, 87, 0.2)', color: '#ff4757', border: '1px solid #ff4757', padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', transition: 'all 0.3s' }}
           >
-            dYYa KILL SWITCH
+            🛑 KILL SWITCH
           </button>
           <button 
             onClick={() => handleSystemAction('restart')}
-            style={{ backgroundColor: '#ffa502', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+            style={{ backgroundColor: 'rgba(255, 165, 2, 0.2)', color: '#ffa502', border: '1px solid #ffa502', padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', transition: 'all 0.3s' }}
           >
-            dYY Restart Bots
+            🔄 Restart Bots
           </button>
         </div>
         
@@ -301,95 +366,77 @@ function App() {
       <main className="dashboard-grid">
         {activeTab === 'live' && (
           <>
-            <section className="glass-panel stat-panel">
-              <h3>Macro Sentiment & News</h3>
-              <div className="stat-grid">
-                <div className="stat-card">
-                  <span className="stat-label">News Articles Analyzed</span>
-                  <span className="stat-value highlight">{systemStats.news_count}</span>
+            <div className="top-dashboard-row">
+              <section className="glass-panel stat-panel flex-2">
+                <h3>Macro Sentiment & News</h3>
+                <div className="stat-grid">
+                  <div className="stat-card">
+                    <span className="stat-label">News Analyzed</span>
+                    <span className="stat-value highlight">{systemStats.news_count}</span>
+                  </div>
+                  <div className="stat-card">
+                    <span className="stat-label">Gemini Sentiment</span>
+                    <span className={`stat-value ${systemStats.latest_sentiment > 0 ? 'profit' : systemStats.latest_sentiment < 0 ? 'loss' : ''}`}>
+                      {systemStats.latest_sentiment.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="stat-card">
+                    <span className="stat-label">Market Regime</span>
+                    <span className={`stat-value ${systemStats.latest_regime > 0 ? 'profit' : systemStats.latest_regime < 0 ? 'loss' : ''}`}>
+                      {systemStats.latest_regime > 0 ? 'Bullish' : systemStats.latest_regime < 0 ? 'Bearish' : 'Neutral'}
+                    </span>
+                  </div>
                 </div>
-                <div className="stat-card">
-                  <span className="stat-label">Gemini Sentiment Score</span>
-                  <span className={`stat-value ${systemStats.latest_sentiment > 0 ? 'profit' : systemStats.latest_sentiment < 0 ? 'loss' : ''}`}>
-                    {systemStats.latest_sentiment.toFixed(2)}
-                  </span>
-                </div>
-                <div className="stat-card">
-                  <span className="stat-label">Market Regime</span>
-                  <span className={`stat-value ${systemStats.latest_regime > 0 ? 'profit' : systemStats.latest_regime < 0 ? 'loss' : ''}`}>
-                    {systemStats.latest_regime > 0 ? 'Bullish' : systemStats.latest_regime < 0 ? 'Bearish' : 'Neutral'}
-                  </span>
-                </div>
-              </div>
 
-              {systemStats.latest_headlines && systemStats.latest_headlines.length > 0 && (
-                <div className="news-headlines" style={{ marginTop: '20px', padding: '15px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px' }}>
-                  <h4 style={{ color: '#8b9bb4', marginBottom: '10px', fontSize: '12px', textTransform: 'uppercase' }}>Latest Headlines Analyzed</h4>
-                  <ul style={{ listStyleType: 'none', padding: 0, margin: 0 }}>
-                    {systemStats.latest_headlines.map((headline, idx) => (
-                      <li key={idx} style={{ 
-                        padding: '8px 0', 
-                        borderBottom: idx < systemStats.latest_headlines.length - 1 ? '1px solid rgba(255,255,255,0.05)' : 'none',
-                        fontSize: '13px',
-                        color: '#c9d1d9',
-                        lineHeight: '1.4'
-                      }}>
-                        📰 {headline}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </section>
-
-            <section className="glass-panel position-panel">
-              <h3>Active AI Positions</h3>
-              <div className="position-list">
-                {data.positions.length === 0 ? (
-                  <p className="empty-text">No active positions.</p>
-                ) : (
-                  data.positions.map((pos, idx) => (
-                    <div key={idx} className={`position-card ${pos.side.toLowerCase()}`}>
-                      <div className="pos-header">
-                        <span className="symbol">{pos.symbol}</span>
-                        <span className="side">{pos.side}</span>
-                      </div>
-                      <div className="pos-details">
-                        <span>Qty: {pos.quantity}</span>
-                        <span className={`pnl ${pos.pnl >= 0 ? 'profit' : 'loss'}`}>
-                          PnL: ${pos.pnl.toFixed(2)}
-                        </span>
-                      </div>
-                    </div>
-                  ))
+                {systemStats.latest_headlines && systemStats.latest_headlines.length > 0 && (
+                  <div className="news-headlines">
+                    <h4>Latest Headlines</h4>
+                    <ul>
+                      {systemStats.latest_headlines.map((headline, idx) => (
+                        <li key={idx}>📰 {headline}</li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
-              </div>
-            </section>
+              </section>
+
+              <section className="glass-panel stat-panel flex-1">
+                 <h3>Maker Fee Analytics</h3>
+                 <div className="fee-saved-container">
+                    <div className="fee-saved-amount profit">${savedFees.toFixed(2)}</div>
+                    <div className="fee-saved-label">Capital Saved via AI Limit Orders</div>
+                    <div className="fee-saved-subtitle">Bypassed Taker Fees (0.05% → 0.02%)</div>
+                 </div>
+              </section>
+            </div>
 
             <section className="glass-panel market-panel full-width">
-              <h3>Live Market States (Micro-Structure)</h3>
+              <h3>Live Market States & AI Brain Maps</h3>
               <div className="market-list">
                 {Object.keys(data.market_states).length === 0 ? (
                   <p className="empty-text">Awaiting market data from Binance...</p>
                 ) : (
-                  Object.entries(data.market_states).map(([sym, state], idx) => (
+                  Object.entries(data.market_states).map(([sym, state], idx) => {
+                    const latestFunding = state.state_vector && state.state_vector.length > 33 ? state.state_vector[33] : 0;
+                    
+                    return (
                     <div key={idx} className="market-card">
                       <div className="market-card-header">
                         <span className="symbol">{sym}</span>
                         <span className={`trend ${state.trend ? state.trend.toLowerCase() : ''}`}>{state.trend || 'N/A'}</span>
                       </div>
-                      <div className="market-card-body">
+                      
+                      <div className="market-card-metrics-row">
                         <div className="market-metric">
                           <span className="label">Price</span>
                           <span className="value">${state.mid_price ? state.mid_price.toFixed(2) : '0.00'}</span>
                         </div>
                         <div className="market-metric">
-                          <span className="label">Spread (BPS)</span>
-                          <span className="value">{state.spread_bps ? state.spread_bps.toFixed(1) : '0.0'}</span>
+                          <span className="label">Spread</span>
+                          <span className="value">{state.spread_bps ? state.spread_bps.toFixed(1) : '0.0'} bps</span>
                         </div>
                         <div className="market-metric">
-                          <span className="label">Imbalance</span>
-                          <span className="value">{state.imbalance ? state.imbalance.toFixed(2) : '0.00'}</span>
+                          <FundingGauge rate={latestFunding} />
                         </div>
                       </div>
                       
@@ -407,16 +454,14 @@ function App() {
                           </div>
                           <span>{((state.ai_confidence || 0) * 100).toFixed(1)}%</span>
                         </div>
-                        <div className="ai-brain-metric">
-                          <span>Target Alloc:</span>
-                          <div className="progress-bar-container">
-                            <div className="progress-bar alloc" style={{ width: `${(state.ai_target_size || 0) * 100}%` }}></div>
-                          </div>
-                          <span>{((state.ai_target_size || 0) * 100).toFixed(1)}%</span>
+                        
+                        <div className="brain-map-wrapper">
+                          <div className="brain-map-title">Live 41-Slot Neural Tensor</div>
+                          <NeuralBrainMap stateVector={state.state_vector} />
                         </div>
                       </div>
                     </div>
-                  ))
+                  )})
                 )}
               </div>
             </section>
@@ -425,8 +470,8 @@ function App() {
         
         {activeTab === 'history' && (
           <section className="glass-panel full-width">
-            <h3>Detailed Open Positions</h3>
-            <div className="table-responsive">
+            <h3>Active AI Positions</h3>
+            <div className="table-responsive" style={{marginBottom: '2rem'}}>
               <table className="data-table">
                 <thead>
                   <tr>
@@ -465,8 +510,8 @@ function App() {
               </table>
             </div>
 
-            <h3 style={{ marginTop: '2rem' }}>AI Trade History (Last 100)</h3>
-            <div className="table-responsive">
+            <h3>AI Trade History (Last 100)</h3>
+            <div className="table-responsive accordion-table">
               <table className="data-table">
                 <thead>
                   <tr>
@@ -477,46 +522,63 @@ function App() {
                     <th>ENTRY PRICE</th>
                     <th>CLOSE PRICE</th>
                     <th>PNL (ROI)</th>
-                    <th>CONFIDENCE</th>
-                    <th>ORDER ID</th>
+                    <th>DETAILS</th>
                   </tr>
                 </thead>
                 <tbody>
                   {tradeHistory.length === 0 ? (
                     <tr>
-                      <td colSpan="9" className="empty-text">No trade history found.</td>
+                      <td colSpan="8" className="empty-text">No trade history found.</td>
                     </tr>
                   ) : (
-                    tradeHistory.map((trade, idx) => (
-                      <tr key={idx}>
-                        <td>{new Date(trade.timestamp * 1000).toLocaleString()}</td>
-                        <td className="symbol">{trade.symbol}</td>
-                        <td className={trade.side.includes("LONG") ? "long" : "short"}>{trade.side}</td>
-                        <td>{trade.quantity} {trade.symbol.replace('USDT', '')}</td>
-                        <td>
-                          {trade.entry_price 
-                            ? `$${trade.entry_price.toFixed(4)}` 
-                            : (trade.side.includes("OPEN") ? `$${trade.price.toFixed(4)}` : '-')}
-                        </td>
-                        <td>{trade.side.includes("CLOSE") ? `$${trade.price.toFixed(4)}` : '-'}</td>
-                        <td>
-                          {trade.realized_pnl !== undefined ? (
-                            <span className={trade.realized_pnl > 0 ? "profit" : "loss"}>
-                              ${trade.realized_pnl.toFixed(2)} ({trade.roi_pct > 0 ? '+' : ''}{trade.roi_pct.toFixed(2)}%)
-                            </span>
-                          ) : (
-                            '-'
+                    tradeHistory.map((trade, idx) => {
+                      const isExpanded = expandedTradeIdx === idx;
+                      return (
+                        <React.Fragment key={idx}>
+                          <tr className={`accordion-row ${isExpanded ? 'expanded' : ''}`} onClick={() => toggleAccordion(idx)}>
+                            <td>{new Date(trade.timestamp * 1000).toLocaleString()}</td>
+                            <td className="symbol">{trade.symbol}</td>
+                            <td className={trade.side.includes("LONG") ? "long" : "short"}>{trade.side}</td>
+                            <td>{trade.quantity} {trade.symbol.replace('USDT', '')}</td>
+                            <td>
+                              {trade.entry_price 
+                                ? `$${trade.entry_price.toFixed(4)}` 
+                                : (trade.side.includes("OPEN") ? `$${trade.price.toFixed(4)}` : '-')}
+                            </td>
+                            <td>{trade.side.includes("CLOSE") ? `$${trade.price.toFixed(4)}` : '-'}</td>
+                            <td>
+                              {trade.realized_pnl !== undefined ? (
+                                <span className={trade.realized_pnl > 0 ? "profit" : "loss"}>
+                                  ${trade.realized_pnl.toFixed(2)} ({trade.roi_pct > 0 ? '+' : ''}{trade.roi_pct.toFixed(2)}%)
+                                </span>
+                              ) : (
+                                '-'
+                              )}
+                            </td>
+                            <td>
+                               <button className="expand-btn">{isExpanded ? '▲' : '▼'}</button>
+                            </td>
+                          </tr>
+                          {isExpanded && (
+                            <tr className="accordion-details">
+                              <td colSpan="8">
+                                <div className="details-container">
+                                  <div className="detail-col">
+                                    <strong>Trade Metadata</strong>
+                                    <p>Order ID: <code>{trade.order_id || 'N/A'}</code></p>
+                                    <p>AI Confidence: <span className="highlight">{(trade.confidence * 100).toFixed(1)}%</span></p>
+                                  </div>
+                                  <div className="detail-col brain-col">
+                                    <strong>AI Neural Memory at Execution</strong>
+                                    <NeuralBrainMap stateVector={trade.state_vector} />
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
                           )}
-                        </td>
-                        <td>
-                           <div className="progress-bar-container" style={{ width: '80px', display: 'inline-block', marginRight: '10px' }}>
-                             <div className="progress-bar" style={{ width: `${(trade.confidence || 0) * 100}%` }}></div>
-                           </div>
-                           {(trade.confidence * 100).toFixed(1)}%
-                        </td>
-                        <td>{trade.order_id || 'N/A'}</td>
-                      </tr>
-                    ))
+                        </React.Fragment>
+                      )
+                    })
                   )}
                 </tbody>
               </table>
@@ -624,4 +686,3 @@ function App() {
 }
 
 export default App
-

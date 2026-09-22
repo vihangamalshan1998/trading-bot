@@ -101,10 +101,12 @@ async def get_system_state():
                 parsed_state["ai_confidence"] = ai_data.get("confidence", 0.0)
                 parsed_state["ai_target_size"] = ai_data.get("target_size", 0.0)
                 parsed_state["ai_predicted_side"] = ai_data.get("predicted_side", "WAITING")
+                parsed_state["state_vector"] = ai_data.get("state_vector", [])
             else:
                 parsed_state["ai_confidence"] = 0.0
                 parsed_state["ai_target_size"] = 0.0
                 parsed_state["ai_predicted_side"] = "WAITING"
+                parsed_state["state_vector"] = []
                 
             market_states[symbol] = parsed_state
             

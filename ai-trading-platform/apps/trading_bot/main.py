@@ -242,6 +242,16 @@ class ProductionTradingBot:
                             except Exception as e:
                                 logger.warning(f"[{sym}] Failed to cancel (maybe already filled/cancelled): {e}")
                             del self.active_orders[sym]
+                            
+                            # Sync position immediately
+                            try:
+                                positions = await self.binance.get_positions()
+                                for p in positions:
+                                    if p.get("symbol") == sym:
+                                        self.portfolio_state.positions[sym].quantity = float(p.get("positionAmt", 0))
+                                        break
+                            except: pass
+                            continue
                         else:
                             # Order is still active. Verify if it's already filled via Binance API
                             try:
@@ -250,6 +260,16 @@ class ProductionTradingBot:
                                 if not any(str(o.get('orderId')) == str(self.active_orders[sym]['order_id']) or o.get('clientOrderId') == self.active_orders[sym]['order_id'] for o in open_orders):
                                     logger.info(f"[{sym}] LIMIT ORDER FILLED/NO LONGER OPEN! Removing from tracker.")
                                     del self.active_orders[sym]
+                                    
+                                    # Sync position immediately
+                                    try:
+                                        positions = await self.binance.get_positions()
+                                        for p in positions:
+                                            if p.get("symbol") == sym:
+                                                self.portfolio_state.positions[sym].quantity = float(p.get("positionAmt", 0))
+                                                break
+                                    except: pass
+                                    continue
                                 else:
                                     logger.debug(f"[{sym}] Limit order still pending. Skipping tick.")
                                     continue
@@ -329,7 +349,8 @@ class ProductionTradingBot:
                         "action_val": float(action_val),
                         "target_size": float(target_size),
                         "price_offset": float(price_offset),
-                        "predicted_side": predicted_side
+                        "predicted_side": predicted_side,
+                        "state_vector": state_vector.squeeze(0).tolist()
                     }
                     asyncio.create_task(redis_manager.redis.set(f"ai:state:{sym}", json.dumps(ai_state_data)))
                     
@@ -460,7 +481,8 @@ class ProductionTradingBot:
                                         "quantity": float(qty_str),
                                         "price": market.mid_price,
                                         "confidence": float(confidence),
-                                        "order_id": order_res.get('orderId')
+                                        "order_id": order_res.get('orderId'),
+                                        "state_vector": state_vector.squeeze(0).tolist()
                                     }
                                     
                                     # Add Analytics for Closures

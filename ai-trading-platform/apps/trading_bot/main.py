@@ -82,6 +82,9 @@ class ProductionTradingBot:
         self.sequence_length = 120
         self.state_history = collections.defaultdict(lambda: collections.deque(maxlen=self.sequence_length))
         
+        # Limit Order Tracking
+        self.active_orders = {} # symbol -> {'order_id': str, 'timestamp': float}
+        
     async def listen_macro(self):
         await self.redis.connect()
         redis_conn = self.redis.redis
@@ -213,6 +216,31 @@ class ProductionTradingBot:
                 for sym in self.symbols:
                     if sym not in self.market_states:
                         continue
+                        
+                    # Check for pending Limit Order
+                    if sym in self.active_orders:
+                        time_elapsed = time.time() - self.active_orders[sym]['timestamp']
+                        if time_elapsed > 60:
+                            logger.info(f"[{sym}] LIMIT ORDER TIMEOUT (> 60s). Cancelling...")
+                            try:
+                                await self.binance.cancel_order(sym, self.active_orders[sym]['order_id'])
+                            except Exception as e:
+                                logger.warning(f"[{sym}] Failed to cancel (maybe already filled/cancelled): {e}")
+                            del self.active_orders[sym]
+                        else:
+                            # Order is still active. Verify if it's already filled via Binance API
+                            try:
+                                open_orders = await self.binance.get_open_orders(sym)
+                                # orderId from binance could be int or str, we check both string casts
+                                if not any(str(o.get('orderId')) == str(self.active_orders[sym]['order_id']) or o.get('clientOrderId') == self.active_orders[sym]['order_id'] for o in open_orders):
+                                    logger.info(f"[{sym}] LIMIT ORDER FILLED/NO LONGER OPEN! Removing from tracker.")
+                                    del self.active_orders[sym]
+                                else:
+                                    logger.debug(f"[{sym}] Limit order still pending. Skipping tick.")
+                                    continue
+                            except Exception as e:
+                                logger.warning(f"[{sym}] Error checking open orders: {e}")
+                                continue
                         
                     state_vector, macro_features = self._build_state_vector(sym)
                     
@@ -374,14 +402,17 @@ class ProductionTradingBot:
                                         
                                     limit_price = round(limit_price, 4) # Temporary formatting
                                     
-                                    # Execute on Binance (Simulating Limit for now via API)
+                                    # Execute on Binance (Real LIMIT Order)
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
                                     
-                                    # order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id)
-                                    # Since Limit orders aren't fully implemented in the mock adapter yet, we just log the intent and use market.
                                     logger.info(f"[{sym}] LIMIT INTENT: {binance_side} at {limit_price:.4f} (Offset: {offset_amount:.4f})")
-                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id)
-                                    logger.info(f"[{sym}] ORDER SUCCESS: {order_res.get('orderId')}")
+                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price, time_in_force="GTC")
+                                    
+                                    actual_order_id = order_res.get('orderId') or client_order_id
+                                    logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")
+                                    
+                                    # Track the limit order so we don't spam
+                                    self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time()}
                                     
                                     # Capture entry price before modifying position
                                     entry_px = self.portfolio_state.positions[sym].entry_price if sym in self.portfolio_state.positions else 0.0
@@ -440,9 +471,9 @@ class ProductionTradingBot:
                                         imm_reward = pnl
                                         imm_pnl = pnl
                                     elif "OPEN" in side:
-                                        # Simple fee penalty proxy for opening a trade
+                                        # Limit Maker fee penalty proxy for opening a trade
                                         notional_cost = float(qty_str) * market.mid_price
-                                        imm_reward = -(notional_cost * 0.0005) # 0.05% fee penalty
+                                        imm_reward = -(notional_cost * 0.0002) # 0.02% fee penalty
                                         
                                     # Record Experience
                                     exp_data = {

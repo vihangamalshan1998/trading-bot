@@ -97,15 +97,26 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         data = await self._request("GET", "/fapi/v2/positionRisk", signed=True)
         return [p for p in data if float(p.get("positionAmt", 0)) != 0]
         
-    async def create_order(self, symbol: str, side: str, quantity: float, client_order_id: str) -> Dict[str, Any]:
+    async def get_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
+        """Returns all open orders for a specific symbol."""
+        params = {"symbol": symbol}
+        return await self._request("GET", "/fapi/v1/openOrders", signed=True, params=params)
+        
+    async def create_order(self, symbol: str, side: str, quantity: float, client_order_id: str, order_type: str = "MARKET", price: float = None, time_in_force: str = None) -> Dict[str, Any]:
         """Places a live order with idempotency using client_order_id."""
         params = {
             "symbol": symbol,
             "side": side.upper(),
-            "type": "MARKET",
+            "type": order_type.upper(),
             "quantity": f"{quantity}",
             "newClientOrderId": client_order_id
         }
+        if order_type.upper() == "LIMIT":
+            if price is None:
+                raise ValueError("Limit orders require a price")
+            params["price"] = f"{price:.4f}"
+            params["timeInForce"] = time_in_force or "GTC"
+            
         logger.info(f"Placing Order: {params}")
         return await self._request("POST", "/fapi/v1/order", signed=True, params=params)
 

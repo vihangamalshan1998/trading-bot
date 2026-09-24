@@ -425,15 +425,32 @@ function App() {
                         const pnlClass = pos.pnl >= 0 ? 'profit' : 'loss';
                         return (
                           <div key={idx} className={`position-card ${isLong ? 'long' : 'short'}`}>
-                            <div className="pos-header">
-                              <span className="symbol">{pos.symbol}</span>
+                            <div className="pos-header" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                              <span className="symbol" style={{ fontWeight: 'bold' }}>{pos.symbol} <span style={{ fontSize: '0.8rem', color: '#888' }}>{pos.leverage}x</span></span>
                               <span className="side">{pos.side}</span>
                             </div>
-                            <div className="pos-details">
-                              <span>Size: {Math.abs(pos.quantity).toFixed(4)}</span>
-                              <span className={pnlClass}>
-                                {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT
-                              </span>
+                            <div className="pos-details" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem' }}>
+                              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                <span style={{ color: '#888' }}>Size / Margin</span>
+                                <span>{Math.abs(pos.quantity).toFixed(4)} / ${pos.margin ? pos.margin.toFixed(2) : '0.00'}</span>
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                <span style={{ color: '#888' }}>PnL</span>
+                                <span className={pnlClass} style={{ fontWeight: 'bold' }}>
+                                  {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT
+                                </span>
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                <span style={{ color: '#888' }}>Entry Price</span>
+                                <span>${pos.entryPrice ? pos.entryPrice.toFixed(4) : pos.entry_price ? pos.entry_price.toFixed(4) : '0.00'}</span>
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                <span style={{ color: '#888' }}>Liq Price</span>
+                                <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span>
+                              </div>
+                            </div>
+                            <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.1)', fontSize: '0.75rem', color: '#a0a0a0', textAlign: 'center' }}>
+                               Executed via AI Limit Order
                             </div>
                           </div>
                         );
@@ -496,10 +513,6 @@ function App() {
                           <span>{((state.ai_target_size || 0) * 100).toFixed(1)}%</span>
                         </div>
                         
-                        <div className="brain-map-wrapper">
-                          <div className="brain-map-title">Live 41-Slot Neural Tensor</div>
-                          <NeuralBrainMap stateVector={state.state_vector} />
-                        </div>
                       </div>
                     </div>
                   )})
@@ -610,8 +623,8 @@ function App() {
                                     <p>AI Confidence: <span className="highlight">{(trade.confidence * 100).toFixed(1)}%</span></p>
                                   </div>
                                   <div className="detail-col brain-col">
-                                    <strong>AI Neural Memory at Execution</strong>
-                                    <NeuralBrainMap stateVector={trade.state_vector} />
+                                    <strong>AI Status</strong>
+                                    <p>State captured at {new Date(trade.timestamp * 1000).toLocaleTimeString()}</p>
                                   </div>
                                 </div>
                               </td>

@@ -145,6 +145,11 @@ async def run_training_loop():
                 logger.info(f"Completed {step} training steps. Refreshing cache and saving model...")
                 # Refresh cache from DB to prevent Mode Collapse
                 trainer.buffer.load_cache_from_db(limit=1000)
+                
+                # Auto-delete data older than 30 days to save VPS disk space
+                if step % 1000 == 0:
+                    trainer.buffer.cleanup_old_data(days=30)
+                    
                 try:
                     registry.save_model(model)
                     

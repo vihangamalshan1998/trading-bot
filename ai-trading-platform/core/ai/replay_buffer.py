@@ -46,6 +46,20 @@ class ReplayBuffer:
         except Exception as e:
             pass
 
+    def cleanup_old_data(self, days: int = 30):
+        """Automatically deletes experiences older than X days to prevent database bloat."""
+        try:
+            import time
+            cutoff_timestamp = int(time.time()) - (days * 24 * 60 * 60)
+            
+            with self.SessionLocal() as session:
+                deleted_count = session.query(Experience).filter(Experience.timestamp < cutoff_timestamp).delete()
+                if deleted_count > 0:
+                    session.commit()
+                    print(f"DATABASE CLEANUP: Permanently deleted {deleted_count} experiences older than {days} days.")
+        except Exception as e:
+            print(f"Cleanup Error: {e}")
+
     def sample(self, batch_size: int, 
                recent_pct: float = 0.4, 
                historical_pct: float = 0.3, 

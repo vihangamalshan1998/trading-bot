@@ -13,7 +13,7 @@ class ModelRegistry:
 
     def validate_dimension(self, model, num_symbols: int):
         if model.__class__.__name__ == "SingleSymbolActorCritic":
-            expected_dim = 41
+            expected_dim = 200
         else:
             expected_dim = get_expected_observation_dimension(num_symbols)
             

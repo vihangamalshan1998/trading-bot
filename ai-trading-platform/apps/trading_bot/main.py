@@ -120,44 +120,80 @@ class ProductionTradingBot:
     def _build_state_vector(self, symbol: str) -> tuple[torch.Tensor, list]:
         obs = []
         
-        # 1. Portfolio (2 dims)
-        obs.extend([self.portfolio_state.wallet_balance, self.portfolio_state.equity])
+        # 1. Portfolio & Risk (10 dims)
+        equity = self.portfolio_state.equity
+        free_margin = self.portfolio_state.free_margin
+        margin_utilization = (equity - free_margin) / equity if equity > 0 else 0.0
         
-        # 2. Market Features (25 dims)
-        if symbol in self.market_states:
-            obs.extend(self.market_states[symbol].features)
-        else:
-            obs.extend([0.0] * 25)
-            
-        # 3. Position Before (1 dim)
+        obs.extend([
+            self.portfolio_state.wallet_balance, 
+            equity,
+            free_margin,
+            margin_utilization,
+            self.portfolio_state.total_exposure,
+            # Placeholder for advanced risk metrics (computed downstream)
+            0.0, 0.0, 0.0, 0.0, 0.0
+        ])
+        
+        # 2. Position Awareness (10 dims)
         pos = self.portfolio_state.positions[symbol]
-        obs.append(float(pos.quantity))
+        market = self.market_states.get(symbol)
         
-        # 4. Macro State (13 dims: 2 Time + 3 Gemini + 1 Funding Rate + 7 Reserved)
+        current_pnl_pct = 0.0
+        dist_to_liq = 0.0
+        if pos.quantity != 0 and pos.entry_price > 0 and market:
+            raw_pnl = (market.mid_price - pos.entry_price) / pos.entry_price
+            current_pnl_pct = raw_pnl if pos.quantity > 0 else -raw_pnl
+            if pos.liquidation_price > 0:
+                dist_to_liq = abs(market.mid_price - pos.liquidation_price) / market.mid_price
+                
+        obs.extend([
+            float(pos.quantity),
+            float(pos.entry_price),
+            float(pos.leverage) / 50.0, # normalized
+            current_pnl_pct,
+            dist_to_liq,
+            # Placeholders for advanced tracking (time held, max profit)
+            0.0, 0.0, 0.0, 0.0, 0.0
+        ])
+        
+        # 3. Market Features (90 dims) from engine.py
+        if market and len(market.features) == 90:
+            obs.extend(market.features)
+        else:
+            obs.extend([0.0] * 90)
+            
+        # 4. Macro & Cross-Asset (20 dims)
         current_hour = time.localtime().tm_hour
         current_min = time.localtime().tm_min
         minute_of_day = current_hour * 60 + current_min
         time_sin = np.sin(2 * np.pi * minute_of_day / 1440.0)
         time_cos = np.cos(2 * np.pi * minute_of_day / 1440.0)
         
-        # Slot 1-2: Time Encoding (already used)
-        # Slot 3: Gemini Sentiment Score (-1.0 Bearish → 1.0 Bullish)
-        # Slot 4: Gemini Volatility Expectation (0.0 Calm → 1.0 Panic)
-        # Slot 5: Macro Regime (-1.0 Bear, 0.0 Neutral, 1.0 Bull)
-        # Slot 6: Live Binance Funding Rate (negative = shorts pay, positive = longs pay)
-        # Slots 7-13: Reserved for Twitter / On-Chain data (future Phase 5)
-        funding_rate = self.market_states[symbol].funding_rate if symbol in self.market_states else 0.0
+        day_w = time.localtime().tm_wday
+        day_sin = np.sin(2 * np.pi * day_w / 7.0)
+        day_cos = np.cos(2 * np.pi * day_w / 7.0)
+        
+        btc_market = self.market_states.get("BTCUSDT")
+        btc_mom_1m = btc_market.features[2] if btc_market and len(btc_market.features) == 90 else 0.0
+        btc_mom_15m = btc_market.features[4] if btc_market and len(btc_market.features) == 90 else 0.0
+        
         macro_features = [
-            float(time_sin),
-            float(time_cos),
-            float(self.macro_state.sentiment_score),      # Gemini sentiment
-            float(self.macro_state.volatility_expectation), # Gemini volatility
-            float(self.macro_state.regime),               # Bull/Bear regime
-            float(funding_rate),                          # Live Binance Funding Rate
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0           # 7 reserved slots
+            float(time_sin), float(time_cos), float(day_sin), float(day_cos), 0.0, 0.0,
+            float(self.macro_state.sentiment_score),
+            float(self.macro_state.volatility_expectation),
+            float(self.macro_state.regime),
+            btc_mom_1m, btc_mom_15m, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0
         ]
         obs.extend(macro_features)
         
+        # 5. Future-Proofing Blank Canvas (70 dims)
+        obs.extend([0.0] * 70)
+        
+        if len(obs) != 200:
+            raise ValueError(f"State vector dimension mismatch. Expected 200, got {len(obs)}")
+            
         return torch.tensor(obs, dtype=torch.float32).unsqueeze(0), macro_features
                 
     async def sync_dashboard(self):

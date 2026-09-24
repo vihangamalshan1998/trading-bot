@@ -142,9 +142,9 @@ class MultiSymbolActorCritic(nn.Module):
 class SingleSymbolActorCritic(nn.Module):
     """
     Phase 2 Upgrade: ActorCritic for a single symbol state with LSTM Memory and Limit Orders.
-    Input dims: 41 (2 Portfolio + 25 Market + 1 Position + 2 Time + 1 Funding Rate + 10 Blank)
+    Input dims: 200 (God Mode Architecture with 70 blank padding slots)
     """
-    def __init__(self, input_dim: int = 41, hidden_dim: int = 128):
+    def __init__(self, input_dim: int = 200, hidden_dim: int = 256):
         super().__init__()
         
         self.shared_norm = nn.LayerNorm(input_dim)

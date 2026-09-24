@@ -31,7 +31,7 @@ class MarketState(BaseModel):
     vwap: float = Field(gt=0)
     volatility: float = Field(ge=0)
     funding_rate: float
-    features: List[float] = Field(..., min_length=25, max_length=25)
+    features: List[float] = Field(..., min_length=90, max_length=90)
     data_quality: float = Field(default=1.0, ge=0.0, le=1.0)
 
     @field_validator('*', mode='before')

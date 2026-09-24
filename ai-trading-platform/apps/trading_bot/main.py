@@ -53,7 +53,7 @@ class ProductionTradingBot:
         
         # 4. Strict Model Checkpoint Loading (graceful if no checkpoint yet)
         self.has_valid_model = False
-        self.model = SingleSymbolActorCritic(input_dim=41)
+        self.model = SingleSymbolActorCritic(input_dim=200)
         try:
             # This calls the strictly validated loader that checks architecture and active status
             self.model = self.registry.load_model(self.model)

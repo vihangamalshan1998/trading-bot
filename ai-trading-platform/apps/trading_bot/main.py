@@ -438,13 +438,16 @@ class ProductionTradingBot:
                                         
                                     limit_price_str = sym_config.format_price(limit_price)
                                     
-                                    # Execute on Binance (Real LIMIT Order)
+                                    # Execute on Binance
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
-                                    
-                                    logger.info(f"[{sym}] LIMIT INTENT: {binance_side} at {limit_price_str} (Offset: {offset_amount:.4f})")
-                                    
                                     is_closing = "CLOSE" in side
-                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTC", reduce_only=is_closing)
+                                    
+                                    if hard_stop_triggered:
+                                        logger.info(f"[{sym}] MARKET INTENT (HARD STOP): {binance_side} {qty_str}")
+                                        order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="MARKET", reduce_only=is_closing)
+                                    else:
+                                        logger.info(f"[{sym}] LIMIT INTENT: {binance_side} at {limit_price_str} (Offset: {offset_amount:.4f})")
+                                        order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTC", reduce_only=is_closing)
                                     
                                     actual_order_id = order_res.get('orderId') or client_order_id
                                     logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")

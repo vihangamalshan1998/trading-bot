@@ -135,7 +135,8 @@ class ReplayBuffer:
             actions.append(act)
             rewards.append([exp.reward or 0.0])
             next_states.append(n_state)
-            dones.append([0.0]) # Historical offline RL usually continuous unless end of episode
+            # If next_state is missing, treat as terminal to prevent critic value explosion
+            dones.append([1.0 if getattr(exp, "next_state", None) is None else 0.0])
             
         # Pad sequences or truncate depending on exact dimensions (Assumes uniform here)
         try:

@@ -92,7 +92,6 @@ class ProductionTradingBot:
         
         self.max_equity = 0.0
         self.last_win_time = time.time()
-        import collections
         self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
         
     async def listen_macro(self):
@@ -730,3 +729,5 @@ if __name__ == "__main__":
         asyncio.run(bot.start())
     except KeyboardInterrupt:
         bot.stop()
+    except Exception as e:
+        logger.critical(f"FATAL ERROR ON STARTUP: {e}", exc_info=True)

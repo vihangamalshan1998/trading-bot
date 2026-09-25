@@ -129,7 +129,9 @@ async def get_trade_history():
         try:
             parsed = json.loads(item)
             if "state_vector" in parsed:
-                parsed["state_vector"] = [0.0 if math.isnan(x) or math.isinf(x) else x for x in parsed["state_vector"]]
+                # FATAL CPU FIX: The history table does not need to download 100x200=20,000 floats every second.
+                # Deleting this saves massive CPU math loops and megabytes of bandwidth per second.
+                del parsed["state_vector"]
             
             for key in ["confidence", "price", "quantity", "entry_price", "realized_pnl", "roi_pct"]:
                 if key in parsed and parsed[key] is not None:

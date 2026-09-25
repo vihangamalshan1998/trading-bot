@@ -96,14 +96,19 @@ async def get_system_state():
         
         if state_raw:
             parsed_state = json.loads(state_raw)
+            
+            # Sanitize floats to prevent FastAPI JSON serialization crashes
+            import math
+            def sanitize_float(val):
+                if val is None or not isinstance(val, (int, float)): return 0.0
+                return 0.0 if math.isnan(val) or math.isinf(val) else val
+            
+            # Sanitize market features (e.g. if MACD or Bollinger Bands output NaN due to 0 volume)
+            if "features" in parsed_state and isinstance(parsed_state["features"], list):
+                parsed_state["features"] = [sanitize_float(x) for x in parsed_state["features"]]
+                
             if ai_state_raw:
                 ai_data = json.loads(ai_state_raw)
-                
-                # Sanitize floats to prevent FastAPI JSON serialization crashes
-                import math
-                def sanitize_float(val):
-                    if val is None or not isinstance(val, (int, float)): return 0.0
-                    return 0.0 if math.isnan(val) or math.isinf(val) else val
                 
                 parsed_state["ai_confidence"] = sanitize_float(ai_data.get("confidence", 0.0))
                 parsed_state["ai_target_size"] = sanitize_float(ai_data.get("target_size", 0.0))
@@ -217,4 +222,4 @@ async def restart_pm2():
         return {"status": "error", "message": f"Failed to restart bots: {str(e)}"}
 
 if __name__ == "__main__":
-    uvicorn.run("apps.dashboard_api.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("apps.dashboard_api.main:app", host="0.0.0.0", port=8000)

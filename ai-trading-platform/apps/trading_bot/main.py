@@ -295,6 +295,12 @@ class ProductionTradingBot:
                                 # orderId from binance could be int or str, we check both string casts
                                 if not any(str(o.get('orderId')) == str(self.active_orders[sym]['order_id']) or o.get('clientOrderId') == self.active_orders[sym]['order_id'] for o in open_orders):
                                     logger.info(f"[{sym}] LIMIT ORDER FILLED/NO LONGER OPEN! Removing from tracker.")
+                                    
+                                    # Push to dashboard history ONLY when filled
+                                    if 'trade_record' in self.active_orders[sym]:
+                                        asyncio.create_task(redis_manager.redis.lpush("dashboard:trade_history", json.dumps(self.active_orders[sym]['trade_record'])))
+                                        asyncio.create_task(redis_manager.redis.ltrim("dashboard:trade_history", 0, 99))
+                                        
                                     del self.active_orders[sym]
                                     
                                     # Sync position immediately
@@ -488,31 +494,11 @@ class ProductionTradingBot:
                                     actual_order_id = order_res.get('orderId') or client_order_id
                                     logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")
                                     
-                                    # Track the limit order so we don't spam
-                                    self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time()}
-                                    
                                     # Capture entry price before modifying position
                                     entry_px = self.portfolio_state.positions[sym].entry_price if sym in self.portfolio_state.positions else 0.0
                                     pos_leverage = self.portfolio_state.positions[sym].leverage if sym in self.portfolio_state.positions else 10
                                     
-                                    # Update local position state immediately to prevent over-buying before the next sync
-                                    notional_cost = float(qty_str) * market.mid_price
-                                    margin_used = notional_cost / settings.max_leverage
-
-                                    if "OPEN_LONG" in side:
-                                        self.portfolio_state.positions[sym].quantity += float(qty_str)
-                                        self.portfolio_state.free_margin -= margin_used
-                                    elif "CLOSE_LONG" in side:
-                                        self.portfolio_state.positions[sym].quantity -= float(qty_str)
-                                        self.portfolio_state.free_margin += margin_used
-                                    elif "OPEN_SHORT" in side:
-                                        self.portfolio_state.positions[sym].quantity -= float(qty_str)
-                                        self.portfolio_state.free_margin -= margin_used
-                                    elif "CLOSE_SHORT" in side:
-                                        self.portfolio_state.positions[sym].quantity += float(qty_str)
-                                        self.portfolio_state.free_margin += margin_used
-                                    
-                                    # Log Trade History for Dashboard
+                                    # Prepare Trade History Record
                                     trade_record = {
                                         "timestamp": time.time(),
                                         "symbol": sym,
@@ -520,7 +506,7 @@ class ProductionTradingBot:
                                         "quantity": float(qty_str),
                                         "price": market.mid_price,
                                         "confidence": float(confidence),
-                                        "order_id": order_res.get('orderId'),
+                                        "order_id": actual_order_id,
                                         "state_vector": state_vector.squeeze(0).tolist()
                                     }
                                     
@@ -539,8 +525,25 @@ class ProductionTradingBot:
                                         trade_record["realized_pnl"] = pnl
                                         trade_record["roi_pct"] = roi
                                         
-                                    asyncio.create_task(redis_manager.redis.lpush("dashboard:trade_history", json.dumps(trade_record)))
-                                    asyncio.create_task(redis_manager.redis.ltrim("dashboard:trade_history", 0, 99))
+                                    # Track the limit order so we don't spam
+                                    self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time(), 'trade_record': trade_record}
+                                    
+                                    # Update local position state immediately to prevent over-buying before the next sync
+                                    notional_cost = float(qty_str) * market.mid_price
+                                    margin_used = notional_cost / settings.max_leverage
+
+                                    if "OPEN_LONG" in side:
+                                        self.portfolio_state.positions[sym].quantity += float(qty_str)
+                                        self.portfolio_state.free_margin -= margin_used
+                                    elif "CLOSE_LONG" in side:
+                                        self.portfolio_state.positions[sym].quantity -= float(qty_str)
+                                        self.portfolio_state.free_margin += margin_used
+                                    elif "OPEN_SHORT" in side:
+                                        self.portfolio_state.positions[sym].quantity -= float(qty_str)
+                                        self.portfolio_state.free_margin -= margin_used
+                                    elif "CLOSE_SHORT" in side:
+                                        self.portfolio_state.positions[sym].quantity += float(qty_str)
+                                        self.portfolio_state.free_margin += margin_used
                                     
                                     # Calculate immediate RL Reward
                                     imm_reward = 0.0

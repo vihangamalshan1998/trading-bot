@@ -240,8 +240,8 @@ class BinanceWebSocketCollector:
                             
                             event_type = data.get('e')
                             if 'b' in data and 'a' in data and 'e' not in data:
-                                if isinstance(data.get('b'), list):
-                                    pass
+                                if not isinstance(data.get('b'), list):
+                                    await self.process_book_ticker(data)
                             if event_type == 'aggTrade':
                                 await self.process_agg_trade(data)
                             elif event_type == 'markPriceUpdate':

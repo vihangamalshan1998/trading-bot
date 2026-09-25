@@ -367,7 +367,7 @@ function App() {
         {activeTab === 'live' && (
           <>
             <div className="top-dashboard-row" style={{ gridColumn: '1 / -1' }}>
-              <section className="glass-panel stat-panel flex-2">
+              <section className="glass-panel stat-panel flex-1">
                 <h3>Macro Sentiment & News</h3>
                 <div className="stat-grid">
                   <div className="stat-card">
@@ -438,7 +438,7 @@ function App() {
                             <div className="pos-details" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem' }}>
                               <div style={{ display: 'flex', flexDirection: 'column' }}>
                                 <span style={{ color: '#888' }}>Size / Margin</span>
-                                <span>{Math.abs(pos.quantity).toFixed(4)} / ${pos.margin ? pos.margin.toFixed(2) : '0.00'}</span>
+                                <span>{Math.abs(pos.quantity).toFixed(4)} / ${pos.margin ? pos.margin.toFixed(2) : ((Math.abs(pos.quantity) * (pos.entryPrice || pos.entry_price || 0)) / (pos.leverage || 1)).toFixed(2)}</span>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                                 <span style={{ color: '#888' }}>PnL</span>
@@ -474,7 +474,7 @@ function App() {
                   <p className="empty-text">Awaiting market data from Binance...</p>
                 ) : (
                   Object.entries(data.market_states).map(([sym, state], idx) => {
-                    const latestFunding = state.state_vector && state.state_vector.length > 33 ? state.state_vector[33] : 0;
+                    const latestFunding = state.state_vector && state.state_vector.length > 100 ? state.state_vector[100] : 0;
                     
                     return (
                     <div key={idx} className="market-card">
@@ -552,7 +552,7 @@ function App() {
                         <div className="pos-details" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem' }}>
                           <div style={{ display: 'flex', flexDirection: 'column' }}>
                             <span style={{ color: '#888' }}>Size / Margin</span>
-                            <span>{Math.abs(pos.quantity).toFixed(4)} / ${pos.margin ? pos.margin.toFixed(2) : '0.00'}</span>
+                            <span>{Math.abs(pos.quantity).toFixed(4)} / ${pos.margin ? pos.margin.toFixed(2) : ((Math.abs(pos.quantity) * (pos.entryPrice || pos.entry_price || 0)) / (pos.leverage || 1)).toFixed(2)}</span>
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                             <span style={{ color: '#888' }}>PnL</span>

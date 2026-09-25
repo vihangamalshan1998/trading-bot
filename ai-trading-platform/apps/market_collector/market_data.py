@@ -230,7 +230,9 @@ class BinanceWebSocketCollector:
             url = f"{self.base_url}{streams_path}"
             while self._running:
                 try:
-                    async with websockets.connect(url, ping_interval=20, ping_timeout=10) as websocket:
+                    # Binance does not accept unsolicited PING frames from the client.
+                    # We must set ping_interval=None so websockets only responds with PONGs to Binance's PINGs.
+                    async with websockets.connect(url, ping_interval=None) as websocket:
                         logger.info(f"Connected to Binance WebSocket Chunk ({len(chunk)} streams)!")
                         while self._running:
                             message = await websocket.recv()

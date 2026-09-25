@@ -128,6 +128,10 @@ async def run_training_loop():
     
     # We need to initialize the model first
     from core.config.settings import settings
+    import torch
+    # Restrict PyTorch to 1 CPU thread so it doesn't starve the Live Trading Bot on shared VPS
+    torch.set_num_threads(1)
+    
     # The ReplayBuffer currently returns 41-dim state vectors (single symbol + portfolio + position + macro)
     model = SingleSymbolActorCritic(input_dim=200)
     registry = ModelRegistry()

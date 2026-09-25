@@ -166,7 +166,7 @@ class FeatureEngine:
         try:
             if len(prices) >= 20:
                 lags = range(2, 10)
-                tau = [np.sqrt(np.std(np.subtract(prices[lag:], prices[:-lag]))) for lag in lags]
+                tau = [np.sqrt(np.std(np.subtract(prices[lag:], prices[:-lag])) + 1e-8) for lag in lags]
                 m = np.polyfit(np.log(lags), np.log(tau), 1)
                 hurst = m[0]*2.0 if not np.isnan(m[0]) else 0.5
         except Exception:

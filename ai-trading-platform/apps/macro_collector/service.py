@@ -18,9 +18,10 @@ class MacroCollectorService:
             "https://finance.yahoo.com/news/rss"      # Yahoo Finance Global News
         ]
         
-    async def fetch_news(self) -> str:
+    async def fetch_news(self) -> tuple:
         """Fetches the latest headlines from RSS feeds and concatenates them."""
         headlines = []
+        headlines_with_url = []
         # Since feedparser is synchronous and uses urllib, we run it in a thread to avoid blocking.
         # But wait, we can just use feedparser.parse directly on a URL, but it blocks. 
         # Better: use aiohttp to fetch XML, then feedparser to parse XML string.
@@ -33,12 +34,14 @@ class MacroCollectorService:
                             feed = feedparser.parse(xml_data)
                             for entry in feed.entries[:10]: # Top 10 per feed
                                 title = entry.get('title', '')
+                                link = entry.get('link', '')
                                 if title:
                                     headlines.append(title)
+                                    headlines_with_url.append({"title": title, "url": link})
                 except Exception as e:
                     logger.error(f"Failed to fetch RSS feed {url}: {e}")
                     
-        return "\n".join(headlines)
+        return "\n".join(headlines), headlines_with_url
 
     async def analyze_sentiment(self, text: str) -> dict:
         """Calls Gemini API to calculate macro sentiment score."""
@@ -89,14 +92,14 @@ Headlines:
     async def _loop(self):
         while self.running:
             logger.info("MacroCollector: Fetching latest news...")
-            news_text = await self.fetch_news()
+            news_text, dashboard_headlines = await self.fetch_news()
             
             if news_text:
-                logger.info(f"MacroCollector: Found {len(news_text.splitlines())} headlines. Analyzing with Gemini...")
+                logger.info(f"MacroCollector: Found {len(dashboard_headlines)} headlines. Analyzing with Gemini...")
                 analysis = await self.analyze_sentiment(news_text)
                 
                 # Add headlines to payload for dashboard
-                analysis["headlines"] = news_text.split("\n")
+                analysis["headlines"] = dashboard_headlines
                 
                 logger.info(f"MacroCollector: Analysis complete: {analysis}")
                 

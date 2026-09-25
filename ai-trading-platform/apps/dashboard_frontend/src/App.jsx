@@ -392,9 +392,15 @@ function App() {
                   <div className="news-headlines">
                     <h4>Latest Headlines</h4>
                     <ul>
-                      {systemStats.latest_headlines.map((headline, idx) => (
-                        <li key={idx}>📰 {headline}</li>
-                      ))}
+                      {systemStats.latest_headlines.map((headline, idx) => {
+                        const title = typeof headline === 'string' ? headline : headline.title;
+                        const url = typeof headline === 'string' ? null : headline.url;
+                        return (
+                          <li key={idx}>
+                            📰 {url ? <a href={url} target="_blank" rel="noopener noreferrer" style={{color: '#00f2fe', textDecoration: 'none'}} onMouseOver={(e) => e.target.style.textDecoration='underline'} onMouseOut={(e) => e.target.style.textDecoration='none'}>{title}</a> : title}
+                          </li>
+                        )
+                      })}
                     </ul>
                   </div>
                 )}
@@ -525,43 +531,52 @@ function App() {
         {activeTab === 'history' && (
           <section className="glass-panel full-width">
             <h3>Active AI Positions</h3>
-            <div className="table-responsive" style={{marginBottom: '2rem'}}>
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Size</th>
-                    <th>Entry Price</th>
-                    <th>Mark Price</th>
-                    <th>Liq Price</th>
-                    <th>Leverage</th>
-                    <th>PnL</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.positions.length === 0 ? (
-                    <tr>
-                      <td colSpan="8" className="empty-text">No active positions.</td>
-                    </tr>
-                  ) : (
-                    data.positions.map((pos, idx) => (
-                      <tr key={idx}>
-                        <td className="symbol">{pos.symbol}</td>
-                        <td className={pos.side.toLowerCase()}>{pos.side}</td>
-                        <td>{pos.quantity} {pos.symbol.replace('USDT', '')}</td>
-                        <td>${pos.entryPrice ? pos.entryPrice.toFixed(4) : '0.0000'}</td>
-                        <td>${pos.markPrice ? pos.markPrice.toFixed(4) : '0.0000'}</td>
-                        <td>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : '0.0000'}</td>
-                        <td>{pos.leverage}x</td>
-                        <td className={`pnl ${pos.pnl >= 0 ? 'profit' : 'loss'}`}>
-                          ${pos.pnl.toFixed(2)}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+            <div style={{marginBottom: '2rem'}}>
+              {(!data.positions || data.positions.length === 0) ? (
+                <div className="empty-state" style={{ padding: '2rem 1rem' }}>
+                  <p>No active positions.</p>
+                  <small>AI is scanning for optimal entry points...</small>
+                </div>
+              ) : (
+                <div className="position-list" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '1.25rem' }}>
+                  {data.positions.map((pos, idx) => {
+                    if (pos.quantity === 0) return null;
+                    const isLong = pos.side.toUpperCase().includes("LONG");
+                    const pnlClass = pos.pnl >= 0 ? 'profit' : 'loss';
+                    return (
+                      <div key={idx} className={`position-card ${isLong ? 'long' : 'short'}`}>
+                        <div className="pos-header" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                          <span className="symbol" style={{ fontWeight: 'bold' }}>{pos.symbol} <span style={{ fontSize: '0.8rem', color: '#888' }}>{pos.leverage}x</span></span>
+                          <span className="side">{pos.side}</span>
+                        </div>
+                        <div className="pos-details" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span style={{ color: '#888' }}>Size / Margin</span>
+                            <span>{Math.abs(pos.quantity).toFixed(4)} / ${pos.margin ? pos.margin.toFixed(2) : '0.00'}</span>
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                            <span style={{ color: '#888' }}>PnL</span>
+                            <span className={pnlClass} style={{ fontWeight: 'bold' }}>
+                              {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span style={{ color: '#888' }}>Entry Price</span>
+                            <span>${pos.entryPrice ? pos.entryPrice.toFixed(4) : pos.entry_price ? pos.entry_price.toFixed(4) : '0.00'}</span>
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                            <span style={{ color: '#888' }}>Liq Price</span>
+                            <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span>
+                          </div>
+                        </div>
+                        <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.1)', fontSize: '0.75rem', color: '#a0a0a0', textAlign: 'center' }}>
+                           Executed via AI Limit Order
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             <h3>AI Trade History (Last 100)</h3>

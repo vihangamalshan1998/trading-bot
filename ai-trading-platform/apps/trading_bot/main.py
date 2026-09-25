@@ -175,6 +175,8 @@ class ProductionTradingBot:
         
         time_held_hours = 0.0
         entry_dist_vwap = 0.0
+        current_pnl_pct = 0.0
+        dist_to_liq = 0.0
         
         if pos.quantity != 0 and pos.entry_price > 0 and market:
             raw_pnl = (market.mid_price - pos.entry_price) / pos.entry_price

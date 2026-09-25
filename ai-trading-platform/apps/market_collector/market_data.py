@@ -30,7 +30,9 @@ class BinanceWebSocketCollector:
             s.upper(): {
                 "mid_price": 0.0, "volume": 0.0, "buy_volume": 0.0, 
                 "trade_count": 0.0, "best_bid": 0.0, "best_ask": 0.0,
-                "bid_qty": 0.0, "ask_qty": 0.0, "funding_rate": 0.0, "liquidation_volume": 0.0
+                "bid_qty": 0.0, "ask_qty": 0.0, "funding_rate": 0.0, "liquidation_volume": 0.0,
+                "open_interest": 0.0, "ls_ratio": 1.0, "ema_4h": 0.0, "ob_skew_l2": 0.0,
+                "price_change_24h": 0.0, "volume_24h": 0.0, "mark_price_premium": 0.0
             } for s in symbols
         }
         
@@ -123,6 +125,21 @@ class BinanceWebSocketCollector:
         try:
             symbol = data['s'].upper()
             self.latest_raw[symbol]["funding_rate"] = float(data['r'])
+            
+            mark = float(data.get('p', 1.0))
+            index = float(data.get('i', 1.0))
+            if index > 0:
+                self.latest_raw[symbol]["mark_price_premium"] = (mark - index) / index
+                
+            await self.publish_features(symbol)
+        except Exception as e:
+            pass
+            
+    async def process_ticker24h(self, data: dict):
+        try:
+            symbol = data['s'].upper()
+            self.latest_raw[symbol]["price_change_24h"] = float(data.get('P', 0.0)) / 100.0  # P is percentage
+            self.latest_raw[symbol]["volume_24h"] = float(data.get('q', 0.0)) # Quote volume in USDT
             await self.publish_features(symbol)
         except Exception as e:
             pass
@@ -137,13 +154,63 @@ class BinanceWebSocketCollector:
         except Exception as e:
             pass
 
+    async def process_open_interest(self, data: dict):
+        try:
+            symbol = data['s'].upper()
+            self.latest_raw[symbol]["open_interest"] = float(data['o'])
+            await self.publish_features(symbol)
+        except Exception as e:
+            pass
+            
+    async def process_depth(self, data: dict, symbol: str):
+        try:
+            if 'b' in data and 'a' in data and isinstance(data['b'], list):
+                bids = sum(float(b[1]) for b in data['b'])
+                asks = sum(float(a[1]) for a in data['a'])
+                tot = bids + asks
+                if tot > 0:
+                    self.latest_raw[symbol]["ob_skew_l2"] = (bids - asks) / tot
+                await self.publish_features(symbol)
+        except Exception as e:
+            pass
+            
+    async def poll_rest_data(self):
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            while self._running:
+                try:
+                    for s in self.symbols:
+                        sym = s.upper()
+                        # 1. Long/Short Ratio
+                        ls_url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={sym}&period=5m&limit=1"
+                        async with session.get(ls_url) as resp:
+                            if resp.status == 200:
+                                ls_data = await resp.json()
+                                if ls_data and len(ls_data) > 0:
+                                    self.latest_raw[sym]["ls_ratio"] = float(ls_data[0]['longShortRatio'])
+                                    
+                        # 2. 4H Trend (EMA approximation)
+                        kline_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval=4h&limit=20"
+                        async with session.get(kline_url) as resp:
+                            if resp.status == 200:
+                                k_data = await resp.json()
+                                if k_data and len(k_data) > 0:
+                                    closes = [float(k[4]) for k in k_data]
+                                    self.latest_raw[sym]["ema_4h"] = sum(closes) / len(closes) # SMA as proxy for stability
+                                    
+                    logger.info("Polled REST Data: Long/Short Ratios & 4H Trends updated.")
+                except Exception as e:
+                    logger.warning(f"Error polling REST data: {e}")
+                    
+                await asyncio.sleep(300) # Poll every 5 minutes
+
     async def listen(self):
         self._running = True
         
-        # Build streams: <symbol>@bookTicker, <symbol>@aggTrade, <symbol>@markPrice, <symbol>@forceOrder
+        # Build streams: <symbol>@bookTicker, <symbol>@aggTrade, <symbol>@markPrice, <symbol>@forceOrder, <symbol>@openInterest, <symbol>@depth5@100ms, <symbol>@ticker
         streams = []
         for s in self.symbols:
-            streams.extend([f"{s}@bookTicker", f"{s}@aggTrade", f"{s}@markPrice", f"{s}@forceOrder"])
+            streams.extend([f"{s}@bookTicker", f"{s}@aggTrade", f"{s}@markPrice", f"{s}@forceOrder", f"{s}@openInterest", f"{s}@depth5@100ms", f"{s}@ticker"])
             
         streams_path = "/".join(streams)
         url = f"{self.base_url}/{streams_path}"
@@ -162,13 +229,40 @@ class BinanceWebSocketCollector:
                         
                         event_type = data.get('e')
                         if 'b' in data and 'a' in data and 'e' not in data:
-                            await self.process_book_ticker(data)
-                        elif event_type == 'aggTrade':
+                            # It could be bookTicker or depth5
+                            if isinstance(data.get('b'), list):
+                                # It's a depth5 update, but stream name usually isn't inside payload directly.
+                                # Wait, depth5 events from binance DO have 's' if we use normal streams? No, they don't have 's' if we use multiplexing.
+                                pass # Wait, let's fix this below
+                        if event_type == 'aggTrade':
                             await self.process_agg_trade(data)
                         elif event_type == 'markPriceUpdate':
                             await self.process_funding_rate(data)
                         elif event_type == 'forceOrder':
                             await self.process_liquidation(data)
+                        elif event_type == 'openInterest':
+                            await self.process_open_interest(data)
+                        elif event_type == '24hrTicker':
+                            await self.process_ticker24h(data)
+                        elif 'stream' in data and '@depth5' in data['stream']:
+                            sym = data['stream'].split('@')[0].upper()
+                            await self.process_depth(data['data'], sym)
+                        elif 'stream' in data and '@ticker' in data['stream']:
+                            await self.process_ticker24h(data['data'])
+                        elif 'stream' in data and '@bookTicker' in data['stream']:
+                            await self.process_book_ticker(data['data'])
+                        elif 'stream' in data and '@aggTrade' in data['stream']:
+                            await self.process_agg_trade(data['data'])
+                        elif 'stream' in data and '@markPrice' in data['stream']:
+                            await self.process_funding_rate(data['data'])
+                        elif 'stream' in data and '@forceOrder' in data['stream']:
+                            await self.process_liquidation(data['data'])
+                        elif 'stream' in data and '@openInterest' in data['stream']:
+                            await self.process_open_interest(data['data'])
+                        else:
+                            # Handle non-multiplexed fallbacks just in case
+                            if 'b' in data and 'a' in data and 'e' not in data and not isinstance(data.get('b'), list):
+                                await self.process_book_ticker(data)
                             
             except websockets.ConnectionClosed:
                 logger.warning("WebSocket Connection Closed. Reconnecting in 5s...")
@@ -185,7 +279,11 @@ async def run_collector():
     collector = BinanceWebSocketCollector(symbols)
     
     try:
-        await collector.listen()
+        # Run both the WebSocket listener and the REST poller concurrently
+        await asyncio.gather(
+            collector.listen(),
+            collector.poll_rest_data()
+        )
     except asyncio.CancelledError:
         collector.stop()
 

@@ -46,9 +46,12 @@ class PositionState(BaseModel):
     quantity: float = 0.0
     entry_price: float = Field(default=0.0, ge=0.0)
     current_price: float = Field(default=0.0, ge=0.0)
+    entry_time: float = 0.0
     unrealized_pnl: float = 0.0
     max_unrealized_pnl: float = 0.0
+    max_drawdown_pnl: float = 0.0
     realized_pnl: float = 0.0
+    accumulated_funding: float = 0.0
     leverage: int = Field(default=10, gt=0)
     margin: float = Field(default=0.0, ge=0.0)
     liquidation_price: float = Field(default=0.0, ge=0.0)
@@ -79,6 +82,14 @@ class MacroState(BaseModel):
     sentiment_score: float = Field(default=0.0, ge=-1.0, le=1.0)
     volatility_expectation: float = Field(default=0.5, ge=0.0)
     regime: float = 0.0
+    sp500_momentum: float = 0.0
+    dxy_momentum: float = 0.0
+    vix_momentum: float = 0.0
+    gold_momentum: float = 0.0
+    treasury_yield_momentum: float = 0.0
+    ndx_momentum: float = 0.0
+    defi_tvl_momentum: float = 0.0
+    fear_greed_index: float = 0.5
     headlines: list[str] = Field(default_factory=list)
 
     @field_validator('*', mode='before')

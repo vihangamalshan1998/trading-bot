@@ -85,6 +85,16 @@ class ProductionTradingBot:
         # Limit Order Tracking
         self.active_orders = {} # symbol -> {'order_id': str, 'timestamp': float}
         
+        # Self-Awareness Tracking
+        self.session_trades = 0
+        self.session_wins = 0
+        self.session_win_rate = 0.0
+        
+        self.max_equity = 0.0
+        self.last_win_time = time.time()
+        import collections
+        self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
+        
     async def listen_macro(self):
         await self.redis.connect()
         redis_conn = self.redis.redis
@@ -98,6 +108,14 @@ class ProductionTradingBot:
                     self.macro_state.sentiment_score = payload.get("sentiment_score", 0.0)
                     self.macro_state.volatility_expectation = payload.get("volatility_expectation", 0.5)
                     self.macro_state.regime = payload.get("regime", 0.0)
+                    self.macro_state.sp500_momentum = payload.get("sp500_momentum", 0.0)
+                    self.macro_state.dxy_momentum = payload.get("dxy_momentum", 0.0)
+                    self.macro_state.vix_momentum = payload.get("vix_momentum", 0.0)
+                    self.macro_state.gold_momentum = payload.get("gold_momentum", 0.0)
+                    self.macro_state.treasury_yield_momentum = payload.get("treasury_yield_momentum", 0.0)
+                    self.macro_state.ndx_momentum = payload.get("ndx_momentum", 0.0)
+                    self.macro_state.defi_tvl_momentum = payload.get("defi_tvl_momentum", 0.0)
+                    self.macro_state.fear_greed_index = payload.get("fear_greed_index", 0.5)
                     self.macro_state.timestamp = time.time()
                 except Exception as e:
                     logger.error(f"Error parsing macro: {e}")
@@ -125,35 +143,61 @@ class ProductionTradingBot:
         free_margin = self.portfolio_state.free_margin
         margin_utilization = (equity - free_margin) / equity if equity > 0 else 0.0
         
+        # Advanced Risk: Portfolio Heat
+        active_positions = sum(1 for p in self.portfolio_state.positions.values() if p.quantity != 0)
+        portfolio_heat = active_positions / self.num_symbols if self.num_symbols > 0 else 0.0
+        
+        # Meta-Learning & StatArb Internal Metrics
+        if equity > self.max_equity:
+            self.max_equity = equity
+        account_drawdown = (self.max_equity - equity) / self.max_equity if self.max_equity > 0 else 0.0
+        
+        self.equity_history.append(equity)
+        import numpy as np
+        portfolio_variance = float(np.var(self.equity_history) / equity) if equity > 0 and len(self.equity_history) > 1 else 0.0
+        time_since_win_hrs = (time.time() - self.last_win_time) / 3600.0 if self.last_win_time > 0 else 0.0
+        
         obs.extend([
             self.portfolio_state.wallet_balance, 
             equity,
             free_margin,
             margin_utilization,
             self.portfolio_state.total_exposure,
-            # Placeholder for advanced risk metrics (computed downstream)
-            0.0, 0.0, 0.0, 0.0, 0.0
+            float(portfolio_heat),
+            float(self.session_win_rate),
+            float(account_drawdown), 
+            float(portfolio_variance), 
+            float(time_since_win_hrs)
         ])
         
         # 2. Position Awareness (10 dims)
         pos = self.portfolio_state.positions[symbol]
         market = self.market_states.get(symbol)
         
-        current_pnl_pct = 0.0
-        dist_to_liq = 0.0
+        time_held_hours = 0.0
+        entry_dist_vwap = 0.0
+        
         if pos.quantity != 0 and pos.entry_price > 0 and market:
             raw_pnl = (market.mid_price - pos.entry_price) / pos.entry_price
             current_pnl_pct = raw_pnl if pos.quantity > 0 else -raw_pnl
             
-            # High Water Mark tracking
+            # High & Low Water Mark tracking
             if current_pnl_pct > pos.max_unrealized_pnl:
                 pos.max_unrealized_pnl = current_pnl_pct
+            if current_pnl_pct < pos.max_drawdown_pnl:
+                pos.max_drawdown_pnl = current_pnl_pct
                 
             if pos.liquidation_price > 0:
                 dist_to_liq = abs(market.mid_price - pos.liquidation_price) / market.mid_price
+                
+            time_held_hours = (time.time() - pos.entry_time) / 3600.0 if pos.entry_time > 0 else 0.0
+            if market.vwap > 0:
+                entry_dist_vwap = (pos.entry_price - market.vwap) / market.vwap
         else:
             # Reset High Water Mark when flat
             pos.max_unrealized_pnl = 0.0
+            pos.max_drawdown_pnl = 0.0
+            pos.entry_time = 0.0
                 
         obs.extend([
             float(pos.quantity),
@@ -161,8 +205,12 @@ class ProductionTradingBot:
             float(pos.leverage) / 50.0, # normalized
             current_pnl_pct,
             dist_to_liq,
-            # Placeholders for advanced tracking: inserted max_unrealized_pnl
-            float(pos.max_unrealized_pnl), 0.0, 0.0, 0.0, 0.0
+            # Fully utilizing the 10-slot Position Block
+            float(pos.max_unrealized_pnl), 
+            float(pos.max_drawdown_pnl),
+            float(time_held_hours),
+            float(entry_dist_vwap),
+            float(pos.accumulated_funding)
         ])
         
         # 3. Market Features (90 dims) from engine.py
@@ -186,13 +234,25 @@ class ProductionTradingBot:
         btc_mom_1m = btc_market.features[2] if btc_market and len(btc_market.features) == 90 else 0.0
         btc_mom_15m = btc_market.features[4] if btc_market and len(btc_market.features) == 90 else 0.0
         
+        # Cross-Coin Beta (Relative Strength to BTC)
+        sym_mom_1m = market.features[2] if market and len(market.features) == 90 else 0.0
+        cross_coin_beta = sym_mom_1m / btc_mom_1m if abs(btc_mom_1m) > 1e-6 else 0.0
+        
         macro_features = [
-            float(time_sin), float(time_cos), float(day_sin), float(day_cos), 0.0, 0.0,
+            float(time_sin), float(time_cos), float(day_sin), float(day_cos), float(cross_coin_beta), 0.0,
             float(self.macro_state.sentiment_score),
             float(self.macro_state.volatility_expectation),
             float(self.macro_state.regime),
-            btc_mom_1m, btc_mom_15m, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0
+            btc_mom_1m, btc_mom_15m, 
+            float(self.macro_state.sp500_momentum), 
+            float(self.macro_state.dxy_momentum), 
+            float(self.macro_state.fear_greed_index),
+            float(self.macro_state.vix_momentum),
+            float(self.macro_state.gold_momentum),
+            float(self.macro_state.treasury_yield_momentum),
+            float(self.macro_state.ndx_momentum),
+            float(self.macro_state.defi_tvl_momentum), 
+            0.0
         ]
         obs.extend(macro_features)
         
@@ -529,6 +589,13 @@ class ProductionTradingBot:
                                         trade_record["realized_pnl"] = pnl
                                         trade_record["roi_pct"] = roi
                                         
+                                        # Update Self-Awareness Win Rate
+                                        self.session_trades += 1
+                                        if roi > 0:
+                                            self.session_wins += 1
+                                            self.last_win_time = time.time()
+                                        self.session_win_rate = self.session_wins / self.session_trades
+                                        
                                     # Track the limit order so we don't spam
                                     self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time(), 'trade_record': trade_record}
                                     
@@ -537,12 +604,16 @@ class ProductionTradingBot:
                                     margin_used = notional_cost / settings.max_leverage
 
                                     if "OPEN_LONG" in side:
+                                        if self.portfolio_state.positions[sym].quantity == 0.0:
+                                            self.portfolio_state.positions[sym].entry_time = time.time()
                                         self.portfolio_state.positions[sym].quantity += float(qty_str)
                                         self.portfolio_state.free_margin -= margin_used
                                     elif "CLOSE_LONG" in side:
                                         self.portfolio_state.positions[sym].quantity -= float(qty_str)
                                         self.portfolio_state.free_margin += margin_used
                                     elif "OPEN_SHORT" in side:
+                                        if self.portfolio_state.positions[sym].quantity == 0.0:
+                                            self.portfolio_state.positions[sym].entry_time = time.time()
                                         self.portfolio_state.positions[sym].quantity -= float(qty_str)
                                         self.portfolio_state.free_margin -= margin_used
                                     elif "CLOSE_SHORT" in side:

@@ -508,10 +508,12 @@ class ProductionTradingBot:
                     else: predicted_side = "HOLD"
                     
                     # 2. Publish AI internal state to Redis for the Dashboard
-                    # FATAL REDIS/CPU FIX: We ONLY send the latest 200-slot slice [-1] to the dashboard.
-                    # Sending the entire 120-step window was creating a 24,000 float JSON object every second
-                    # and completely choking the dashboard API.
-                    latest_state_slice = state_vector.squeeze(0).tolist()[-1]
+                    # FATAL REDIS/CPU FIX: We ONLY send the latest 200-slot slice to the dashboard.
+                    list_repr = state_vector.squeeze(0).tolist()
+                    if len(list_repr) > 0 and isinstance(list_repr[0], list):
+                        latest_state_slice = list_repr[-1] # 2D Sequence, grab last timestep
+                    else:
+                        latest_state_slice = list_repr # 1D Vector, grab the whole thing
                     
                     ai_state_data = {
                         "confidence": float(confidence),

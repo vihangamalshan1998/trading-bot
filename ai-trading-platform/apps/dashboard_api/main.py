@@ -161,17 +161,17 @@ import subprocess
 
 @app.post("/api/system/pm2/stop")
 async def stop_pm2():
-    """Emergency stop all pm2 processes except the dashboard itself"""
+    """Emergency stop all trading by setting the Redis kill switch flag."""
     try:
-        # Explicitly name ONLY the trading bot to kill
-        bots_to_kill = "trading-bot"
-        result = subprocess.run(f"pm2 stop {bots_to_kill}", shell=True, capture_output=True, text=True)
-        if result.returncode == 0:
-            return {"status": "success", "message": "All bots stopped successfully."}
+        if redis_manager.redis:
+            await redis_manager.redis.set("system:kill_switch:active", "true")
+            # Also publish an event for immediate reaction
+            await redis_manager.redis.publish("system:events", json.dumps({"type": "KILL_SWITCH"}))
+            return {"status": "success", "message": "EMERGENCY KILL SWITCH ACTIVATED! Bots are panicking closing positions."}
         else:
-            return {"status": "error", "message": f"PM2 Error: {result.stderr}"}
+            return {"status": "error", "message": "Failed to connect to Redis."}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to stop bots: {str(e)}"}
+        return {"status": "error", "message": f"Failed to activate kill switch: {str(e)}"}
 
 @app.post("/api/system/pm2/restart")
 async def restart_pm2():

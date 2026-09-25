@@ -223,7 +223,15 @@ class BinanceWebSocketCollector:
                                     closes = [float(k[4]) for k in k_data]
                                     self.latest_raw[sym]["ema_4h"] = sum(closes) / len(closes) # SMA as proxy for stability
                                     
-                    logger.info("Polled REST Data: Long/Short Ratios & 4H Trends updated.")
+                        # 3. Premium Index (Funding Rate fallback)
+                        pi_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={sym}"
+                        async with session.get(pi_url) as resp:
+                            if resp.status == 200:
+                                pi_data = await resp.json()
+                                if pi_data and 'lastFundingRate' in pi_data:
+                                    self.latest_raw[sym]["funding_rate"] = float(pi_data['lastFundingRate'])
+                                    
+                    logger.info("Polled REST Data: Long/Short Ratios, 4H Trends & Funding Rates updated.")
                 except Exception as e:
                     logger.warning(f"Error polling REST data: {e}")
                     

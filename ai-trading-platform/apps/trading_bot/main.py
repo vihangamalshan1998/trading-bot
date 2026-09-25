@@ -730,6 +730,49 @@ class ProductionTradingBot:
                 
             await asyncio.sleep(5.0)
             
+    async def monitor_kill_switch(self):
+        while self.running:
+            try:
+                if self.redis.redis:
+                    ks = await self.redis.redis.get("system:kill_switch:active")
+                    if ks and ks.decode("utf-8") == "true" and not self.emergency_stop:
+                        logger.critical("🚨 EMERGENCY KILL SWITCH ACTIVATED VIA REDIS! 🚨")
+                        self.emergency_stop = True
+                        self.trading_enabled = False
+                        await self.panic_liquidate()
+            except Exception as e:
+                pass
+            await asyncio.sleep(2.0)
+
+    async def panic_liquidate(self):
+        """Immediately closes all open positions and cancels open orders."""
+        logger.critical("Initiating PANIC LIQUIDATION for all open positions!")
+        try:
+            # Force refresh portfolio to get latest exact positions before closing
+            await self.update_portfolio()
+            for sym, pos in self.portfolio_state.positions.items():
+                if abs(pos.quantity) > 0.0001:
+                    logger.critical(f"Panic liquidating {sym} {pos.quantity}")
+                    side = "SELL" if pos.side == "LONG" else "BUY"
+                    
+                    if not self.dry_run:
+                        # Cancel any open orders for this symbol first
+                        try:
+                            await self.binance.cancel_all_orders(sym)
+                        except:
+                            pass
+                            
+                        # Send market order to close
+                        await self.binance.place_order(
+                            symbol=sym,
+                            side=side,
+                            order_type="MARKET",
+                            quantity=abs(pos.quantity)
+                        )
+                        logger.critical(f"Panic Market {side} for {sym} executed.")
+        except Exception as e:
+            logger.error(f"Error during panic liquidation: {e}")
+
     async def start(self):
         self.running = True
         await registry.initialize_from_exchange(self.binance)
@@ -763,7 +806,8 @@ class ProductionTradingBot:
         tasks = [
             asyncio.create_task(self.listen_macro()),
             asyncio.create_task(self.inference_loop()),
-            asyncio.create_task(self.sync_dashboard())
+            asyncio.create_task(self.sync_dashboard()),
+            asyncio.create_task(self.monitor_kill_switch())
         ]
         for sym in self.symbols:
             tasks.append(asyncio.create_task(self.listen_market(sym)))

@@ -98,10 +98,20 @@ async def get_system_state():
             parsed_state = json.loads(state_raw)
             if ai_state_raw:
                 ai_data = json.loads(ai_state_raw)
-                parsed_state["ai_confidence"] = ai_data.get("confidence", 0.0)
-                parsed_state["ai_target_size"] = ai_data.get("target_size", 0.0)
+                
+                # Sanitize floats to prevent FastAPI JSON serialization crashes
+                import math
+                def sanitize_float(val):
+                    if val is None or not isinstance(val, (int, float)): return 0.0
+                    return 0.0 if math.isnan(val) or math.isinf(val) else val
+                
+                parsed_state["ai_confidence"] = sanitize_float(ai_data.get("confidence", 0.0))
+                parsed_state["ai_target_size"] = sanitize_float(ai_data.get("target_size", 0.0))
                 parsed_state["ai_predicted_side"] = ai_data.get("predicted_side", "WAITING")
-                parsed_state["state_vector"] = ai_data.get("state_vector", [])
+                
+                # We also need to sanitize the state_vector array if it exists
+                raw_vector = ai_data.get("state_vector", [])
+                parsed_state["state_vector"] = [sanitize_float(x) for x in raw_vector]
             else:
                 parsed_state["ai_confidence"] = 0.0
                 parsed_state["ai_target_size"] = 0.0
@@ -135,8 +145,11 @@ async def get_trade_history():
             
             for key in ["confidence", "price", "quantity", "entry_price", "realized_pnl", "roi_pct"]:
                 if key in parsed and parsed[key] is not None:
-                    if math.isnan(parsed[key]) or math.isinf(parsed[key]):
-                        parsed[key] = 0.0
+                    # Type check: math.isnan crashes on Strings. This was causing a silent exception loop
+                    # and spamming the pm2 log writer, eating up 50% CPU!
+                    if isinstance(parsed[key], (int, float)):
+                        if math.isnan(parsed[key]) or math.isinf(parsed[key]):
+                            parsed[key] = 0.0
                         
             history.append(parsed)
         except Exception as e:

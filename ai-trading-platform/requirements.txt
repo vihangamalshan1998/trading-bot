@@ -20,3 +20,5 @@ httpx
 aiomysql
 feedparser
 aiohttp
+scipy
+yfinance

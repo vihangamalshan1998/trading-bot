@@ -546,7 +546,18 @@ class ProductionTradingBot:
                                     imm_reward = 0.0
                                     imm_pnl = 0.0
                                     if "CLOSE" in side and entry_px > 0:
-                                        imm_reward = pnl
+                                        # --- SHARPE RATIO & ASYMMETRIC REWARD UPGRADE ---
+                                        if roi < 0:
+                                            # Drawdown Penalty: Heavy punishment for closing at a loss
+                                            imm_reward = pnl * 2.5 
+                                        elif roi > 0 and roi < 1.0:
+                                            # Time Decay Proxy: Punish tiny "lazy" wins (< 1% ROI)
+                                            # Forces the AI to look for real momentum instead of micro-scalping
+                                            imm_reward = -abs(pnl * 0.5) 
+                                        else:
+                                            # Sniper Bonus: Huge reward for clean, high-momentum trades
+                                            imm_reward = pnl * 1.5
+                                            
                                         imm_pnl = pnl
                                     elif "OPEN" in side:
                                         # Limit Maker fee penalty proxy for opening a trade

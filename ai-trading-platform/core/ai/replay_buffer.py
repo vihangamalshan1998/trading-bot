@@ -61,9 +61,9 @@ class ReplayBuffer:
             print(f"Cleanup Error: {e}")
 
     def sample(self, batch_size: int, 
-               recent_pct: float = 0.4, 
-               historical_pct: float = 0.3, 
-               rare_pct: float = 0.2, 
+               recent_pct: float = 0.3, 
+               historical_pct: float = 0.2, 
+               rare_pct: float = 0.4, # UPGRADED: 40% Priority Experience Replay
                random_pct: float = 0.1) -> List[Experience]:
         """
         Samples a batch using configured categories to prevent catastrophic forgetting.
@@ -83,11 +83,21 @@ class ReplayBuffer:
         if len(self.cache) > n_recent:
             batch.extend(self.cache[-n_recent:])
             
-        # 2. Rare (high absolute reward/punishment)
-        # Sort cache by abs(reward) descending
-        rare_pool = sorted(self.cache, key=lambda x: abs(x.reward or 0), reverse=True)
-        if len(rare_pool) > n_rare:
-            batch.extend(rare_pool[:n_rare])
+        # 2. Priority Experience Replay (PER) - Rare (Massive mistakes or huge wins)
+        try:
+            with self.SessionLocal() as session:
+                from sqlalchemy import func
+                # Query the ENTIRE database for the highest absolute rewards (biggest errors/wins)
+                rare_db = session.query(Experience).order_by(func.abs(Experience.reward).desc()).limit(n_rare).all()
+                if len(rare_db) >= (n_rare // 2): 
+                    batch.extend(rare_db)
+                else:
+                    raise Exception("Not enough rare in DB, falling back to RAM cache")
+        except Exception:
+            # Fallback to sorting the RAM cache if DB query fails
+            rare_pool = sorted(self.cache, key=lambda x: abs(x.reward or 0), reverse=True)
+            if len(rare_pool) > 0:
+                batch.extend(rare_pool[:min(n_rare, len(rare_pool))])
             
         # 3. Random
         batch.extend(random.sample(self.cache, min(n_random, len(self.cache))))

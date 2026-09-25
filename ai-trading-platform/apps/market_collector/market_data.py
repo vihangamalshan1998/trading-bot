@@ -212,64 +212,66 @@ class BinanceWebSocketCollector:
         for s in self.symbols:
             streams.extend([f"{s}@bookTicker", f"{s}@aggTrade", f"{s}@markPrice", f"{s}@forceOrder", f"{s}@openInterest", f"{s}@depth5@100ms", f"{s}@ticker"])
             
-        streams_path = "/".join(streams)
-        url = f"{self.base_url}/{streams_path}"
-        
-        logger.info(f"Connecting to Binance WS: {url}")
-        
+        logger.info(f"Connecting to {len(streams)} Binance WS streams...")
         await redis_manager.connect()
         
-        while self._running:
-            try:
-                async with websockets.connect(url) as websocket:
-                    logger.info("Connected to Binance WebSocket!")
-                    while self._running:
-                        message = await websocket.recv()
-                        data = json.loads(message)
-                        
-                        event_type = data.get('e')
-                        if 'b' in data and 'a' in data and 'e' not in data:
-                            # It could be bookTicker or depth5
-                            if isinstance(data.get('b'), list):
-                                # It's a depth5 update, but stream name usually isn't inside payload directly.
-                                # Wait, depth5 events from binance DO have 's' if we use normal streams? No, they don't have 's' if we use multiplexing.
-                                pass # Wait, let's fix this below
-                        if event_type == 'aggTrade':
-                            await self.process_agg_trade(data)
-                        elif event_type == 'markPriceUpdate':
-                            await self.process_funding_rate(data)
-                        elif event_type == 'forceOrder':
-                            await self.process_liquidation(data)
-                        elif event_type == 'openInterest':
-                            await self.process_open_interest(data)
-                        elif event_type == '24hrTicker':
-                            await self.process_ticker24h(data)
-                        elif 'stream' in data and '@depth5' in data['stream']:
-                            sym = data['stream'].split('@')[0].upper()
-                            await self.process_depth(data['data'], sym)
-                        elif 'stream' in data and '@ticker' in data['stream']:
-                            await self.process_ticker24h(data['data'])
-                        elif 'stream' in data and '@bookTicker' in data['stream']:
-                            await self.process_book_ticker(data['data'])
-                        elif 'stream' in data and '@aggTrade' in data['stream']:
-                            await self.process_agg_trade(data['data'])
-                        elif 'stream' in data and '@markPrice' in data['stream']:
-                            await self.process_funding_rate(data['data'])
-                        elif 'stream' in data and '@forceOrder' in data['stream']:
-                            await self.process_liquidation(data['data'])
-                        elif 'stream' in data and '@openInterest' in data['stream']:
-                            await self.process_open_interest(data['data'])
-                        else:
-                            # Handle non-multiplexed fallbacks just in case
-                            if 'b' in data and 'a' in data and 'e' not in data and not isinstance(data.get('b'), list):
-                                await self.process_book_ticker(data)
+        async def _listen_chunk(chunk):
+            streams_path = "/".join(chunk)
+            url = f"{self.base_url}/{streams_path}"
+            while self._running:
+                try:
+                    async with websockets.connect(url) as websocket:
+                        logger.info(f"Connected to Binance WebSocket Chunk ({len(chunk)} streams)!")
+                        while self._running:
+                            message = await websocket.recv()
+                            data = json.loads(message)
                             
-            except websockets.ConnectionClosed:
-                logger.warning("WebSocket Connection Closed. Reconnecting in 5s...")
-                await asyncio.sleep(5)
-            except Exception as e:
-                logger.error(f"WebSocket Error: {e}. Reconnecting...")
-                await asyncio.sleep(5)
+                            event_type = data.get('e')
+                            if 'b' in data and 'a' in data and 'e' not in data:
+                                if isinstance(data.get('b'), list):
+                                    pass
+                            if event_type == 'aggTrade':
+                                await self.process_agg_trade(data)
+                            elif event_type == 'markPriceUpdate':
+                                await self.process_funding_rate(data)
+                            elif event_type == 'forceOrder':
+                                await self.process_liquidation(data)
+                            elif event_type == 'openInterest':
+                                await self.process_open_interest(data)
+                            elif event_type == '24hrTicker':
+                                await self.process_ticker24h(data)
+                            elif 'stream' in data and '@depth5' in data['stream']:
+                                sym = data['stream'].split('@')[0].upper()
+                                await self.process_depth(data['data'], sym)
+                            elif 'stream' in data and '@ticker' in data['stream']:
+                                await self.process_ticker24h(data['data'])
+                            elif 'stream' in data and '@bookTicker' in data['stream']:
+                                await self.process_book_ticker(data['data'])
+                            elif 'stream' in data and '@aggTrade' in data['stream']:
+                                await self.process_agg_trade(data['data'])
+                            elif 'stream' in data and '@markPrice' in data['stream']:
+                                await self.process_funding_rate(data['data'])
+                            elif 'stream' in data and '@forceOrder' in data['stream']:
+                                await self.process_liquidation(data['data'])
+                            elif 'stream' in data and '@openInterest' in data['stream']:
+                                await self.process_open_interest(data['data'])
+                            else:
+                                if 'b' in data and 'a' in data and 'e' not in data and not isinstance(data.get('b'), list):
+                                    await self.process_book_ticker(data)
+                except websockets.ConnectionClosed:
+                    logger.warning("WebSocket Chunk Closed. Reconnecting in 5s...")
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    logger.error(f"WebSocket Chunk Error: {e}. Reconnecting...")
+                    await asyncio.sleep(5)
+
+        chunk_size = 800 # Binance limit is 1024 streams per connection
+        tasks = []
+        for i in range(0, len(streams), chunk_size):
+            chunk = streams[i:i + chunk_size]
+            tasks.append(asyncio.create_task(_listen_chunk(chunk)))
+            
+        await asyncio.gather(*tasks)
                 
     def stop(self):
         self._running = False
@@ -288,6 +290,7 @@ async def run_collector():
         collector.stop()
 
 if __name__ == "__main__":
+    set_log_file("logs/market_collector.log")
     try:
         asyncio.run(run_collector())
     except KeyboardInterrupt:

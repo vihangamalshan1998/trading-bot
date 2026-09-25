@@ -47,6 +47,7 @@ class PositionState(BaseModel):
     entry_price: float = Field(default=0.0, ge=0.0)
     current_price: float = Field(default=0.0, ge=0.0)
     unrealized_pnl: float = 0.0
+    max_unrealized_pnl: float = 0.0
     realized_pnl: float = 0.0
     leverage: int = Field(default=10, gt=0)
     margin: float = Field(default=0.0, ge=0.0)

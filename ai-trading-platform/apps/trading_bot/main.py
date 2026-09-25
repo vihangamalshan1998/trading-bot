@@ -144,8 +144,16 @@ class ProductionTradingBot:
         if pos.quantity != 0 and pos.entry_price > 0 and market:
             raw_pnl = (market.mid_price - pos.entry_price) / pos.entry_price
             current_pnl_pct = raw_pnl if pos.quantity > 0 else -raw_pnl
+            
+            # High Water Mark tracking
+            if current_pnl_pct > pos.max_unrealized_pnl:
+                pos.max_unrealized_pnl = current_pnl_pct
+                
             if pos.liquidation_price > 0:
                 dist_to_liq = abs(market.mid_price - pos.liquidation_price) / market.mid_price
+        else:
+            # Reset High Water Mark when flat
+            pos.max_unrealized_pnl = 0.0
                 
         obs.extend([
             float(pos.quantity),
@@ -153,8 +161,8 @@ class ProductionTradingBot:
             float(pos.leverage) / 50.0, # normalized
             current_pnl_pct,
             dist_to_liq,
-            # Placeholders for advanced tracking (time held, max profit)
-            0.0, 0.0, 0.0, 0.0, 0.0
+            # Placeholders for advanced tracking: inserted max_unrealized_pnl
+            float(pos.max_unrealized_pnl), 0.0, 0.0, 0.0, 0.0
         ])
         
         # 3. Market Features (90 dims) from engine.py

@@ -36,9 +36,16 @@ class BinanceWebSocketCollector:
             } for s in symbols
         }
         
+        self.last_publish_time = {s.upper(): 0.0 for s in symbols}
+        
     async def publish_features(self, symbol: str):
         """Pulls features from the engine and publishes to Redis"""
         try:
+            now = time.time()
+            if now - self.last_publish_time[symbol] < 1.0:
+                return
+            self.last_publish_time[symbol] = now
+            
             engine = self.feature_engines[symbol]
             raw = self.latest_raw[symbol]
             engine.add_tick(raw)
@@ -154,6 +161,14 @@ class BinanceWebSocketCollector:
         except Exception as e:
             pass
             
+    async def process_funding_rate(self, data: dict):
+        try:
+            symbol = data['s'].upper()
+            if 'r' in data:
+                self.latest_raw[symbol]["funding_rate"] = float(data['r'])
+            await self.publish_features(symbol)
+        except Exception as e:
+            pass
     async def process_liquidation(self, data: dict):
         try:
             order = data['o']

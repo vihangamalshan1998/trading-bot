@@ -131,6 +131,8 @@ class ProductionTradingBot:
             if message["type"] == "message":
                 try:
                     payload = json.loads(message["data"])
+                    if float(payload.get("mid_price", 0.0)) <= 0.0:
+                        continue # Wait until market collector has real price data
                     # Parse into Canonical MarketState
                     self.market_states[symbol] = MarketState(**payload)
                 except Exception as e:

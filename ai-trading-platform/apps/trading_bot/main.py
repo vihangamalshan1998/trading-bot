@@ -277,16 +277,16 @@ class ProductionTradingBot:
                                 await self.binance.cancel_order(sym, self.active_orders[sym]['order_id'])
                             except Exception as e:
                                 logger.warning(f"[{sym}] Failed to cancel (maybe already filled/cancelled): {e}")
+                            # Revert optimistic portfolio update since order timed out and didn't fill
+                            if 'trade_record' in self.active_orders[sym]:
+                                side = self.active_orders[sym]['trade_record']['side']
+                                qty = self.active_orders[sym]['trade_record']['quantity']
+                                if "OPEN_LONG" in side or "CLOSE_SHORT" in side:
+                                    self.portfolio_state.positions[sym].quantity -= float(qty)
+                                elif "CLOSE_LONG" in side or "OPEN_SHORT" in side:
+                                    self.portfolio_state.positions[sym].quantity += float(qty)
                             del self.active_orders[sym]
-                            
-                            # Sync position immediately
-                            try:
-                                positions = await self.binance.get_positions()
-                                for p in positions:
-                                    if p.get("symbol") == sym:
-                                        self.portfolio_state.positions[sym].quantity = float(p.get("positionAmt", 0))
-                                        break
-                            except: pass
+
                             continue
                         else:
                             # Order is still active. Verify if it's already filled via Binance API
@@ -303,14 +303,10 @@ class ProductionTradingBot:
                                         
                                     del self.active_orders[sym]
                                     
-                                    # Sync position immediately
-                                    try:
-                                        positions = await self.binance.get_positions()
-                                        for p in positions:
-                                            if p.get("symbol") == sym:
-                                                self.portfolio_state.positions[sym].quantity = float(p.get("positionAmt", 0))
-                                                break
-                                    except: pass
+                                    # No need to sync position here. We optimistically updated it when the order was placed.
+                                    # Binance REST API has eventual consistency delays, so querying it now might return stale data 
+                                    # and accidentally resurrect a closed position.
+
                                     continue
                                 else:
                                     logger.debug(f"[{sym}] Limit order still pending. Skipping tick.")

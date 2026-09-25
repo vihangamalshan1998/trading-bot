@@ -474,7 +474,7 @@ function App() {
                   <p className="empty-text">Awaiting market data from Binance...</p>
                 ) : (
                   Object.entries(data.market_states).map(([sym, state], idx) => {
-                    const latestFunding = state.state_vector && state.state_vector.length > 100 ? state.state_vector[100] : 0;
+                    const latestFunding = state.funding_rate || 0;
                     
                     return (
                     <div key={idx} className="market-card">
@@ -490,7 +490,11 @@ function App() {
                         </div>
                         <div className="market-metric">
                           <span className="label">Spread</span>
-                          <span className="value">{state.spread_bps ? state.spread_bps.toFixed(1) : '0.0'} bps</span>
+                          <span className="value">
+                            {state.spread && state.mid_price 
+                              ? ((state.spread / state.mid_price) * 10000).toFixed(1) 
+                              : '0.0'} bps
+                          </span>
                         </div>
                         <div className="market-metric">
                           <FundingGauge rate={latestFunding} />

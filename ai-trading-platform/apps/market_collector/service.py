@@ -75,7 +75,8 @@ class MarketCollectorService:
                     "ask_qty": float(self.order_books[symbol].asks.get(features["best_ask"], 0)),
                     "volume": 0.0, # Filled by aggTrade
                     "buy_volume": 0.0,
-                    "trade_count": 0.0
+                    "trade_count": 0.0,
+                    "funding_rate": self._funding_rates.get(symbol, 0.0)
                 }
                 self.ai_engines[symbol].add_tick(tick_data)
                 ai_features_array = self.ai_engines[symbol].compute_features().tolist()

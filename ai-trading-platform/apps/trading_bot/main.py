@@ -508,15 +508,21 @@ class ProductionTradingBot:
                     else: predicted_side = "HOLD"
                     
                     # 2. Publish AI internal state to Redis for the Dashboard
+                    # FATAL REDIS/CPU FIX: We ONLY send the latest 200-slot slice [-1] to the dashboard.
+                    # Sending the entire 120-step window was creating a 24,000 float JSON object every second
+                    # and completely choking the dashboard API.
+                    latest_state_slice = state_vector.squeeze(0).tolist()[-1]
+                    
                     ai_state_data = {
                         "confidence": float(confidence),
                         "action_val": float(action_val),
                         "target_size": float(target_size),
                         "price_offset": float(price_offset),
                         "predicted_side": predicted_side,
-                        "state_vector": state_vector.squeeze(0).tolist()
+                        "state_vector": latest_state_slice
                     }
                     asyncio.create_task(redis_manager.redis.set(f"ai:state:{sym}", json.dumps(ai_state_data)))
+
                     
                     if confidence < 0.3: 
                         logger.info(f"[{sym}] SKIPPING (Low Confidence: {confidence:.2f})")
@@ -628,8 +634,7 @@ class ProductionTradingBot:
                                         "quantity": float(qty_str),
                                         "price": market.mid_price,
                                         "confidence": float(confidence),
-                                        "order_id": actual_order_id,
-                                        "state_vector": state_vector.squeeze(0).tolist()
+                                        "order_id": actual_order_id
                                     }
                                     
                                     # Add Analytics for Closures

@@ -739,6 +739,18 @@ function App() {
                 >
                   Trading Bot
                 </button>
+                <button 
+                  className={`tab-btn ${activeSubTab === 'whale_tracker' ? 'active' : ''}`}
+                  onClick={() => setActiveSubTab('whale_tracker')}
+                >
+                  Whale Tracker
+                </button>
+                <button 
+                  className={`tab-btn ${activeSubTab === 'statarb_collector' ? 'active' : ''}`}
+                  onClick={() => setActiveSubTab('statarb_collector')}
+                >
+                  StatArb Collector
+                </button>
               </div>
             </div>
             
@@ -746,6 +758,8 @@ function App() {
               {activeSubTab === 'market_collector' && <LogViewer activeTab={activeTab} botName="market_collector" title="Market Collector" />}
               {activeSubTab === 'ai_trainer' && <LogViewer activeTab={activeTab} botName="ai_trainer" title="AI Trainer" />}
               {activeSubTab === 'trading_bot' && <LogViewer activeTab={activeTab} botName="trading_bot" title="Trading Bot (Execution)" />}
+              {activeSubTab === 'whale_tracker' && <LogViewer activeTab={activeTab} botName="whale_tracker" title="Whale Tracker" />}
+              {activeSubTab === 'statarb_collector' && <LogViewer activeTab={activeTab} botName="statarb_collector" title="StatArb Collector" />}
             </div>
           </section>
         )}

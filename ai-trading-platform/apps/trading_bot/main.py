@@ -77,6 +77,8 @@ class ProductionTradingBot:
         )
         self.macro_state = MacroState(timestamp=time.time())
         self.market_states: Dict[str, MarketState] = {}
+        self.whale_states: Dict[str, dict] = {}
+        self.statarb_states: Dict[str, dict] = {}
         
         # Phase 12: LSTM Sliding Window Sequence (120 steps * 5s = 10 minutes)
         self.sequence_length = 120
@@ -133,6 +135,35 @@ class ProductionTradingBot:
                     self.market_states[symbol] = MarketState(**payload)
                 except Exception as e:
                     logger.error(f"Error parsing market state for {symbol}: {e}")
+                    
+    async def listen_whale(self, symbol: str):
+        await self.redis.connect()
+        redis_conn = self.redis.redis
+        pubsub = redis_conn.pubsub()
+        await pubsub.subscribe(f"whale:state:{symbol}")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    payload = json.loads(message["data"])
+                    self.whale_states[symbol] = payload
+                except Exception as e:
+                    logger.error(f"Error parsing whale state for {symbol}: {e}")
+
+    async def listen_statarb(self, symbol: str):
+        await self.redis.connect()
+        redis_conn = self.redis.redis
+        pubsub = redis_conn.pubsub()
+        await pubsub.subscribe(f"statarb:state:{symbol}")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    payload = json.loads(message["data"])
+                    self.statarb_states[symbol] = payload
+                except Exception as e:
+                    logger.error(f"Error parsing statarb state for {symbol}: {e}")
+
                     
     def _build_state_vector(self, symbol: str) -> tuple[torch.Tensor, list]:
         obs = []
@@ -257,8 +288,27 @@ class ProductionTradingBot:
         ]
         obs.extend(macro_features)
         
-        # 5. Future-Proofing Blank Canvas (70 dims)
-        obs.extend([0.0] * 70)
+        # 5. Future-Proofing Canvas: Whale & StatArb Injection (70 dims)
+        whale = self.whale_states.get(symbol, {})
+        statarb = self.statarb_states.get(symbol, {})
+        
+        obs.extend([
+            # Whale Tracking (Slots 130 - 139)
+            float(whale.get("buy_wall_distance", 0.0)),
+            float(whale.get("sell_wall_distance", 0.0)),
+            float(whale.get("whale_buy_pressure", 0.0)),
+            float(whale.get("whale_sell_pressure", 0.0)),
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            
+            # StatArb Tracking (Slots 140 - 149)
+            float(statarb.get("okx_premium", 0.0)),
+            float(statarb.get("bybit_premium", 0.0)),
+            float(statarb.get("okx_momentum_lead", 0.0)),
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ])
+        
+        # Fill remaining 50 slots with zeros (150-199)
+        obs.extend([0.0] * 50)
         
         if len(obs) != 200:
             raise ValueError(f"State vector dimension mismatch. Expected 200, got {len(obs)}")
@@ -717,6 +767,8 @@ class ProductionTradingBot:
         ]
         for sym in self.symbols:
             tasks.append(asyncio.create_task(self.listen_market(sym)))
+            tasks.append(asyncio.create_task(self.listen_whale(sym)))
+            tasks.append(asyncio.create_task(self.listen_statarb(sym)))
             
         await asyncio.gather(*tasks)
         

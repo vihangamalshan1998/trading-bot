@@ -129,7 +129,7 @@ async def get_trade_history():
 @app.get("/api/logs/{bot_name}")
 async def get_bot_logs(bot_name: str):
     """Returns the last 50 lines of the requested bot's log file."""
-    allowed_bots = ["market_collector", "ai_trainer", "trading_bot"]
+    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector"]
     if bot_name not in allowed_bots:
         return {"logs": ["Invalid bot name requested."]}
         
@@ -147,7 +147,7 @@ async def get_bot_logs(bot_name: str):
 @app.get("/api/logs/download/{bot_name}")
 async def download_bot_logs(bot_name: str):
     """Downloads the full log file for the given bot."""
-    allowed_bots = ["market_collector", "ai_trainer", "trading_bot"]
+    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector"]
     if bot_name not in allowed_bots:
         return {"error": "Invalid bot name requested."}
         

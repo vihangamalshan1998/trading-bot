@@ -181,24 +181,24 @@ This document contains the exact mathematical mapping of the 200 sensory inputs 
 
 | Slot | Feature Name | Description | Status / Alpha |
 | :--- | :--- | :--- | :--- |
-| **130** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **131** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **132** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **133** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **134** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **135** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **136** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **137** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **138** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **139** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **140** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **141** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **142** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **143** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **144** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **145** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **146** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
-| **147** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
+| **130** | `buy_wall_distance` | **[NEW]** % distance to nearest massive buy wall (> $500k). | **Whale Tracking.** |
+| **131** | `sell_wall_distance` | **[NEW]** % distance to nearest massive sell wall (> $500k). | **Whale Tracking.** |
+| **132** | `whale_buy_pressure` | **[NEW]** $ volume of >$100k market buys (60s). | **Whale Tracking.** |
+| **133** | `whale_sell_pressure`| **[NEW]** $ volume of >$100k market sells (60s). | **Whale Tracking.** |
+| **134** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **135** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **136** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **137** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **138** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **139** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **140** | `okx_premium` | **[NEW]** (OKX Price - Binance Price) / Binance. | **Multi-Exchange StatArb.** |
+| **141** | `bybit_premium` | **[NEW]** (Bybit Price - Binance Price) / Binance. | **Multi-Exchange StatArb.** |
+| **142** | `okx_momentum_lead` | **[NEW]** Is OKX moving before Binance? | **Multi-Exchange StatArb.** |
+| **143** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **144** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **145** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **146** | `PADDING` | Reserved 0.0 | Future Expansion |
+| **147** | `PADDING` | Reserved 0.0 | Future Expansion |
 | **148** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
 | **149** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |
 | **150** | `PADDING` | Reserved 0.0 | Awaiting Institutional Data |

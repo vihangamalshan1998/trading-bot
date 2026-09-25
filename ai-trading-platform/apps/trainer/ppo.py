@@ -23,8 +23,10 @@ class PPOTrainer:
         self.clip_epsilon = clip_epsilon
         self.buffer = ReplayBuffer()
         
-        # Load recent cache from DB
-        self.buffer.load_cache_from_db(limit=1000)
+        # FATAL MEMORY LEAK FIX:
+        # Lowered cache limit from 1000 to 250. 
+        # 1000 matrices of shape [120, 200] was consuming 3.2GB of RAM on the VPS.
+        self.buffer.load_cache_from_db(limit=250)
         
     def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Computes Generalized Advantage Estimation (GAE)."""
@@ -148,7 +150,7 @@ async def run_training_loop():
             if step % 100 == 0:
                 logger.info(f"Completed {step} training steps. Refreshing cache and saving model...")
                 # Refresh cache from DB to prevent Mode Collapse
-                trainer.buffer.load_cache_from_db(limit=1000)
+                trainer.buffer.load_cache_from_db(limit=250)
                 
                 # Auto-delete data older than 30 days to save VPS disk space
                 if step % 1000 == 0:

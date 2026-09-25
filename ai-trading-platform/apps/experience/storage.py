@@ -9,7 +9,10 @@ class ExperienceStorageService:
     Phase 8: Listens for completed trade experiences on Redis and flushes them to MySQL.
     """
     def __init__(self):
-        self.replay_buffer = ReplayBuffer()
+        # FATAL MEMORY LEAK FIX:
+        # We set capacity_cache=0 here because the storage service only needs to WRITE to MySQL.
+        # It does not need to hold 10,000 massive 200-slot matrices in RAM (which caused the 1.1GB RAM spike).
+        self.replay_buffer = ReplayBuffer(capacity_cache=0)
         
     async def start(self):
         await redis_manager.connect()

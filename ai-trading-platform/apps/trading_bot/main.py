@@ -748,12 +748,13 @@ class ProductionTradingBot:
         """Immediately closes all open positions and cancels open orders."""
         logger.critical("Initiating PANIC LIQUIDATION for all open positions!")
         try:
-            # Force refresh portfolio to get latest exact positions before closing
-            await self.update_portfolio()
-            for sym, pos in self.portfolio_state.positions.items():
-                if abs(pos.quantity) > 0.0001:
-                    logger.critical(f"Panic liquidating {sym} {pos.quantity}")
-                    side = "SELL" if pos.side == "LONG" else "BUY"
+            live_positions = await self.binance.get_positions()
+            for p in live_positions:
+                sym = p.get("symbol")
+                amt = float(p.get("positionAmt", 0))
+                if abs(amt) > 0.0001:
+                    logger.critical(f"Panic liquidating {sym} {amt}")
+                    side = "SELL" if amt > 0 else "BUY"
                     
                     if not self.dry_run:
                         # Cancel any open orders for this symbol first
@@ -767,7 +768,7 @@ class ProductionTradingBot:
                             symbol=sym,
                             side=side,
                             order_type="MARKET",
-                            quantity=abs(pos.quantity)
+                            quantity=abs(amt)
                         )
                         logger.critical(f"Panic Market {side} for {sym} executed.")
         except Exception as e:

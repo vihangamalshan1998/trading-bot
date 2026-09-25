@@ -123,7 +123,12 @@ async def get_trade_history():
         return {"history": []}
     
     raw_history = await redis_manager.redis.lrange("dashboard:trade_history", 0, -1)
-    history = [json.loads(item) for item in raw_history]
+    history = []
+    for item in raw_history:
+        try:
+            history.append(json.loads(item))
+        except Exception:
+            pass # ignore malformed records
     return {"history": history}
 
 @app.get("/api/logs/{bot_name}")

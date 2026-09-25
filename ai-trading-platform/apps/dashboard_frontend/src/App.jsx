@@ -310,10 +310,18 @@ function App() {
   }
 
   // --- Calculate Maker Fee Analytics ---
-  const totalVolume = tradeHistory.reduce((acc, trade) => {
+  const historyVolume = tradeHistory.reduce((acc, trade) => {
       const px = trade.entry_price || trade.price || 0;
       return acc + (trade.quantity * px);
   }, 0);
+  
+  const openVolume = (data.positions || []).reduce((acc, pos) => {
+      if (!pos.quantity || pos.quantity === 0) return acc;
+      const px = pos.entryPrice || pos.entry_price || 0;
+      return acc + (Math.abs(pos.quantity) * px);
+  }, 0);
+
+  const totalVolume = historyVolume + openVolume;
   // Taker fee: 0.05%, Maker fee: 0.02%. Savings = 0.03%
   const savedFees = totalVolume * 0.0003;
 

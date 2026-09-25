@@ -66,15 +66,8 @@ class BinanceWebSocketCollector:
             channel = f"market:state:{symbol}"
             
             if redis_manager.redis is not None:
-                await redis_manager.redis.publish(channel, json.dumps(payload))
-                
-                # Also publish a human-readable state for the Dashboard UI
-                trend = "UP" if self.latest_raw[symbol]["buy_volume"] > (self.latest_raw[symbol]["volume"] / 2) else "DOWN"
-                dashboard_payload = {
-                    "price": self.latest_raw[symbol]["mid_price"],
-                    "trend": trend
-                }
-                await redis_manager.redis.set(f"dashboard:market_states:{symbol}", json.dumps(dashboard_payload))
+                # set_state handles both setting the key (for dashboard) and publishing (for trading bot)
+                await redis_manager.set_state(channel, payload, ttl_seconds=60)
                 
         except Exception as e:
             logger.error(f"Error publishing features for {symbol}: {e}")

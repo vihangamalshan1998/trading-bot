@@ -11,9 +11,11 @@ class MacroCollectorService:
     def __init__(self):
         self.running = False
         self._task = None
-        # Cointelegraph RSS (can add more later)
+        # Cointelegraph & Global Macro RSS
         self.rss_urls = [
-            "https://cointelegraph.com/rss"
+            "https://cointelegraph.com/rss",          # Crypto Specific News
+            "https://feeds.a.dj.com/rss/RSSMarketsMain.xml", # WSJ Global Markets
+            "https://finance.yahoo.com/news/rss"      # Yahoo Finance Global News
         ]
         
     async def fetch_news(self) -> str:
@@ -47,7 +49,7 @@ class MacroCollectorService:
         
         prompt = f"""
 You are a professional cryptocurrency quantitative macro analyst. 
-Analyze the following latest crypto news headlines.
+Analyze the following latest crypto and global macroeconomic news headlines.
 Determine the overall market sentiment score between -1.0 (extremely bearish) and 1.0 (extremely bullish).
 Also determine the current market regime (-1 for bearish, 1 for bullish, 0 for neutral).
 Output ONLY a raw JSON object with NO markdown formatting, NO backticks, and NO extra text.

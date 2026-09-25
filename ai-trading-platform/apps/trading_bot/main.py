@@ -440,7 +440,7 @@ class ProductionTradingBot:
                                 continue
                                 
                             notional_val = float(qty_str) * market.mid_price
-                            if notional_val < sym_config.min_notional:
+                            if notional_val < sym_config.min_notional and "OPEN" in side:
                                 logger.info(f"[{sym}] Notional {notional_val:.2f} < Min Notional {sym_config.min_notional}. Skipping.")
                                 continue
                                 

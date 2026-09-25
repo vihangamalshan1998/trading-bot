@@ -4,7 +4,7 @@ import json
 import time
 import numpy as np
 from typing import List, Dict
-from core.logging.logger import logger
+from core.logging.logger import logger, set_log_file
 from core.db.redis import redis_manager
 from core.config.settings import settings
 from apps.feature_engine.engine import FeatureEngine

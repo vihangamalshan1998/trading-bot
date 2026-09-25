@@ -378,8 +378,8 @@ class ProductionTradingBot:
                     logger.info("Hot reload complete.")
 
                 # 1. Check if we have valid market data
-                if len(self.market_states) != self.num_symbols:
-                    logger.warning("Missing market data for some symbols. Skipping inference.")
+                if len(self.market_states) == 0:
+                    logger.warning("Waiting for initial market data streams to connect...")
                     await asyncio.sleep(5.0)
                     continue
                     

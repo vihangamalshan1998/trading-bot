@@ -29,15 +29,10 @@ ai-trading-platform/
 The backbone of the system. It connects to the `wss://stream.testnet.binance.vision` endpoint. 
 It utilizes Python's `asyncio` to simultaneously process `depthUpdate` events (which route into the `OrderBookBuilder`) and `aggTrade` events (which route into the `FeatureEngine`).
 
-### 2. Feature Engine (`apps/feature_engine`)
-Takes the raw Level 2 Order Book state and trades, and derives predictive features into a **41-dimension array**:
-- **Live Features (31):**
-  - **Spread BPS**: Distance between Best Ask and Best Bid.
-  - **Mid Price**: Average of Best Bid/Ask.
-  - **Micro Price**: Volume-weighted mid price.
-  - **Imbalance**: Ratio of Bid volume to total Bid/Ask volume at the top of the book.
-  - **VWAP**: Rolling Volume Weighted Average Price based on recent trades.
-- **Placeholder Features (10):** Pre-allocated slots (default `0.0`) designed to accept future alternative data (Twitter sentiment, Whale movements) without requiring a database reset or model retraining.
+### 2. Feature Engine (`apps/feature_engine`) & State Vector
+Takes the raw Level 2 Order Book state, global macro news, and whale trades, and derives predictive features into a **V2 200-Dimension Array (108 Active / 92 Padding)**:
+- For a complete, mathematical breakdown of all 200 slots, see: `V2_200_SLOT_BLUEPRINT.md`
+- For an easy-to-read explanation of the 200 slots, see: `V2_200_SLOT_TODDLER_EDITION.md`
 
 ### 3. Redis State Bus (`core/db/redis.py`)
 To prevent the Trading Bot from needing its own redundant WebSocket connections (which can trigger rate limits), the `MarketCollector` serializes the output of the `FeatureEngine` into a JSON dictionary and pushes it to Redis (`market:state:BTCUSDT`) every second. 

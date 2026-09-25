@@ -28,7 +28,7 @@ At the very top sits `run_system.py`.
     1.  `@bookTicker`: Gives the best bid, best ask, and quantities. The logic instantly calculates the `spread`, the `mid_price`, and the orderbook `imbalance` (who has more size, buyers or sellers?).
     2.  `@markPrice`: Tracks the funding rate.
     3.  `@forceOrder`: Tracks liquidations (when other traders blow up their accounts).
-    It compresses this data into a 9-dimensional state array and pushes it to Redis (`market:state:{symbol}`) at extremely high frequencies.
+    It compresses this data into a massive 200-dimensional V2 state array (108 active slots, 92 padding slots) and pushes it to Redis (`market:state:{symbol}`) at extremely high frequencies. Please refer to `V2_200_SLOT_BLUEPRINT.md` for the full slot mapping.
 
 ### 2.3 News & Macro Collector (`apps/market_collector/news_macro.py`)
 *   **Purpose**: To give the AI "outside world" context.

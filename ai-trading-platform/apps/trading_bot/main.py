@@ -419,8 +419,13 @@ class ProductionTradingBot:
                                     
                                     # Push to dashboard history ONLY when filled
                                     if 'trade_record' in self.active_orders[sym]:
-                                        asyncio.create_task(redis_manager.redis.lpush("dashboard:trade_history", json.dumps(self.active_orders[sym]['trade_record'])))
-                                        asyncio.create_task(redis_manager.redis.ltrim("dashboard:trade_history", 0, 99))
+                                        try:
+                                            # Validate JSON before pushing
+                                            safe_json = json.dumps(self.active_orders[sym]['trade_record'])
+                                            await redis_manager.redis.lpush("dashboard:trade_history", safe_json)
+                                            await redis_manager.redis.ltrim("dashboard:trade_history", 0, 99)
+                                        except Exception as e:
+                                            logger.error(f"[{sym}] FAILED to push trade history to Redis: {e}")
                                         
                                     del self.active_orders[sym]
                                     

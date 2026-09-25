@@ -124,11 +124,21 @@ async def get_trade_history():
     
     raw_history = await redis_manager.redis.lrange("dashboard:trade_history", 0, -1)
     history = []
+    import math
     for item in raw_history:
         try:
-            history.append(json.loads(item))
-        except Exception:
-            pass # ignore malformed records
+            parsed = json.loads(item)
+            if "state_vector" in parsed:
+                parsed["state_vector"] = [0.0 if math.isnan(x) or math.isinf(x) else x for x in parsed["state_vector"]]
+            
+            for key in ["confidence", "price", "quantity", "entry_price", "realized_pnl", "roi_pct"]:
+                if key in parsed and parsed[key] is not None:
+                    if math.isnan(parsed[key]) or math.isinf(parsed[key]):
+                        parsed[key] = 0.0
+                        
+            history.append(parsed)
+        except Exception as e:
+            print(f"Failed to parse trade history item: {e}")
     return {"history": history}
 
 @app.get("/api/logs/{bot_name}")

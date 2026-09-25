@@ -40,13 +40,30 @@ class BinanceWebSocketCollector:
         """Pulls features from the engine and publishes to Redis"""
         try:
             engine = self.feature_engines[symbol]
-            engine.add_tick(self.latest_raw[symbol])
+            raw = self.latest_raw[symbol]
+            engine.add_tick(raw)
             
-            # The returned array is the 25-dim Phase 3 Market State
-            market_state = engine.compute_features()
+            # The returned array is the 90-dim Phase 3 Market State
+            ai_features_array = engine.compute_features().tolist()
+            
+            payload = {
+                "symbol": symbol,
+                "timestamp": time.time(),
+                "bid": raw["best_bid"] or raw["mid_price"],
+                "ask": raw["best_ask"] or raw["mid_price"],
+                "mid_price": raw["mid_price"],
+                "last_price": raw["mid_price"],
+                "spread": max(0.0, raw["best_ask"] - raw["best_bid"]),
+                "order_book_imbalance": raw["ob_skew_l2"],
+                "volume": raw["volume"],
+                "vwap": raw["mid_price"], 
+                "volatility": 0.0,
+                "funding_rate": raw["funding_rate"],
+                "features": ai_features_array,
+                "data_quality": 1.0
+            }
             
             channel = f"market:state:{symbol}"
-            payload = market_state.tolist()
             
             if redis_manager.redis is not None:
                 await redis_manager.redis.publish(channel, json.dumps(payload))

@@ -217,10 +217,10 @@ class BinanceWebSocketCollector:
     async def listen(self):
         self._running = True
         
-        # Build streams: <symbol>@bookTicker, <symbol>@aggTrade, <symbol>@markPrice, <symbol>@forceOrder, <symbol>@openInterest, <symbol>@depth5@100ms, <symbol>@ticker
+        # Build streams: <symbol>@bookTicker, <symbol>@aggTrade, <symbol>@markPrice, <symbol>@forceOrder, <symbol>@depth5@100ms, <symbol>@ticker
         streams = []
         for s in self.symbols:
-            streams.extend([f"{s}@bookTicker", f"{s}@aggTrade", f"{s}@markPrice", f"{s}@forceOrder", f"{s}@openInterest", f"{s}@depth5@100ms", f"{s}@ticker"])
+            streams.extend([f"{s}@bookTicker", f"{s}@aggTrade", f"{s}@markPrice", f"{s}@forceOrder", f"{s}@depth5@100ms", f"{s}@ticker"])
             
         logger.info(f"Connecting to {len(streams)} Binance WS streams...")
         await redis_manager.connect()
@@ -268,8 +268,8 @@ class BinanceWebSocketCollector:
                             else:
                                 if 'b' in data and 'a' in data and 'e' not in data and not isinstance(data.get('b'), list):
                                     await self.process_book_ticker(data)
-                except websockets.ConnectionClosed:
-                    logger.warning("WebSocket Chunk Closed. Reconnecting in 5s...")
+                except websockets.ConnectionClosed as e:
+                    logger.warning(f"WebSocket Chunk Closed ({e.code} - {e.reason}). Reconnecting in 5s...")
                     await asyncio.sleep(5)
                 except Exception as e:
                     logger.error(f"WebSocket Chunk Error: {e}. Reconnecting...")

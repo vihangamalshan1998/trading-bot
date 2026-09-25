@@ -17,7 +17,7 @@ class BinanceWebSocketCollector:
     """
     def __init__(self, symbols: List[str]):
         self.symbols = [s.lower() for s in symbols]
-        self.base_url = "wss://fstream.binance.com/ws"
+        self.base_url = "wss://fstream.binance.com/stream?streams="
         self._running = False
         
         # Initialize a Feature Engine for each symbol
@@ -217,7 +217,7 @@ class BinanceWebSocketCollector:
         
         async def _listen_chunk(chunk):
             streams_path = "/".join(chunk)
-            url = f"{self.base_url}/{streams_path}"
+            url = f"{self.base_url}{streams_path}"
             while self._running:
                 try:
                     async with websockets.connect(url) as websocket:

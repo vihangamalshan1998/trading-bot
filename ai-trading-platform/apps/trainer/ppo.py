@@ -24,8 +24,8 @@ class PPOTrainer:
         self.buffer = ReplayBuffer()
         
         # FATAL MEMORY LEAK FIX:
-        # Lowered cache limit from 1000 to 750 to prevent OOM kills on the VPS
-        self.buffer.load_cache_from_db(limit=750)
+        # Increased cache limit to 1000 (Safe due to new Garbage Collection fix)
+        self.buffer.load_cache_from_db(limit=1000)
         
     def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Computes Generalized Advantage Estimation (GAE)."""
@@ -153,8 +153,8 @@ async def run_training_loop():
                 trainer.buffer.cache.clear()
                 gc.collect()
                 
-                # Refresh cache from DB to prevent Mode Collapse (Lowered to 750 to prevent OOM crashes)
-                trainer.buffer.load_cache_from_db(limit=750)
+                # Refresh cache from DB to prevent Mode Collapse (Increased to 1000)
+                trainer.buffer.load_cache_from_db(limit=1000)
                 
                 # Auto-delete data older than 30 days to save VPS disk space
                 if step % 1000 == 0:

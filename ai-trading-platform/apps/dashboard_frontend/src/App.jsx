@@ -673,6 +673,10 @@ function App() {
               <h3>AI Brain Status</h3>
               <div className="stat-grid">
                 <div className="stat-card">
+                  <span className="stat-label">Total Experiences</span>
+                  <span className="stat-value highlight" style={{color: '#a78bfa'}}>{systemStats.total_experiences || 0}</span>
+                </div>
+                <div className="stat-card">
                   <span className="stat-label">Total Brain Saves</span>
                   <span className="stat-value highlight">{systemStats.model_update_count}</span>
                 </div>

@@ -68,8 +68,20 @@ async def listen_redis_events():
 async def get_training_metrics():
     return {"metrics": training_metrics}
 
+from core.database.session import SessionLocal
+from core.database.models.ai import Experience
+
 @app.get("/api/system_stats")
 async def get_system_stats_api():
+    try:
+        with SessionLocal() as session:
+            count = session.query(Experience).count()
+            system_stats["total_experiences"] = count
+    except Exception as e:
+        print(f"Failed to fetch total experiences: {e}")
+        if "total_experiences" not in system_stats:
+            system_stats["total_experiences"] = 0
+            
     return system_stats
 
 @app.get("/api/state")

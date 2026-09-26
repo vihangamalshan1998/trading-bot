@@ -453,6 +453,7 @@ class ProductionTradingBot:
                         
                     # Forward Pass (shape: batch=1, seq_len=120, feature=41)
                     state_tensor = torch.tensor([seq], dtype=torch.float32)
+                    state_tensor = torch.nan_to_num(state_tensor, nan=0.0, posinf=1.0, neginf=-1.0)
                     
                     with torch.no_grad():
                         action_logits, expected_return = self.model(state_tensor)

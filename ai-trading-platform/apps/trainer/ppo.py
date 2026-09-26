@@ -148,6 +148,11 @@ async def run_training_loop():
             step += 1
             if step % 100 == 0:
                 logger.info(f"Completed {step} training steps. Refreshing cache and saving model...")
+                # Clear memory before pulling new data to prevent RAM spikes
+                import gc
+                trainer.buffer.cache.clear()
+                gc.collect()
+                
                 # Refresh cache from DB to prevent Mode Collapse (Lowered to 750 to prevent OOM crashes)
                 trainer.buffer.load_cache_from_db(limit=750)
                 

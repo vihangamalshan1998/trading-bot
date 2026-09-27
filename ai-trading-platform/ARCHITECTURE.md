@@ -46,5 +46,5 @@ Positioned deliberately as a firewall between the `TradingBot` and the `BinanceS
 ### 6. RL Engine (V3 Multi-Horizon Architecture)
 The V3 Architecture splits the training into three distinct components to manage memory and CPU load:
 - **Teacher's Assistant (`apps/experience/reward_calculator.py`)**: A background worker that constantly scans the MySQL database for trades older than 4 hours. It calculates the exact 5-minute, 1-hour, and 4-hour profit/loss for that trade and writes the "grades" back to the database.
-- **`SingleSymbolActorCritic` (The V3 Brain)**: A PyTorch LSTM neural network that processes 16-second chronological sequences `[Batch, 16, 200]`. It features a Multi-Horizon Critic head that outputs 3 distinct value predictions (5m, 1h, 4h).
+- **`SingleSymbolActorCritic` (The V3 Brain)**: A PyTorch LSTM neural network that processes 300-second (5-minute) chronological sequences `[Batch, 300, 200]`. It features a Multi-Horizon Critic head that outputs 3 distinct value predictions (5m, 1h, 4h).
 - **`ppo.py`**: A Proximal Policy Optimization (PPO) loop that trains the Actor-Critic model using the pre-calculated grades from the Teacher's Assistant, saving the resulting `.pt` checkpoint to the `ModelRegistry`.

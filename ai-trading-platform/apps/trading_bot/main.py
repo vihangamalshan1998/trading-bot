@@ -451,7 +451,7 @@ class ProductionTradingBot:
                     while len(seq) < self.sequence_length:
                         seq.insert(0, seq[0] if len(seq) > 0 else state_vector.squeeze(0).tolist())
                         
-                    # Forward Pass (shape: batch=1, seq_len=120, feature=41)
+                    # Forward Pass (shape: batch=1, seq_len=300, feature=200)
                     state_tensor = torch.tensor([seq], dtype=torch.float32)
                     state_tensor = torch.nan_to_num(state_tensor, nan=0.0, posinf=1.0, neginf=-1.0)
                     

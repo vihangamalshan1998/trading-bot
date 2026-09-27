@@ -154,7 +154,7 @@ class ReplayBuffer:
             while len(state) < 200: state.append(0.0)
             return [state[:200]] * seq_len
 
-    def build_tensors(self, batch: List[Experience], seq_len: int = 16) -> Tuple[torch.Tensor, ...]:
+    def build_tensors(self, batch: List[Experience], seq_len: int = 300) -> Tuple[torch.Tensor, ...]:
         """Converts batch into PyTorch tensors with LSTM sequences and Multi-Horizon returns."""
         states, actions, rewards, next_states, dones = [], [], [], [], []
         

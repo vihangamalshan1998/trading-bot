@@ -88,14 +88,32 @@ class PPOTrainer:
             
         logger.info(f"PPO Training Step Complete | Loss: {loss.item():.4f}")
         
+        # Calculate extra metrics for dashboard
+        with torch.no_grad():
+            batch_reward = float(rewards.mean().item())
+            
+            # Action distribution (actions[:, 0]: 0.0=Hold, 0.5=Buy, -0.5=Sell)
+            actual_size = actions.size(0)
+            act_types = actions[:, 0]
+            holds = float((act_types == 0.0).sum().item()) / actual_size if actual_size > 0 else 1.0
+            buys = float((act_types > 0.0).sum().item()) / actual_size if actual_size > 0 else 0.0
+            sells = float((act_types < 0.0).sum().item()) / actual_size if actual_size > 0 else 0.0
+            
         # Publish metrics to Redis asynchronously via asyncio.create_task or run_coroutine_threadsafe
         # We assume trainer loop might be sync or async. Let's provide a safe sync wrapper or fire-and-forget
         payload = {
             "timestamp": time.time(),
             "loss": float(loss.item()),
             "actor_loss": float(actor_loss.item()),
-            "critic_loss": float(critic_loss.item())
+            "critic_loss": float(critic_loss.item()),
+            "cumulative_reward": batch_reward,
+            "action_dist": {
+                "hold": holds,
+                "buy": buys,
+                "sell": sells
+            }
         }
+
         
         # Since trainer might run synchronously, we can dispatch it via the running loop or a new one
         try:

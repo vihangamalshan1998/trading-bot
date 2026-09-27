@@ -692,6 +692,27 @@ function App() {
             </section>
 
             <section className="glass-panel full-width">
+              <h3>Live Action Distribution (Batch Average)</h3>
+              {trainingMetrics.length > 0 ? (() => {
+                 const latest = trainingMetrics[trainingMetrics.length - 1];
+                 const dist = latest.action_dist || { hold: 1, buy: 0, sell: 0 };
+                 return (
+                   <div style={{ display: 'flex', height: '30px', width: '100%', borderRadius: '4px', overflow: 'hidden' }}>
+                     <div style={{ width: `${dist.buy * 100}%`, backgroundColor: '#39ff14', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#000', fontWeight: 'bold', fontSize: '12px' }}>
+                       {dist.buy > 0.05 ? `BUY ${(dist.buy * 100).toFixed(0)}%` : ''}
+                     </div>
+                     <div style={{ width: `${dist.hold * 100}%`, backgroundColor: '#8b9bb4', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 'bold', fontSize: '12px' }}>
+                       {dist.hold > 0.05 ? `HOLD ${(dist.hold * 100).toFixed(0)}%` : ''}
+                     </div>
+                     <div style={{ width: `${dist.sell * 100}%`, backgroundColor: '#ff5f56', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 'bold', fontSize: '12px' }}>
+                       {dist.sell > 0.05 ? `SELL ${(dist.sell * 100).toFixed(0)}%` : ''}
+                     </div>
+                   </div>
+                 );
+              })() : <p className="empty-text">Loading...</p>}
+            </section>
+
+            <section className="glass-panel full-width">
               <h3>PPO Training Progress (Live Loss Metrics)</h3>
               
               {trainingMetrics.length === 0 ? (
@@ -724,6 +745,42 @@ function App() {
                       <Line type="monotone" dataKey="loss" stroke="#8884d8" name="Total Loss" strokeWidth={3} dot={false} activeDot={{ r: 8 }} />
                       <Line type="monotone" dataKey="actor_loss" stroke="#00f2fe" name="Actor Loss" strokeWidth={2} dot={false} />
                       <Line type="monotone" dataKey="critic_loss" stroke="#4facfe" name="Critic Loss" strokeWidth={2} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+
+            <section className="glass-panel full-width">
+              <h3>Live Cumulative Reward (Batch Profitability)</h3>
+              
+              {trainingMetrics.length === 0 ? (
+                <div className="empty-state">
+                  <div className="spinner"></div>
+                  <p>Waiting for training data...</p>
+                </div>
+              ) : (
+                <div className="chart-container" style={{ width: '100%', height: 300 }}>
+                  <ResponsiveContainer>
+                    <LineChart
+                      data={trainingMetrics}
+                      margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" vertical={false} />
+                      <XAxis dataKey="name" stroke="#a0a0a0" tick={{fill: '#a0a0a0'}} />
+                      <YAxis 
+                        stroke="#a0a0a0" 
+                        domain={['auto', 'auto']} 
+                        tick={{fill: '#a0a0a0'}} 
+                        width={80}
+                        tickFormatter={(value) => value.toFixed(2)}
+                      />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: 'rgba(20,20,25,0.9)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', backdropFilter: 'blur(10px)' }} 
+                        itemStyle={{ color: '#fff' }}
+                      />
+                      <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                      <Line type="monotone" dataKey="cumulative_reward" stroke="#39ff14" name="Batch Reward" strokeWidth={3} dot={false} activeDot={{ r: 8 }} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>

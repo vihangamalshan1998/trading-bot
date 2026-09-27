@@ -42,7 +42,7 @@ class PPOTrainer:
             logger.warning(f"Not enough samples in replay buffer to train. Got {len(batch)}, needed {batch_size}")
             return
             
-        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=16)
+        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=120)
         if len(states) == 0:
             return
             

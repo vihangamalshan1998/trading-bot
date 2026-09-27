@@ -174,8 +174,8 @@ async def run_training_loop():
                 trainer.buffer.cache.clear()
                 gc.collect()
                 
-                # Refresh cache from DB to prevent Mode Collapse (Reverted to 1000)
-                trainer.buffer.load_cache_from_db(limit=1000)
+                # Refresh cache from DB to prevent Mode Collapse
+                trainer.buffer.load_cache_from_db(limit=5000)
                 
                 # Auto-delete data older than 30 days to save VPS disk space
                 if step % 1000 == 0:

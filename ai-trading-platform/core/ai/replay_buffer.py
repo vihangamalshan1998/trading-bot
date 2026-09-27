@@ -115,36 +115,77 @@ class ReplayBuffer:
             
         return batch
 
-    def build_tensors(self, batch: List[Experience]) -> Tuple[torch.Tensor, ...]:
-        """Converts a batch of Experience ORM objects into PyTorch tensors."""
+    def _extract_flat_state(self, exp: Experience) -> List[float]:
+        state = []
+        if exp.portfolio_state: state.extend(exp.portfolio_state)
+        if exp.market_state: state.extend(exp.market_state)
+        state.append(exp.position_before or 0.0)
+        if exp.macro_state: state.extend(exp.macro_state)
+        else: state.extend([0.0] * 13)
+        while len(state) < 200: state.append(0.0) # Pad to God Mode 200
+        return state
+
+    def build_tensors(self, batch: List[Experience], seq_len: int = 16) -> Tuple[torch.Tensor, ...]:
+        """Converts batch into PyTorch tensors with LSTM sequences and Multi-Horizon returns."""
         states, actions, rewards, next_states, dones = [], [], [], [], []
         
-        for exp in batch:
-            # Check if this experience stores a 2D Sliding Window Sequence
-            if exp.market_state and isinstance(exp.market_state, list) and len(exp.market_state) > 0 and isinstance(exp.market_state[0], list):
-                state = exp.market_state
-                # Force pad to 120 steps just in case it's a legacy sequence (e.g. 12 steps)
-                while len(state) < 120:
-                    state.insert(0, state[0])
-            else:
-                # Flat state concatenation (Legacy 1D)
-                state = []
-                if exp.portfolio_state: state.extend(exp.portfolio_state)
-                if exp.market_state: state.extend(exp.market_state)
-                state.append(exp.position_before or 0.0)
-                if exp.macro_state: state.extend(exp.macro_state)
-                else: state.extend([0.0] * 13) # Time (2), Funding (1), Blanks (10)
+        # Build cache lookup for O(1) sequence finding
+        cache_lookup = {e.id: idx for idx, e in enumerate(self.cache)}
+        
+        with self.SessionLocal() as session:
+            for exp in batch:
+                idx = cache_lookup.get(exp.id, -1)
                 
-                # FAKE SEQUENCE: Pad Legacy 1D state to 120 steps to prevent PyTorch ValueError!
-                state = [state] * 120
+                if idx != -1 and idx >= seq_len:
+                    # 1. BUILD LSTM SEQUENCE FROM CACHE
+                    seq_states = [self._extract_flat_state(self.cache[i]) for i in range(idx - seq_len + 1, idx + 1)]
+                    next_seq_states = [self._extract_flat_state(self.cache[i]) for i in range(idx - seq_len + 2, idx + 2)] if idx + 1 < len(self.cache) else seq_states
+                    
+                else:
+                    # 1. BUILD LSTM SEQUENCE FROM DATABASE (Historical/Rare Data)
+                    try:
+                        history = session.query(Experience).filter(
+                            Experience.timestamp <= exp.timestamp,
+                            Experience.symbol == exp.symbol
+                        ).order_by(Experience.timestamp.desc()).limit(seq_len + 1).all()
+                        
+                        history = history[::-1] # chronological
+                        if len(history) >= seq_len:
+                            seq_states = [self._extract_flat_state(h) for h in history[-seq_len:]]
+                            if len(history) == seq_len + 1:
+                                next_seq_states = [self._extract_flat_state(h) for h in history[1:]]
+                            else:
+                                next_seq_states = seq_states
+                        else:
+                            flat = self._extract_flat_state(exp)
+                            seq_states = [flat] * seq_len
+                            next_seq_states = [flat] * seq_len
+                    except Exception:
+                        flat = self._extract_flat_state(exp)
+                        seq_states = [flat] * seq_len
+                        next_seq_states = [flat] * seq_len
+
+                # 2. CALCULATE MULTI-HORIZON PREDICTIONS (Combine DB Grades + RAM Cache)
+                # If the Teacher's Assistant has graded this old test in the DB, use it!
+                # If it's a brand new test (in cache) and hasn't been graded yet, sum whatever future we have in RAM.
+                if exp.reward_5m is not None:
+                    r_5m = exp.reward_5m
+                    r_1h = exp.reward_1h
+                    r_4h = exp.reward_4h
+                else:
+                    if idx != -1:
+                        # It's in the cache, so we can see up to 16 minutes into the future!
+                        cache_len = len(self.cache)
+                        r_5m = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 300, cache_len)))
+                        r_1h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 3600, cache_len)))
+                        r_4h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 14400, cache_len)))
+                    else:
+                        # Isolated rare DB sample that somehow wasn't graded yet (Edge case)
+                        r_5m = r_1h = r_4h = (exp.reward or 0.0)
             
-            n_state = exp.next_state if getattr(exp, "next_state", None) else state # fallback
-            
-            # 4 outputs for Actor Head: [Action, Confidence, Target_Size, Price_Offset]
+            # Action Mapping
             target_size = exp.derivatives_state.get("target_size", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
             price_offset = exp.derivatives_state.get("price_offset", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
-            
-            # Revert [0, 1] stored values back to [-1, 1] for neural network tanh targets!
             raw_confidence = (exp.confidence * 2.0) - 1.0 if exp.confidence is not None else 0.0
             raw_target_size = (target_size * 2.0) - 1.0 if target_size > 0 else 0.0
             raw_price_offset = (price_offset * 2.0) - 1.0 if price_offset > 0 else 0.0
@@ -155,14 +196,12 @@ class ReplayBuffer:
             elif exp.action == "CLOSE_LONG": act[0] = -0.5
             elif exp.action == "CLOSE_SHORT": act[0] = 0.5
             
-            states.append(state)
+            states.append(seq_states)
             actions.append(act)
-            rewards.append([exp.reward or 0.0])
-            next_states.append(n_state)
-            # If next_state is missing, treat as terminal to prevent critic value explosion
+            rewards.append([r_5m, r_1h, r_4h]) # 3 output heads!
+            next_states.append(next_seq_states)
             dones.append([1.0 if getattr(exp, "next_state", None) is None else 0.0])
             
-        # Pad sequences or truncate depending on exact dimensions (Assumes uniform here)
         try:
             s = torch.tensor(states, dtype=torch.float32)
             a = torch.tensor(actions, dtype=torch.float32)
@@ -171,5 +210,4 @@ class ReplayBuffer:
             d = torch.tensor(dones, dtype=torch.float32)
             return s, a, r, s_, d
         except ValueError:
-            # If dims don't match, return empty tensors (to be handled by caller)
             return torch.empty(0), torch.empty(0), torch.empty(0), torch.empty(0), torch.empty(0)

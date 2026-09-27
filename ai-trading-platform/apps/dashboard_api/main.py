@@ -176,7 +176,7 @@ async def get_trade_history():
 @app.get("/api/logs/{bot_name}")
 async def get_bot_logs(bot_name: str):
     """Returns the last 50 lines of the requested bot's log file."""
-    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector"]
+    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector", "reward_calculator"]
     if bot_name not in allowed_bots:
         return {"logs": ["Invalid bot name requested."]}
         
@@ -194,7 +194,7 @@ async def get_bot_logs(bot_name: str):
 @app.get("/api/logs/download/{bot_name}")
 async def download_bot_logs(bot_name: str):
     """Downloads the full log file for the given bot."""
-    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector"]
+    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector", "reward_calculator"]
     if bot_name not in allowed_bots:
         return {"error": "Invalid bot name requested."}
         
@@ -224,7 +224,7 @@ async def stop_pm2():
 async def restart_pm2():
     """Restart all pm2 processes except dashboard"""
     try:
-        bots_to_restart = "market-collector macro-collector ai-trainer trading-bot"
+        bots_to_restart = "market-collector macro-collector ai-trainer trading-bot reward-calculator"
         result = subprocess.run(f"pm2 restart {bots_to_restart}", shell=True, capture_output=True, text=True)
         if result.returncode == 0:
             return {"status": "success", "message": "All bots restarted successfully."}

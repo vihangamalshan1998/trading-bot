@@ -155,8 +155,8 @@ class SingleSymbolActorCritic(nn.Module):
         # Actor Head: action, confidence, size, price_offset (4 outputs)
         self.actor_fc = nn.Linear(hidden_dim, 4)
         
-        # Critic Head
-        self.critic_fc = nn.Linear(hidden_dim, 1)
+        # Critic Head (Now predicts 3 horizons: 5m, 1h, 4h)
+        self.critic_fc = nn.Linear(hidden_dim, 3)
         
     def forward(self, x: torch.Tensor):
         # Support both (batch_size, input_dim) and (batch_size, seq_len, input_dim)

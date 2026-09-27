@@ -24,14 +24,14 @@ class PPOTrainer:
         self.buffer = ReplayBuffer()
         
         # FATAL MEMORY LEAK FIX:
-        # Increased cache limit to 1000 (Safe due to new Garbage Collection fix)
+        # Reverted back to 1000 for strict VPS stability based on user request.
         self.buffer.load_cache_from_db(limit=1000)
         
     def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Computes Generalized Advantage Estimation (GAE)."""
-        # Simplified advantage calculation for independent samples
+        """Computes Generalized Advantage Estimation (GAE) for Multi-Horizon."""
+        # Both rewards and values are shape (batch_size, 3)
         deltas = rewards + self.gamma * next_values * (1.0 - dones) - values
-        advantages = deltas # In a real sequence we'd accumulate with lambda
+        advantages = deltas
         returns = advantages + values
         return advantages, returns
         
@@ -42,7 +42,7 @@ class PPOTrainer:
             logger.warning(f"Not enough samples in replay buffer to train. Got {len(batch)}, needed {batch_size}")
             return
             
-        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch)
+        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=16)
         if len(states) == 0:
             return
             
@@ -60,8 +60,10 @@ class PPOTrainer:
             safe_rewards = torch.clamp(rewards / 100.0, -1.0, 1.0)
             
             advantages, returns = self.compute_gae(safe_rewards, old_values, next_values, dones)
-            # Normalize advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            
+            # Average advantages across the 3 horizons for the Actor
+            actor_advantages = advantages.mean(dim=1, keepdim=True)
+            actor_advantages = (actor_advantages - actor_advantages.mean()) / (actor_advantages.std() + 1e-8)
             
         # 2. PPO Epochs
         for _ in range(epochs):
@@ -73,10 +75,11 @@ class PPOTrainer:
             ratio = torch.exp(log_probs - old_log_probs)
             
             # Clipped surrogate objective
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages
+            surr1 = ratio * actor_advantages
+            surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * actor_advantages
             actor_loss = -torch.min(surr1, surr2).mean()
             
+            # Critic must learn all 3 horizons (MSE handles the shape automatically)
             critic_loss = nn.MSELoss()(values, returns)
             
             loss = actor_loss + 0.5 * critic_loss
@@ -90,7 +93,7 @@ class PPOTrainer:
         
         # Calculate extra metrics for dashboard
         with torch.no_grad():
-            batch_reward = float(rewards.mean().item())
+            batch_reward = float(rewards[:, 0].mean().item()) # Dashboard tracks 5m reward
             
             # Action distribution (actions[:, 0]: 0.0=Hold, 0.5=Buy, -0.5=Sell)
             actual_size = actions.size(0)
@@ -171,7 +174,7 @@ async def run_training_loop():
                 trainer.buffer.cache.clear()
                 gc.collect()
                 
-                # Refresh cache from DB to prevent Mode Collapse (Increased to 1000)
+                # Refresh cache from DB to prevent Mode Collapse (Reverted to 1000)
                 trainer.buffer.load_cache_from_db(limit=1000)
                 
                 # Auto-delete data older than 30 days to save VPS disk space

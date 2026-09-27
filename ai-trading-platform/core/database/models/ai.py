@@ -54,6 +54,9 @@ class Experience(Base):
     
     # Rewards and Costs
     reward = Column(Float, nullable=True)
+    reward_5m = Column(Float, nullable=True)
+    reward_1h = Column(Float, nullable=True)
+    reward_4h = Column(Float, nullable=True)
     fees = Column(Float, nullable=True)
     funding_cost = Column(Float, nullable=True)
     slippage = Column(Float, nullable=True)

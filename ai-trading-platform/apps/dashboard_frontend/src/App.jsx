@@ -824,6 +824,12 @@ function App() {
                 >
                   StatArb Collector
                 </button>
+                <button 
+                  className={`tab-btn ${activeSubTab === 'reward_calculator' ? 'active' : ''}`}
+                  onClick={() => setActiveSubTab('reward_calculator')}
+                >
+                  Teacher's Assistant
+                </button>
               </div>
             </div>
             
@@ -833,6 +839,7 @@ function App() {
               {activeSubTab === 'trading_bot' && <LogViewer activeTab={activeTab} botName="trading_bot" title="Trading Bot (Execution)" />}
               {activeSubTab === 'whale_tracker' && <LogViewer activeTab={activeTab} botName="whale_tracker" title="Whale Tracker" />}
               {activeSubTab === 'statarb_collector' && <LogViewer activeTab={activeTab} botName="statarb_collector" title="StatArb Collector" />}
+              {activeSubTab === 'reward_calculator' && <LogViewer activeTab={activeTab} botName="reward_calculator" title="Teacher's Assistant" />}
             </div>
           </section>
         )}

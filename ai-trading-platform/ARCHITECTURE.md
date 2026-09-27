@@ -38,7 +38,7 @@ Takes the raw Level 2 Order Book state, global macro news, and whale trades, and
 To prevent the Trading Bot from needing its own redundant WebSocket connections (which can trigger rate limits), the `MarketCollector` serializes the output of the `FeatureEngine` into a JSON dictionary and pushes it to Redis (`market:state:BTCUSDT`) every second. 
 
 ### 4. Experience MySQL Storage (`core/db/repository.py`)
-Because line-by-line SQL inserts would crash the async event loop at high frequencies, the `ReplayBuffer` utilizes a `collections.deque(maxlen=120)` to maintain a sliding window. Once a trade action occurs, it takes the entire 120x41 2D matrix (a 10-minute snapshot) and saves it as a JSON payload in MySQL for offline training.
+Because line-by-line SQL inserts would crash the async event loop at high frequencies, the `ReplayBuffer` utilizes a `collections.deque(maxlen=300)` to maintain a sliding window. Once a trade action occurs, it takes the entire 300x200 2D matrix (a 5-minute snapshot) and saves it as a JSON payload in MySQL for offline training.
 
 ### 5. Risk Manager (`core/risk`)
 Positioned deliberately as a firewall between the `TradingBot` and the `BinanceSpotAdapter`. It tracks simulated daily PnL and total `max_position_usd` inventory. If the AI hallucinates a massive order, the `RiskManager.approve_order()` will reject it before it hits the network.

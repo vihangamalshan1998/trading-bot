@@ -115,55 +115,55 @@ class ReplayBuffer:
             
         return batch
 
-    def _extract_flat_state(self, exp: Experience) -> List[float]:
-        state = []
-        if exp.portfolio_state: state.extend(exp.portfolio_state)
-        if exp.market_state: state.extend(exp.market_state)
-        state.append(exp.position_before or 0.0)
-        if exp.macro_state: state.extend(exp.macro_state)
-        else: state.extend([0.0] * 13)
-        while len(state) < 200: state.append(0.0) # Pad to God Mode 200
-        return state
+    def _extract_sequence(self, exp: Experience, seq_len: int) -> List[List[float]]:
+        # If the market_state is already a 2D movie (list of lists)
+        if exp.market_state and isinstance(exp.market_state, list) and len(exp.market_state) > 0 and isinstance(exp.market_state[0], list):
+            seq = []
+            for frame in exp.market_state:
+                # In V3, the live bot already builds the perfect 200-dim vector and passes it in the frame!
+                if len(frame) == 200:
+                    seq.append(frame)
+                else:
+                    # Legacy fallback
+                    state = []
+                    if exp.portfolio_state: state.extend(exp.portfolio_state)
+                    state.extend(frame)
+                    state.append(exp.position_before or 0.0)
+                    if exp.macro_state: state.extend(exp.macro_state)
+                    else: state.extend([0.0] * 13)
+                    while len(state) < 200: state.append(0.0)
+                    seq.append(state)
+            
+            # Pad or truncate to seq_len
+            while len(seq) < seq_len:
+                seq.insert(0, seq[0] if len(seq) > 0 else [0.0]*200)
+            return seq[-seq_len:]
+        else:
+            # Fallback for old 1D records
+            if isinstance(exp.market_state, list) and len(exp.market_state) == 200:
+                return [exp.market_state] * seq_len
+            
+            state = []
+            if exp.portfolio_state: state.extend(exp.portfolio_state)
+            if exp.market_state: state.extend(exp.market_state)
+            state.append(exp.position_before or 0.0)
+            if exp.macro_state: state.extend(exp.macro_state)
+            else: state.extend([0.0] * 13)
+            
+            # Pad to 200, or slice down to exactly 200 to guarantee it NEVER crashes
+            while len(state) < 200: state.append(0.0)
+            return [state[:200]] * seq_len
 
     def build_tensors(self, batch: List[Experience], seq_len: int = 16) -> Tuple[torch.Tensor, ...]:
         """Converts batch into PyTorch tensors with LSTM sequences and Multi-Horizon returns."""
         states, actions, rewards, next_states, dones = [], [], [], [], []
         
-        # Build cache lookup for O(1) sequence finding
-        cache_lookup = {e.id: idx for idx, e in enumerate(self.cache)}
-        
         with self.SessionLocal() as session:
             for exp in batch:
-                idx = cache_lookup.get(exp.id, -1)
-                
-                if idx != -1 and idx >= seq_len:
-                    # 1. BUILD LSTM SEQUENCE FROM CACHE
-                    seq_states = [self._extract_flat_state(self.cache[i]) for i in range(idx - seq_len + 1, idx + 1)]
-                    next_seq_states = [self._extract_flat_state(self.cache[i]) for i in range(idx - seq_len + 2, idx + 2)] if idx + 1 < len(self.cache) else seq_states
-                    
-                else:
-                    # 1. BUILD LSTM SEQUENCE FROM DATABASE (Historical/Rare Data)
-                    try:
-                        history = session.query(Experience).filter(
-                            Experience.timestamp <= exp.timestamp,
-                            Experience.symbol == exp.symbol
-                        ).order_by(Experience.timestamp.desc()).limit(seq_len + 1).all()
-                        
-                        history = history[::-1] # chronological
-                        if len(history) >= seq_len:
-                            seq_states = [self._extract_flat_state(h) for h in history[-seq_len:]]
-                            if len(history) == seq_len + 1:
-                                next_seq_states = [self._extract_flat_state(h) for h in history[1:]]
-                            else:
-                                next_seq_states = seq_states
-                        else:
-                            flat = self._extract_flat_state(exp)
-                            seq_states = [flat] * seq_len
-                            next_seq_states = [flat] * seq_len
-                    except Exception:
-                        flat = self._extract_flat_state(exp)
-                        seq_states = [flat] * seq_len
-                        next_seq_states = [flat] * seq_len
+                # 1. BUILD LSTM SEQUENCE FROM EMBEDDED MOVIE
+                seq_states = self._extract_sequence(exp, seq_len)
+                next_seq_states = seq_states # Simplification for next state since we don't have the +1 frame
+
 
                 # 2. CALCULATE MULTI-HORIZON PREDICTIONS (Combine DB Grades + RAM Cache)
                 # If the Teacher's Assistant has graded this old test in the DB, use it!

@@ -713,7 +713,7 @@ class ProductionTradingBot:
                                         "experience_id": str(uuid.uuid4()),
                                         "timestamp": int(time.time()),
                                         "symbol": sym,
-                                        "market_state": state_vector.squeeze(0).tolist(), # V3: Store only the current tick's flat 1D state. Replay buffer handles the sequencing dynamically.
+                                        "market_state": seq, # Save full 2D sequence [300, 108] so the AI has the full movie for this specific trade!
                                         "macro_state": None, 
                                         "portfolio_state": None, 
                                         "derivatives_state": {

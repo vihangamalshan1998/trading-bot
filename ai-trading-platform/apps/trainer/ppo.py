@@ -23,9 +23,9 @@ class PPOTrainer:
         self.clip_epsilon = clip_epsilon
         self.buffer = ReplayBuffer()
         
-        # V3 Upgrade: Now that RAM is heavily optimized, we can expand the memory bank to 5000 records.
-        # This gives the AI a massive historical perspective to combat Catastrophic Forgetting.
-        self.buffer.load_cache_from_db(limit=5000)
+        # V3 Upgrade: The 300-frame sequence is massive (2MB per record). 
+        # Capping at 1000 strictly prevents the VPS from running out of RAM (OOM Crash).
+        self.buffer.load_cache_from_db(limit=1000)
         
     def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Computes Generalized Advantage Estimation (GAE) for Multi-Horizon."""
@@ -175,7 +175,7 @@ async def run_training_loop():
                 gc.collect()
                 
                 # Refresh cache from DB to prevent Mode Collapse
-                trainer.buffer.load_cache_from_db(limit=5000)
+                trainer.buffer.load_cache_from_db(limit=1000)
                 
                 # Auto-delete data older than 30 days to save VPS disk space
                 if step % 1000 == 0:

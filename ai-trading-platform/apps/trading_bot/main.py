@@ -80,8 +80,8 @@ class ProductionTradingBot:
         self.whale_states: Dict[str, dict] = {}
         self.statarb_states: Dict[str, dict] = {}
         
-        # Phase 12: LSTM Sliding Window Sequence (120 steps * 5s = 10 minutes)
-        self.sequence_length = 120
+        # Phase 12: LSTM Sliding Window Sequence (300 steps = 5 minutes)
+        self.sequence_length = 300
         self.state_history = collections.defaultdict(lambda: collections.deque(maxlen=self.sequence_length))
         
         # Limit Order Tracking

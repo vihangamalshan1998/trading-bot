@@ -17,7 +17,7 @@ class RewardCalculator:
         self.engine = create_engine(settings.database_url)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         
-    def process_batch(self, batch_size=500):
+    def process_batch(self, batch_size=100):
         try:
             current_time = int(time.time())
             # 4 hours = 14,400 seconds. Add a tiny buffer (15,000) to be safe.

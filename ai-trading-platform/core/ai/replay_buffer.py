@@ -13,7 +13,7 @@ class ReplayBuffer:
     Provides intelligent sampling (recent, historical, rare) from MySQL.
     Uses RAM as a cache, NOT the source of truth.
     """
-    def __init__(self, capacity_cache: int = 10000):
+    def __init__(self, capacity_cache: int = 1000):
         self.capacity = capacity_cache
         self.engine = create_engine(settings.database_url)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)

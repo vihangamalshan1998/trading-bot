@@ -92,7 +92,9 @@ class PPOTrainer:
             # Simple Gaussian log prob proxy
             log_probs = -((actions - action_preds) ** 2).mean(dim=-1, keepdim=True)
             
-            ratio = torch.exp(log_probs - old_log_probs)
+            # CRITICAL FIX: Clamp the diff before exp() to prevent ratio from becoming Inf/NaN
+            diff = torch.clamp(log_probs - old_log_probs, min=-20.0, max=20.0)
+            ratio = torch.exp(diff)
             
             # Clipped surrogate objective
             surr1 = ratio * actor_advantages
@@ -106,7 +108,9 @@ class PPOTrainer:
             if action_preds.size(0) > 1:
                 # CRITICAL FIX: PyTorch's std() has a derivative of NaN when the variance is exactly 0
                 # (division by zero in the square root). We MUST add epsilon BEFORE the square root.
-                var = action_preds.var(dim=0, unbiased=False)
+                # Also, add tiny noise to prevent d(var)/d(x) = 0 during absolute mode collapse
+                noise = torch.randn_like(action_preds) * 1e-5
+                var = (action_preds + noise).var(dim=0, unbiased=False)
                 entropy = torch.sqrt(var + 1e-8).mean()
             else:
                 entropy = torch.tensor(0.0, device=action_preds.device)
@@ -193,6 +197,12 @@ async def run_training_loop():
     # The ReplayBuffer currently returns 41-dim state vectors (single symbol + portfolio + position + macro)
     model = SingleSymbolActorCritic(input_dim=200)
     registry = ModelRegistry()
+    
+    try:
+        model = registry.load_model(model)
+        logger.info("Successfully loaded existing model weights.")
+    except Exception as e:
+        logger.warning(f"Could not load existing model, starting fresh: {e}")
     
     trainer = PPOTrainer(model=model)
     logger.info("Starting continuous PPO training on historical/live data...")

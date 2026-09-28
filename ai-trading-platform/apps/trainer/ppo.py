@@ -94,7 +94,13 @@ class PPOTrainer:
             # Critic must learn all 3 horizons (MSE handles the shape automatically)
             critic_loss = nn.MSELoss()(values, returns)
             
-            loss = actor_loss + 0.5 * critic_loss
+            # Entropy Bonus (prevents Mode Collapse / 100% BUY situations)
+            # We calculate the standard deviation of the actions across the batch.
+            # Higher std = more diverse actions (Buy, Sell, Hold). We subtract this from the loss to reward diversity.
+            entropy = action_preds.std(dim=0).mean()
+            entropy_coef = 0.15 # Strong penalty for action collapse
+            
+            loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
             
             self.optimizer.zero_grad()
             loss.backward()

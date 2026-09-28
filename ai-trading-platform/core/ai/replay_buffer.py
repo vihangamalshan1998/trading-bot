@@ -173,6 +173,11 @@ class ReplayBuffer:
                     r_1h = exp.reward_1h
                     r_4h = exp.reward_4h
                 else:
+                    try:
+                        idx = self.cache.index(exp)
+                    except ValueError:
+                        idx = -1
+                        
                     if idx != -1:
                         # It's in the cache, so we can see up to 16 minutes into the future!
                         cache_len = len(self.cache)

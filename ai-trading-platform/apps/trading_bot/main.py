@@ -489,8 +489,8 @@ class ProductionTradingBot:
                         confidence = 1.0
                         target_size = 0.0
                         price_offset = 0.0 # Force immediate execution (0 offset)
-                    elif random.random() < 0.02:
-                        # Exploration Noise (2% chance to explore a random strategy)
+                    elif random.random() < 0.15:
+                        # Exploration Noise (15% chance to explore a random strategy)
                         action_val = random.uniform(-1.0, 1.0)
                         confidence = random.uniform(0.3, 1.0) # Ensure it passes the 0.3 threshold to trade
                         target_size = random.uniform(0.1, 1.0)

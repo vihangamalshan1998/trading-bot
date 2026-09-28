@@ -63,7 +63,13 @@ class PPOTrainer:
             
             # Average advantages across the 3 horizons for the Actor
             actor_advantages = advantages.mean(dim=1, keepdim=True)
-            actor_advantages = (actor_advantages - actor_advantages.mean()) / (actor_advantages.std() + 1e-8)
+            if actor_advantages.size(0) > 1:
+                actor_advantages = (actor_advantages - actor_advantages.mean()) / (actor_advantages.std(unbiased=False) + 1e-8)
+            else:
+                actor_advantages = actor_advantages - actor_advantages.mean()
+                
+            # Final Safety Net against NaN values
+            actor_advantages = torch.nan_to_num(actor_advantages, nan=0.0)
             
         # 2. PPO Epochs
         for _ in range(epochs):

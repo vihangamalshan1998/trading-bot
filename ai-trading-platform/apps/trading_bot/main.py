@@ -542,6 +542,32 @@ class ProductionTradingBot:
                     
                     if side == "HOLD":
                         logger.info(f"[{sym}] HOLDING (Action Val: {action_val:.2f})")
+                        
+                        import random
+                        # CRITICAL FIX: Record HOLD experiences probabilistically (5% chance).
+                        # If the AI never sees a HOLD in the training buffer, it forgets that
+                        # holding is a valid option and collapses into 100% BUY or SELL.
+                        if random.random() < 0.05:
+                            exp_data = {
+                                "experience_id": str(uuid.uuid4()),
+                                "timestamp": int(time.time()),
+                                "symbol": sym,
+                                "market_state": seq, 
+                                "macro_state": None, 
+                                "portfolio_state": None, 
+                                "derivatives_state": {
+                                    "target_size": float(target_size),
+                                    "price_offset": float(price_offset)
+                                },
+                                "position_before": float(pos.quantity),
+                                "entry_price": float(pos.entry_price),
+                                "action": "HOLD",
+                                "confidence": float(confidence),
+                                "model_version": "v1",
+                                "reward": 0.0, # Immediate is 0. Teacher's Assistant will grade it later!
+                                "realized_pnl": 0.0
+                            }
+                            asyncio.create_task(redis_manager.redis.publish("experience:completed", json.dumps(exp_data)))
                     
                     if side != "HOLD":
                         target_qty = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack

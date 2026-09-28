@@ -69,10 +69,18 @@ class PPOTrainer:
             
             # Average advantages across the 3 horizons for the Actor
             actor_advantages = advantages.mean(dim=1, keepdim=True)
-            if actor_advantages.size(0) > 1:
-                actor_advantages = (actor_advantages - actor_advantages.mean()) / (actor_advantages.std(unbiased=False) + 1e-8)
+            
+            adv_mean = actor_advantages.mean()
+            adv_std = actor_advantages.std(unbiased=False)
+            
+            # CRITICAL FIX: If all rewards are identical (e.g., all -0.02% fees),
+            # standard deviation is 0. Normalizing it zeroes out the advantages entirely,
+            # which deletes the Actor's ability to learn that the action was bad!
+            if actor_advantages.size(0) > 1 and adv_std > 1e-5:
+                actor_advantages = (actor_advantages - adv_mean) / (adv_std + 1e-8)
             else:
-                actor_advantages = actor_advantages - actor_advantages.mean()
+                # If std is zero, just use the raw centered advantages so the gradient still flows!
+                actor_advantages = actor_advantages - adv_mean
                 
             # Final Safety Net against NaN values
             actor_advantages = torch.nan_to_num(actor_advantages, nan=0.0)
@@ -95,9 +103,11 @@ class PPOTrainer:
             critic_loss = nn.MSELoss()(values, returns)
             
             # Entropy Bonus (prevents Mode Collapse / 100% BUY situations)
-            # We calculate the standard deviation of the actions across the batch.
             if action_preds.size(0) > 1:
-                entropy = action_preds.std(dim=0, unbiased=False).mean()
+                # CRITICAL FIX: PyTorch's std() has a derivative of NaN when the variance is exactly 0
+                # (division by zero in the square root). We MUST add epsilon BEFORE the square root.
+                var = action_preds.var(dim=0, unbiased=False)
+                entropy = torch.sqrt(var + 1e-8).mean()
             else:
                 entropy = torch.tensor(0.0, device=action_preds.device)
                 

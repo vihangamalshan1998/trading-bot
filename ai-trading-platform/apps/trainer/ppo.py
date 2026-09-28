@@ -96,9 +96,17 @@ class PPOTrainer:
             
             # Entropy Bonus (prevents Mode Collapse / 100% BUY situations)
             # We calculate the standard deviation of the actions across the batch.
-            # Higher std = more diverse actions (Buy, Sell, Hold). We subtract this from the loss to reward diversity.
-            entropy = action_preds.std(dim=0).mean()
+            if action_preds.size(0) > 1:
+                entropy = action_preds.std(dim=0, unbiased=False).mean()
+            else:
+                entropy = torch.tensor(0.0, device=action_preds.device)
+                
+            entropy = torch.nan_to_num(entropy, nan=0.0) # Absolute safety net
             entropy_coef = 0.15 # Strong penalty for action collapse
+            
+            # Absolute mathematical safety against NaN cascading
+            actor_loss = torch.nan_to_num(actor_loss, nan=0.0)
+            critic_loss = torch.nan_to_num(critic_loss, nan=0.0)
             
             loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
             

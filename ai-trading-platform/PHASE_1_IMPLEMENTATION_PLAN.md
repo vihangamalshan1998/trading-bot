@@ -47,20 +47,26 @@ exp_data = msgpack.unpackb(message['data'], raw=False)
 Instead of calling `self.model(seq_tensor)` inside the loop, we collect them all and execute once.
 
 ```python
-# 1. Collect all valid sequences
+# 1. Collect all valid sequences with an ironclad safety check
 batch_tensors = []
 batch_symbols = []
 
 for sym in SYMBOLS:
-    # ... logic to check if sequence is ready ...
+    # Check if we have enough history
     if len(self.state_history[sym]) == 300:
         seq_tensor = torch.tensor(list(self.state_history[sym]), dtype=torch.float32)
-        batch_tensors.append(seq_tensor)
-        batch_symbols.append(sym)
+        
+        # SAFETY SHIELD: Verify exact shape before adding to batch
+        if seq_tensor.shape == (300, 200): # Ensure exactly 300 frames and 200 features
+            batch_tensors.append(seq_tensor)
+            batch_symbols.append(sym)
+        else:
+            logger.warning(f"Skipping {sym}: Corrupted shape {seq_tensor.shape}")
 
-# 2. Execute Batch Inference (Only if we have symbols to process)
+# 2. Execute Batch Inference (Only if we have valid symbols to process)
 if len(batch_tensors) > 0:
     # Stack them into shape [N, 300, 200]
+    # Because of the safety shield above, this torch.stack will NEVER crash!
     final_batch = torch.stack(batch_tensors).to(self.device)
     
     with torch.no_grad():

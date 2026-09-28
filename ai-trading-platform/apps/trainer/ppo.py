@@ -46,6 +46,12 @@ class PPOTrainer:
         if len(states) == 0:
             return
             
+        # Absolute safety net: Clean any NaN values pulled from the MySQL database
+        states = torch.nan_to_num(states, nan=0.0, posinf=1.0, neginf=-1.0)
+        next_states = torch.nan_to_num(next_states, nan=0.0, posinf=1.0, neginf=-1.0)
+        actions = torch.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0)
+        rewards = torch.nan_to_num(rewards, nan=0.0, posinf=1.0, neginf=-1.0)
+            
         self.model.train()
         
         # 1. Get old log probabilities and values

@@ -66,6 +66,7 @@ class ProductionTradingBot:
             self.has_valid_model = True # Treat the randomly initialized model as valid so we can explore!
         
         self.running = False
+        self.emergency_stop = False  # BUG FIX: was missing, caused AttributeError in monitor_kill_switch
         self.event_memory = EventMemoryBuffer()
         
         # Tracking live states using Canonical Schemas

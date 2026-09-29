@@ -20,8 +20,9 @@ class RewardCalculator:
     def process_batch(self, batch_size=100):
         try:
             current_time = int(time.time())
-            # 4 hours = 14,400 seconds. Add a tiny buffer (15,000) to be safe.
-            safe_cutoff = current_time - 15000
+            # 4 hours = 14,400 seconds. Add a 1-hour buffer (18,000s total) to guarantee
+            # all future data exists before we grade the experience.
+            safe_cutoff = current_time - 18000
             
             with self.SessionLocal() as session:
                 # Find records that are old enough, but haven't been graded yet

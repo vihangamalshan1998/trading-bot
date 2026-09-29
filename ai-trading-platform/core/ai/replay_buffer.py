@@ -185,11 +185,14 @@ class ReplayBuffer:
                     idx = -1
                     
                 if idx != -1:
-                    # It's in the cache, so we can see up to 16 minutes into the future!
+                    # It's in the cache. The bot ticks every ~5 seconds, so:
+                    # 5 min  = 300s  / 5s per tick = 60 cache slots
+                    # 1 hour = 3600s / 5s per tick = 720 cache slots  
+                    # 4 hour = 14400s/ 5s per tick = 2880 cache slots
                     cache_len = len(self.cache)
-                    r_5m = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 300, cache_len)))
-                    r_1h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 3600, cache_len)))
-                    r_4h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 14400, cache_len)))
+                    r_5m = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 60, cache_len)))
+                    r_1h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 720, cache_len)))
+                    r_4h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 2880, cache_len)))
                 else:
                     # Isolated rare DB sample that somehow wasn't graded yet (Edge case)
                     r_5m = r_1h = r_4h = (exp.reward or 0.0)

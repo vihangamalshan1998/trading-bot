@@ -114,7 +114,10 @@ class PPOTrainer:
             actor_loss = -torch.min(surr1, surr2).mean()
             
             # Critic must learn all 3 horizons (MSE handles the shape automatically)
-            critic_loss = nn.MSELoss()(values, returns)
+            # Normalize returns to prevent Critic MSE from exploding when rewards are large
+            returns_normalized = (returns - returns.mean()) / (returns.std(unbiased=False) + 1e-8)
+            values_normalized = (values - returns.mean()) / (returns.std(unbiased=False) + 1e-8)
+            critic_loss = nn.MSELoss()(values_normalized, returns_normalized)
             
             # Entropy Bonus (prevents Mode Collapse / 100% BUY situations)
             if action_preds.size(0) > 1:
@@ -128,7 +131,7 @@ class PPOTrainer:
                 entropy = torch.tensor(0.0, device=action_preds.device)
                 
             entropy = torch.nan_to_num(entropy, nan=0.0) # Absolute safety net
-            entropy_coef = 0.15 # Strong penalty for action collapse
+            entropy_coef = 0.01 # Standard PPO value. 0.15 was way too high and fought against the Actor learning a real policy.
             
             loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
             

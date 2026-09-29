@@ -72,8 +72,9 @@ class PPOTrainer:
             # Use MSE between action and predicted action as proxy for probability
             old_log_probs = -((actions - old_action_preds) ** 2).mean(dim=-1, keepdim=True)
             
-            # Scale rewards to prevent gradient explosion (Removed hard clamp to preserve variance!)
-            safe_rewards = rewards / 20.0
+            # Scale rewards to prevent gradient explosion.
+            # Multi-horizon rewards are summed over hours (can reach 100+), so we need a larger divisor.
+            safe_rewards = rewards / 200.0
             
             advantages, returns = self.compute_gae(safe_rewards, old_values, next_values, dones)
             

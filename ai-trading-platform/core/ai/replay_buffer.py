@@ -166,37 +166,35 @@ class ReplayBuffer:
         """Converts batch into PyTorch tensors with LSTM sequences and Multi-Horizon returns."""
         states, actions, rewards, next_states, dones = [], [], [], [], []
         
-        with self.SessionLocal() as session:
-            for exp in batch:
-                # 1. BUILD LSTM SEQUENCE FROM EMBEDDED MOVIE
-                seq_states = self._extract_sequence(exp, seq_len)
-                next_seq_states = seq_states # Simplification for next state since we don't have the +1 frame
+        for exp in batch:  # BUG FIX: Removed erroneous 'with session' wrapper - action mapping must be INSIDE this loop
+            # 1. BUILD LSTM SEQUENCE FROM EMBEDDED MOVIE
+            seq_states = self._extract_sequence(exp, seq_len)
+            next_seq_states = seq_states # Simplification for next state since we don't have the +1 frame
 
-
-                # 2. CALCULATE MULTI-HORIZON PREDICTIONS (Combine DB Grades + RAM Cache)
-                # If the Teacher's Assistant has graded this old test in the DB, use it!
-                # If it's a brand new test (in cache) and hasn't been graded yet, sum whatever future we have in RAM.
-                if exp.reward_5m is not None:
-                    r_5m = exp.reward_5m
-                    r_1h = exp.reward_1h
-                    r_4h = exp.reward_4h
+            # 2. CALCULATE MULTI-HORIZON PREDICTIONS (Combine DB Grades + RAM Cache)
+            # If the Teacher's Assistant has graded this old test in the DB, use it!
+            # If it's a brand new test (in cache) and hasn't been graded yet, sum whatever future we have in RAM.
+            if exp.reward_5m is not None:
+                r_5m = exp.reward_5m
+                r_1h = exp.reward_1h
+                r_4h = exp.reward_4h
+            else:
+                try:
+                    idx = self.cache.index(exp)
+                except ValueError:
+                    idx = -1
+                    
+                if idx != -1:
+                    # It's in the cache, so we can see up to 16 minutes into the future!
+                    cache_len = len(self.cache)
+                    r_5m = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 300, cache_len)))
+                    r_1h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 3600, cache_len)))
+                    r_4h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 14400, cache_len)))
                 else:
-                    try:
-                        idx = self.cache.index(exp)
-                    except ValueError:
-                        idx = -1
-                        
-                    if idx != -1:
-                        # It's in the cache, so we can see up to 16 minutes into the future!
-                        cache_len = len(self.cache)
-                        r_5m = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 300, cache_len)))
-                        r_1h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 3600, cache_len)))
-                        r_4h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 14400, cache_len)))
-                    else:
-                        # Isolated rare DB sample that somehow wasn't graded yet (Edge case)
-                        r_5m = r_1h = r_4h = (exp.reward or 0.0)
-            
-            # Action Mapping
+                    # Isolated rare DB sample that somehow wasn't graded yet (Edge case)
+                    r_5m = r_1h = r_4h = (exp.reward or 0.0)
+
+            # Action Mapping  (BUG FIX: this block is now INSIDE the for loop)
             target_size = exp.derivatives_state.get("target_size", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
             price_offset = exp.derivatives_state.get("price_offset", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
             raw_confidence = (exp.confidence * 2.0) - 1.0 if exp.confidence is not None else 0.0
@@ -211,7 +209,7 @@ class ReplayBuffer:
             
             states.append(seq_states)
             actions.append(act)
-            rewards.append([r_5m, r_1h, r_4h]) # 3 output heads!
+            rewards.append([r_5m, r_1h, r_4h])  # 3 output heads!
             next_states.append(next_seq_states)
             dones.append([1.0 if getattr(exp, "next_state", None) is None else 0.0])
             

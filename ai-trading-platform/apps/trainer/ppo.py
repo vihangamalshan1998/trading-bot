@@ -72,8 +72,8 @@ class PPOTrainer:
             # Use MSE between action and predicted action as proxy for probability
             old_log_probs = -((actions - old_action_preds) ** 2).mean(dim=-1, keepdim=True)
             
-            # Scale and clip rewards to prevent gradient explosion (Adjusted for better loss visibility)
-            safe_rewards = torch.clamp(rewards / 10.0, -1.0, 1.0)
+            # Scale rewards to prevent gradient explosion (Removed hard clamp to preserve variance!)
+            safe_rewards = rewards / 20.0
             
             advantages, returns = self.compute_gae(safe_rewards, old_values, next_values, dones)
             
@@ -89,8 +89,9 @@ class PPOTrainer:
             if actor_advantages.size(0) > 1 and adv_std > 1e-5:
                 actor_advantages = (actor_advantages - adv_mean) / (adv_std + 1e-8)
             else:
-                # If std is zero, just use the raw centered advantages so the gradient still flows!
-                actor_advantages = actor_advantages - adv_mean
+                # CRITICAL FIX: If std is zero, the actor gets no gradient and mode-collapses.
+                # Inject noise to force exploration!
+                actor_advantages = torch.randn_like(actor_advantages) * 0.1
                 
             # Final Safety Net against NaN values
             actor_advantages = torch.nan_to_num(actor_advantages, nan=0.0)

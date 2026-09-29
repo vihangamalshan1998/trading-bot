@@ -54,7 +54,7 @@ class PPOTrainer:
             logger.info("Model weights have been re-initialized.")
 
             
-        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=100)
+        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
         if len(states) == 0:
             return
             
@@ -235,8 +235,7 @@ async def run_training_loop():
     step = 0
     try:
         while True:
-            # RAM fix: seq_len=100 (8 min context, 3x less RAM) + batch_size=32 (2x less RAM)
-            trainer.train_step(batch_size=32, epochs=4)
+            trainer.train_step(batch_size=64, epochs=4)
             await asyncio.sleep(1.0) # Prevent 100% CPU usage
             step += 1
             if step % 100 == 0:

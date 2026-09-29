@@ -163,7 +163,8 @@ class PPOTrainer:
 
         # MEMORY FIX: Now safe to delete large tensors - all scalar values already extracted above
         import gc
-        del states, next_states, old_action_preds, old_values, next_values
+        del states, actions, rewards, next_states, dones
+        del old_action_preds, old_values, next_values
         del old_log_probs, safe_rewards, advantages, returns, actor_advantages
         gc.collect()
             
@@ -245,8 +246,9 @@ async def run_training_loop():
                 trainer.buffer.cache.clear()
                 gc.collect()
                 
-                # Refresh cache from DB to prevent Mode Collapse
-                trainer.buffer.load_cache_from_db(limit=1000)
+                # Refresh cache from DB to prevent Mode Collapse (keep at 500 to match init limit)
+                trainer.buffer.load_cache_from_db(limit=500)
+                gc.collect() # Release old cache objects before new ones fully settle
                 
                 # Auto-delete data older than 30 days to save VPS disk space
                 if step % 1000 == 0:

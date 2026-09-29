@@ -24,8 +24,11 @@ class PPOTrainer:
         self.buffer = ReplayBuffer()
         
         # V3 Upgrade: The 300-frame sequence is massive (2MB per record). 
-        # Capping at 1000 strictly prevents the VPS from running out of RAM (OOM Crash).
-        self.buffer.load_cache_from_db(limit=1000)
+        # Cache limit math: 500 exp × 300 frames × 200 features × 4 bytes = ~117MB cache.
+        # With gc.collect() after every step, total trainer RAM stays ~500MB (safe for VPS).
+        # 500 is the sweet spot: enough diversity for sampler without risking OOM.
+        self.buffer.load_cache_from_db(limit=500)
+
         
     def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Computes Generalized Advantage Estimation (GAE) for Multi-Horizon."""
@@ -147,7 +150,7 @@ class PPOTrainer:
             
         logger.info(f"PPO Training Step Complete | Loss: {loss.item():.4f} | Actor: {actor_loss.item():.4f} | Critic: {critic_loss.item():.4f} | Entropy: {entropy.item():.4f} | Rewards: {rewards[:, 0].mean().item():.4f} | Values: {values[:, 0].mean().item():.4f}")
         
-        # Calculate extra metrics for dashboard
+        # Calculate extra metrics for dashboard BEFORE deleting tensors
         with torch.no_grad():
             batch_reward = float(rewards[:, 0].mean().item()) # Dashboard tracks 5m reward
             
@@ -157,6 +160,12 @@ class PPOTrainer:
             holds = float((act_types == 0.0).sum().item()) / actual_size if actual_size > 0 else 1.0
             buys = float((act_types > 0.0).sum().item()) / actual_size if actual_size > 0 else 0.0
             sells = float((act_types < 0.0).sum().item()) / actual_size if actual_size > 0 else 0.0
+
+        # MEMORY FIX: Now safe to delete large tensors - all scalar values already extracted above
+        import gc
+        del states, next_states, old_action_preds, old_values, next_values
+        del old_log_probs, safe_rewards, advantages, returns, actor_advantages
+        gc.collect()
             
         # Publish metrics to Redis asynchronously via asyncio.create_task or run_coroutine_threadsafe
         # We assume trainer loop might be sync or async. Let's provide a safe sync wrapper or fire-and-forget

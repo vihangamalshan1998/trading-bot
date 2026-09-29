@@ -60,6 +60,7 @@ class PPOTrainer:
         next_states = torch.nan_to_num(next_states, nan=0.0, posinf=1.0, neginf=-1.0)
         actions = torch.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0)
         rewards = torch.nan_to_num(rewards, nan=0.0, posinf=1.0, neginf=-1.0)
+        dones = torch.nan_to_num(dones, nan=0.0, posinf=1.0, neginf=0.0)
             
         self.model.train()
         
@@ -127,18 +128,19 @@ class PPOTrainer:
             entropy = torch.nan_to_num(entropy, nan=0.0) # Absolute safety net
             entropy_coef = 0.15 # Strong penalty for action collapse
             
-            # Absolute mathematical safety against NaN cascading
-            actor_loss = torch.nan_to_num(actor_loss, nan=0.0)
-            critic_loss = torch.nan_to_num(critic_loss, nan=0.0)
-            
             loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
             
+            # Check for NaN in loss before backward
+            if torch.isnan(loss).any():
+                logger.error("Loss is NaN! Skipping step.")
+                break
+                
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
             self.optimizer.step()
             
-        logger.info(f"PPO Training Step Complete | Loss: {loss.item():.4f}")
+        logger.info(f"PPO Training Step Complete | Loss: {loss.item():.4f} | Actor: {actor_loss.item():.4f} | Critic: {critic_loss.item():.4f} | Entropy: {entropy.item():.4f} | Rewards: {rewards[:, 0].mean().item():.4f} | Values: {values[:, 0].mean().item():.4f}")
         
         # Calculate extra metrics for dashboard
         with torch.no_grad():

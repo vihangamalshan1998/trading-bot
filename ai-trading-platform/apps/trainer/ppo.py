@@ -54,7 +54,7 @@ class PPOTrainer:
             logger.info("Model weights have been re-initialized.")
 
             
-        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
+        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=100)
         if len(states) == 0:
             return
             
@@ -245,9 +245,8 @@ async def run_training_loop():
                 trainer.buffer.cache.clear()
                 gc.collect()
                 
-                # Refresh cache from DB to prevent Mode Collapse (keep at 500 to match init limit)
-                trainer.buffer.load_cache_from_db(limit=500)
-
+                # Refresh cache from DB to prevent Mode Collapse
+                trainer.buffer.load_cache_from_db(limit=1000)
                 
                 # Auto-delete data older than 30 days to save VPS disk space
                 if step % 1000 == 0:

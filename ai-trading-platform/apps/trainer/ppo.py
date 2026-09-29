@@ -42,6 +42,15 @@ class PPOTrainer:
             logger.warning(f"Not enough samples in replay buffer to train. Got {len(batch)}, needed {batch_size}")
             return
             
+        # Check if model weights are NaN
+        is_nan = any(torch.isnan(p).any() for p in self.model.parameters())
+        if is_nan:
+            logger.error("MODEL WEIGHTS ARE NAN!")
+            # Re-initialize model to recover
+            self.model.apply(lambda m: hasattr(m, 'reset_parameters') and m.reset_parameters())
+            logger.info("Model weights have been re-initialized.")
+
+            
         states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
         if len(states) == 0:
             return

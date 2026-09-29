@@ -80,24 +80,25 @@ class ReplayBuffer:
         batch = []
         
         # 1. Recent (tail of cache)
-        if len(self.cache) > n_recent:
-            batch.extend(self.cache[-n_recent:])
+        if len(self.cache) > 0:
+            recent_pool = self.cache[-n_recent*5:] # Pool of recent items
+            batch.extend(random.sample(recent_pool, min(n_recent, len(recent_pool))))
             
         # 2. Priority Experience Replay (PER) - Rare (Massive mistakes or huge wins)
         try:
             with self.SessionLocal() as session:
                 from sqlalchemy import func
-                # Query the ENTIRE database for the highest absolute rewards (biggest errors/wins)
-                rare_db = session.query(Experience).order_by(func.abs(Experience.reward).desc()).limit(n_rare).all()
-                if len(rare_db) >= (n_rare // 2): 
-                    batch.extend(rare_db)
+                # Query a larger pool of rare experiences, then randomly sample from it
+                rare_db = session.query(Experience).order_by(func.abs(Experience.reward).desc()).limit(n_rare * 10).all()
+                if len(rare_db) > 0: 
+                    batch.extend(random.sample(rare_db, min(n_rare, len(rare_db))))
                 else:
                     raise Exception("Not enough rare in DB, falling back to RAM cache")
         except Exception:
             # Fallback to sorting the RAM cache if DB query fails
             rare_pool = sorted(self.cache, key=lambda x: abs(x.reward or 0), reverse=True)
             if len(rare_pool) > 0:
-                batch.extend(rare_pool[:min(n_rare, len(rare_pool))])
+                batch.extend(random.sample(rare_pool[:n_rare*10], min(n_rare, len(rare_pool[:n_rare*10]))))
             
         # 3. Random
         batch.extend(random.sample(self.cache, min(n_random, len(self.cache))))
@@ -105,10 +106,17 @@ class ReplayBuffer:
         # 4. Historical (random from entire DB)
         try:
             with self.SessionLocal() as session:
-                # Naive random sampling via SQL ORDER BY RAND() is slow on large tables.
-                # In production, we'd use indexed random sampling.
-                historical = session.query(Experience).order_by(Experience.timestamp.asc()).limit(n_historical).all()
-                batch.extend(historical)
+                # To avoid slow ORDER BY RAND(), we grab a chunk of historical and sample in memory
+                import time
+                # Grab a random offset based on total experiences (approximate)
+                total_count = session.query(Experience).count()
+                offset = random.randint(0, max(0, total_count - 1000))
+                historical_pool = session.query(Experience).offset(offset).limit(1000).all()
+                
+                if historical_pool:
+                    batch.extend(random.sample(historical_pool, min(n_historical, len(historical_pool))))
+                else:
+                    raise Exception("No historical pool")
         except Exception:
             # Fallback to cache
             batch.extend(random.sample(self.cache, min(n_historical, len(self.cache))))

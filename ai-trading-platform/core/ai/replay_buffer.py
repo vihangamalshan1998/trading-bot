@@ -22,20 +22,32 @@ class ReplayBuffer:
         self.cache: List[Experience] = []
         
     def add_experience(self, exp_data: Dict[str, Any]):
-        """Saves a single experience to MySQL and pushes to cache."""
+        """Saves a single experience to MySQL. Only caches if capacity > 0."""
         try:
             with self.SessionLocal() as session:
                 exp = Experience(**exp_data)
                 session.add(exp)
                 session.commit()
-                session.refresh(exp)
                 
-                self.cache.append(exp)
-                if len(self.cache) > self.capacity:
-                    self.cache.pop(0)
+                # MEMORY FIX: Only call session.refresh() if we actually need the object in cache.
+                # When capacity=0 (storage service), refresh() loads the full ~480KB state_vector
+                # from MySQL into RAM just to immediately discard it — causing a 1.5GB leak over hours.
+                if self.capacity > 0:
+                    session.refresh(exp)
+                    self.cache.append(exp)
+                    if len(self.cache) > self.capacity:
+                        self.cache.pop(0)
+                        
+            # Periodic GC to prevent Python memory fragmentation over long runs
+            if not hasattr(self, '_write_count'):
+                self._write_count = 0
+            self._write_count += 1
+            if self._write_count % 100 == 0:
+                import gc
+                gc.collect()
         except Exception as e:
-            # logger.error(f"Failed to save experience: {e}")
             pass
+
             
     def load_cache_from_db(self, limit: int = 10000):
         """Loads recent experiences from DB into RAM to bootstrap the cache."""

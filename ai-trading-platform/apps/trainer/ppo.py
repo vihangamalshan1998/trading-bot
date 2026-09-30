@@ -230,6 +230,9 @@ async def run_training_loop():
     except Exception as e:
         logger.warning(f"Could not load existing model, starting fresh: {e}")
     
+    # V3 Upgrade: Limit PyTorch CPU threads to 1 or 2 to prevent 100% core starvation on VPS
+    torch.set_num_threads(1)
+    
     trainer = PPOTrainer(model=model)
     logger.info("Starting continuous PPO training on historical/live data...")
     
@@ -237,7 +240,10 @@ async def run_training_loop():
     try:
         while True:
             trainer.train_step(batch_size=64, epochs=4)
-            await asyncio.sleep(1.0) # Prevent 100% CPU usage
+            # Increased sleep to 15s to significantly reduce CPU duty cycle
+            # (Allows the CPU to rest between intensive 50s matrix math sessions)
+            await asyncio.sleep(15.0) 
+
             step += 1
             if step % 100 == 0:
                 logger.info(f"Completed {step} training steps. Refreshing cache and saving model...")

@@ -6,6 +6,7 @@ import numpy as np
 import time
 import os
 import collections
+import msgpack  # Phase 1: Binary compression for experience messages
 from typing import Dict, Any
 
 from core.db.redis import redis_manager
@@ -380,15 +381,56 @@ class ProductionTradingBot:
                     self.model.eval()
                     logger.info("Hot reload complete.")
 
-                # 1. Check if we have valid market data
-                if len(self.market_states) == 0:
-                    logger.warning("Waiting for initial market data streams to connect...")
-                    await asyncio.sleep(5.0)
-                    continue
-                    
+                # Phase 2: Batched Inference Pre-Pass
+                # Collect ALL valid symbol state vectors and run ONE model call instead of 6.
+                # SAFETY SHIELD: Symbols with wrong shape are silently skipped (fall back to individual inference).
+                precomputed_actions = {}  # {sym: action_logits_np_array}
+                precomputed_seqs = {}     # {sym: (state_vector_tensor, seq_list)} — cache to avoid double build
+                
+                batch_tensors = []
+                batch_syms = []
+                
                 for sym in self.symbols:
                     if sym not in self.market_states:
                         continue
+                    if sym in self.active_orders:
+                        continue  # Handled inside main loop
+                    try:
+                        sv, mf = self._build_state_vector(sym)
+                        sv_list = sv.squeeze(0).tolist()
+                        # Build seq using current history + new frame (peek-ahead)
+                        seq = list(self.state_history[sym]) + [sv_list]
+                        while len(seq) < self.sequence_length:
+                            seq.insert(0, seq[0])
+                        seq = seq[-self.sequence_length:]
+                        
+                        st = torch.tensor(seq, dtype=torch.float32)
+                        # SAFETY SHIELD: Only batch if shape is exactly right
+                        if st.shape == (self.sequence_length, 200):
+                            batch_tensors.append(st)
+                            batch_syms.append(sym)
+                            precomputed_seqs[sym] = (sv, seq)
+                        else:
+                            logger.warning(f"[{sym}] Skipping batch inference: shape {st.shape}")
+                    except Exception as e:
+                        logger.warning(f"[{sym}] Batch pre-pass failed: {e}")
+                
+                if batch_tensors:
+                    try:
+                        final_batch = torch.stack(batch_tensors)  # [N, seq_len, 200]
+                        final_batch = torch.nan_to_num(final_batch, nan=0.0, posinf=1.0, neginf=-1.0)
+                        with torch.no_grad():
+                            batch_logits, _ = self.model(final_batch)  # [N, action_dim]
+                        for i, sym in enumerate(batch_syms):
+                            precomputed_actions[sym] = batch_logits[i].numpy()
+                    except Exception as e:
+                        logger.warning(f"Batch inference failed, falling back to individual: {e}")
+                        precomputed_actions = {}  # Force fallback
+                
+                for sym in self.symbols:
+                    if sym not in self.market_states:
+                        continue
+
                         
                     # Check for pending Limit Order
                     if sym in self.active_orders:
@@ -442,23 +484,25 @@ class ProductionTradingBot:
                                 logger.warning(f"[{sym}] Error checking open orders: {e}")
                                 continue
                         
-                    state_vector, macro_features = self._build_state_vector(sym)
-                    
-                    # 1b. Update Sliding Window History
-                    self.state_history[sym].append(state_vector.squeeze(0).tolist()) # Remove batch dim, convert to list
-                    
-                    # Pad sequence if we don't have enough history yet
-                    seq = list(self.state_history[sym])
-                    while len(seq) < self.sequence_length:
-                        seq.insert(0, seq[0] if len(seq) > 0 else state_vector.squeeze(0).tolist())
-                        
-                    # Forward Pass (shape: batch=1, seq_len=300, feature=200)
-                    state_tensor = torch.tensor([seq], dtype=torch.float32)
-                    state_tensor = torch.nan_to_num(state_tensor, nan=0.0, posinf=1.0, neginf=-1.0)
-                    
-                    with torch.no_grad():
-                        action_logits, expected_return = self.model(state_tensor)
-                        action_logits = action_logits[0].numpy()
+                    # Phase 2: Use precomputed batched result if available
+                    if sym in precomputed_actions and sym in precomputed_seqs:
+                        # Use results from the batch pre-pass (no model call needed!)
+                        state_vector, seq = precomputed_seqs[sym]
+                        self.state_history[sym].append(state_vector.squeeze(0).tolist())
+                        action_logits = precomputed_actions[sym]
+                    else:
+                        # Fallback: individual inference (for symbols skipped in pre-pass)
+                        state_vector, macro_features = self._build_state_vector(sym)
+                        self.state_history[sym].append(state_vector.squeeze(0).tolist())
+                        seq = list(self.state_history[sym])
+                        while len(seq) < self.sequence_length:
+                            seq.insert(0, seq[0] if len(seq) > 0 else state_vector.squeeze(0).tolist())
+                        state_tensor = torch.tensor([seq], dtype=torch.float32)
+                        state_tensor = torch.nan_to_num(state_tensor, nan=0.0, posinf=1.0, neginf=-1.0)
+                        with torch.no_grad():
+                            action_logits_t, expected_return = self.model(state_tensor)
+                            action_logits = action_logits_t[0].numpy()
+
                         
                     market = self.market_states[sym]
                     
@@ -568,7 +612,7 @@ class ProductionTradingBot:
                                 "reward": 0.0, # Immediate is 0. Teacher's Assistant will grade it later!
                                 "realized_pnl": 0.0
                             }
-                            asyncio.create_task(redis_manager.redis.publish("experience:completed", json.dumps(exp_data)))
+                            asyncio.create_task(redis_manager.redis.publish("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
                     
                     if side != "HOLD":
                         target_qty = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack
@@ -755,7 +799,7 @@ class ProductionTradingBot:
                                         "reward": float(imm_reward),
                                         "realized_pnl": float(imm_pnl)
                                     }
-                                    await redis_manager.redis.publish("experience:completed", json.dumps(exp_data))
+                                    await redis_manager.redis.publish("experience:completed", msgpack.packb(exp_data, use_bin_type=True))
                                     
                                 except Exception as e:
                                     logger.error(f"[{sym}] ORDER/EXPERIENCE FAILED: {e}")

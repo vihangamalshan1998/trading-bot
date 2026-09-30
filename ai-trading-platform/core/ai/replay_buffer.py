@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from typing import List, Dict, Any, Tuple
 from core.database.models.ai import Experience
 from core.config.settings import settings
+from core.ai.sumtree import SumTree
 
 class ReplayBuffer:
     """
@@ -20,6 +21,10 @@ class ReplayBuffer:
         
         # RAM Cache
         self.cache: List[Experience] = []
+        
+        # Phase 4: PER SumTree — replaces slow ORDER BY ABS(reward) DB query.
+        # Rebuilt every time cache is refreshed. O(log n) priority sampling.
+        self.sumtree = SumTree(capacity=max(capacity_cache, 1))
         
     def add_experience(self, exp_data: Dict[str, Any]):
         """Saves a single experience to MySQL. Only caches if capacity > 0."""
@@ -50,11 +55,14 @@ class ReplayBuffer:
 
             
     def load_cache_from_db(self, limit: int = 10000):
-        """Loads recent experiences from DB into RAM to bootstrap the cache."""
+        """Loads recent experiences from DB into RAM. Rebuilds SumTree after load."""
         try:
             with self.SessionLocal() as session:
                 recent = session.query(Experience).order_by(Experience.timestamp.desc()).limit(limit).all()
                 self.cache = recent[::-1] # Reverse to chronological
+            # Phase 4: Rebuild SumTree from new cache so priorities are fresh
+            if self.capacity > 0 and len(self.cache) > 0:
+                self.sumtree.rebuild_from_list(self.cache, alpha=0.6)
         except Exception as e:
             pass
 
@@ -96,21 +104,17 @@ class ReplayBuffer:
             recent_pool = self.cache[-n_recent*5:] # Pool of recent items
             batch.extend(random.sample(recent_pool, min(n_recent, len(recent_pool))))
             
-        # 2. Priority Experience Replay (PER) - Rare (Massive mistakes or huge wins)
-        try:
-            with self.SessionLocal() as session:
-                from sqlalchemy import func
-                # Query a larger pool of rare experiences, then randomly sample from it
-                rare_db = session.query(Experience).order_by(func.abs(Experience.reward).desc()).limit(n_rare * 10).all()
-                if len(rare_db) > 0: 
-                    batch.extend(random.sample(rare_db, min(n_rare, len(rare_db))))
-                else:
-                    raise Exception("Not enough rare in DB, falling back to RAM cache")
-        except Exception:
-            # Fallback to sorting the RAM cache if DB query fails
+        # 2. Phase 4: PER SumTree — Priority Experience Replay
+        # Replaces slow ORDER BY ABS(reward) DB query with O(log n) tree lookup.
+        # Samples proportional to |reward|^0.6 — high-reward trades seen more often.
+        if self.sumtree.n_entries >= n_rare:
+            per_samples = self.sumtree.sample_batch(n_rare)
+            batch.extend([exp for _, _, exp in per_samples if exp is not None])
+        else:
+            # Fallback: sort cache by |reward| if SumTree not ready yet
             rare_pool = sorted(self.cache, key=lambda x: abs(x.reward or 0), reverse=True)
-            if len(rare_pool) > 0:
-                batch.extend(random.sample(rare_pool[:n_rare*10], min(n_rare, len(rare_pool[:n_rare*10]))))
+            if rare_pool:
+                batch.extend(random.sample(rare_pool[:max(n_rare * 10, len(rare_pool))], min(n_rare, len(rare_pool))))
             
         # 3. Random
         batch.extend(random.sample(self.cache, min(n_random, len(self.cache))))

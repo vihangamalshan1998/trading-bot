@@ -1,5 +1,6 @@
 import asyncio
 import json
+import msgpack  # Phase 1: Must match main.py publisher format
 from core.db.redis import redis_manager
 from core.logging.logger import logger
 from core.ai.replay_buffer import ReplayBuffer
@@ -27,7 +28,7 @@ class ExperienceStorageService:
         async for message in pubsub.listen():
             if message['type'] == 'message':
                 try:
-                    exp_data = json.loads(message['data'])
+                    exp_data = msgpack.unpackb(message['data'], raw=False)  # Phase 1: Binary unpack
                     self.replay_buffer.add_experience(exp_data)
                     logger.info(f"Stored experience for {exp_data.get('symbol')} with reward {exp_data.get('reward')}")
                 except Exception as e:

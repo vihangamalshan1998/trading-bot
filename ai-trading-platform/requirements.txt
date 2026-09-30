@@ -23,3 +23,4 @@ aiohttp
 scipy
 yfinance
 ccxt
+msgpack  # Phase 1: Binary compression for Redis experience messages (-30% size)

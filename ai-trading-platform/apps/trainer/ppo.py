@@ -54,7 +54,7 @@ class PPOTrainer:
             logger.info("Model weights have been re-initialized.")
 
             
-        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=100)
+        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
         if len(states) == 0:
             return
             

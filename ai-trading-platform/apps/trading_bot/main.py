@@ -612,7 +612,7 @@ class ProductionTradingBot:
                                 "reward": 0.0, # Immediate is 0. Teacher's Assistant will grade it later!
                                 "realized_pnl": 0.0
                             }
-                            asyncio.create_task(redis_manager.redis.publish("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
+                            asyncio.create_task(redis_manager.publish_binary("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
                     
                     if side != "HOLD":
                         target_qty = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack

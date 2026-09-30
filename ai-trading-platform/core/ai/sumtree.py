@@ -76,14 +76,25 @@ class SumTree:
     def rebuild_from_list(self, experiences: list, alpha: float = 0.6) -> None:
         """
         Populate from a list of Experience objects.
-        Priority = (|reward| + epsilon)^alpha
-        alpha=0.6: strong prioritization but not pure greedy (standard PER value).
+
+        Priority = (best_available_reward + epsilon)^alpha
+
+        Uses reward_4h if Teacher's Assistant has graded it (more accurate),
+        otherwise falls back to immediate reward.
+        Minimum floor of 0.1 ensures HOLD experiences (reward=0) are still
+        sampled — preventing the model from forgetting HOLD is a valid action.
         """
         self.write_idx = 0
         self.n_entries = 0
         self.tree[:] = 0.0
         self.data[:] = None
         for exp in experiences:
-            raw_reward = abs(exp.reward or 0.0)
-            priority = (raw_reward + 1e-5) ** alpha
+            # Prefer the multi-horizon 4h reward if graded — more meaningful signal.
+            # Fall back to immediate reward for ungraded experiences.
+            best_reward = abs(exp.reward_4h) if exp.reward_4h is not None else abs(exp.reward or 0.0)
+            # Floor of 0.1 prevents HOLD (reward=0) from having near-zero priority.
+            # Without this, HOLDs are sampled 45,000x less than large-loss trades,
+            # causing the model to forget HOLD is a valid action (mode collapse).
+            priority = max((best_reward + 1e-5) ** alpha, 0.1)
             self.add(priority, exp)
+

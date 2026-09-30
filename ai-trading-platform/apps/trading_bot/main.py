@@ -799,8 +799,14 @@ class ProductionTradingBot:
                                         "reward": float(imm_reward),
                                         "realized_pnl": float(imm_pnl)
                                     }
-                                    await redis_manager.redis.publish("experience:completed", msgpack.packb(exp_data, use_bin_type=True))
-                                    
+                                    experience_payload = msgpack.packb(
+                                        exp_data,
+                                        use_bin_type=True,
+                                    )
+                                    await redis_manager.publish_binary(
+                                        "experience:completed",
+                                        experience_payload,
+                                    )
                                 except Exception as e:
                                     logger.error(f"[{sym}] ORDER/EXPERIENCE FAILED: {e}")
                                     

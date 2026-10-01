@@ -70,6 +70,10 @@ class StatArbCollector:
                             if exchange_id != "binance":
                                 await self._publish_state(sym)
                                 
+                # VPS CPU FIX: Rest for 0.5s between updates. Without this, highly liquid markets 
+                # will cause this loop to fire hundreds of times a second, burning 30% of the CPU.
+                await asyncio.sleep(0.5)
+                
             except Exception as e:
                 logger.error(f"{exchange_id} watcher error: {e}")
                 await asyncio.sleep(5)

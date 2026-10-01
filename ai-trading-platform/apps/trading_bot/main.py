@@ -55,6 +55,10 @@ class ProductionTradingBot:
         # 4. Strict Model Checkpoint Loading (graceful if no checkpoint yet)
         self.has_valid_model = False
         self.model = SingleSymbolActorCritic(input_dim=200)
+        
+        # VPS CPU FIX: Restrict PyTorch inference to 1 core so the trading bot doesn't hog the host CPU
+        torch.set_num_threads(1)
+        
         try:
             # This calls the strictly validated loader that checks architecture and active status
             self.model = self.registry.load_model(self.model)

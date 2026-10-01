@@ -176,8 +176,10 @@ class FeatureEngine:
         if len(prices) >= 30:
             p_slice = prices[-30:]
             returns = np.diff(p_slice) / p_slice[:-1]
-            if np.std(returns) > 0:
-                acf = np.corrcoef(returns[:-1], returns[1:])[0, 1] if len(returns) > 2 else 0.0
+            if np.std(returns[:-1]) > 0 and np.std(returns[1:]) > 0:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    acf_matrix = np.corrcoef(returns[:-1], returns[1:])
+                    acf = acf_matrix[0, 1] if len(returns) > 2 and not np.isnan(acf_matrix[0, 1]) else 0.0
                 from scipy.stats import skew as scipy_skew, kurtosis as scipy_kurt
                 skew = scipy_skew(returns)
                 kurt = scipy_kurt(returns)

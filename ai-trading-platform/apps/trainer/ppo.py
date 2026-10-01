@@ -240,8 +240,6 @@ async def run_training_loop():
         while True:
             # CPU FIX: Cut epochs to 2 to halve the math computation time.
             trainer.train_step(batch_size=64, epochs=2)
-            # Increased sleep to 30s to keep host CPU under the 20% penalty cap
-            await asyncio.sleep(15.0) 
 
             step += 1
             if step % 100 == 0:

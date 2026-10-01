@@ -120,22 +120,9 @@ class ReplayBuffer:
         batch.extend(random.sample(self.cache, min(n_random, len(self.cache))))
         
         # 4. Historical (random from entire DB)
-        try:
-            with self.SessionLocal() as session:
-                # To avoid slow ORDER BY RAND(), we grab a chunk of historical and sample in memory
-                import time
-                # Grab a random offset based on total experiences (approximate)
-                total_count = session.query(Experience).count()
-                offset = random.randint(0, max(0, total_count - 1000))
-                historical_pool = session.query(Experience).offset(offset).limit(1000).all()
-                
-                if historical_pool:
-                    batch.extend(random.sample(historical_pool, min(n_historical, len(historical_pool))))
-                else:
-                    raise Exception("No historical pool")
-        except Exception:
-            # Fallback to cache
-            batch.extend(random.sample(self.cache, min(n_historical, len(self.cache))))
+        # BUG FIX: Never query the DB during the active training loop. It parses massive JSONs and freezes the thread.
+        # The cache is already populated with thousands of rows via load_cache_from_db.
+        batch.extend(random.sample(self.cache, min(n_historical, len(self.cache))))
             
         return batch
 

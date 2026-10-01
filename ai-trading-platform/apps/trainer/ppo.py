@@ -5,6 +5,10 @@ from typing import List, Tuple
 import asyncio
 import json
 import time
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 from core.db.redis import redis_manager
 from core.ai.replay_buffer import ReplayBuffer
 from core.logging.logger import logger, set_log_file
@@ -16,17 +20,17 @@ class PPOTrainer:
     Phase 11: Proximal Policy Optimization (PPO) Training Loop.
     Samples from the MySQL ReplayBuffer and updates the Actor-Critic model.
     """
-    def __init__(self, model: SingleSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2):
+    def __init__(self, model: SingleSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2, limit: int = 300):
         self.model = model
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-5)
         self.gamma = gamma
         self.clip_epsilon = clip_epsilon
         self.buffer = ReplayBuffer()
+        self.limit = limit
         
         # V3 Upgrade: The 300-frame sequence is massive (2MB per record). 
         # Cache limit math: 300 exp × 300 frames × 200 features × 4 bytes = ~70MB cache.
-        # Dropped from 500 to 300 to prevent OOM killer on restricted VPS.
-        self.buffer.load_cache_from_db(limit=300)
+        self.buffer.load_cache_from_db(limit=self.limit)
 
         
     def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -42,7 +46,7 @@ class PPOTrainer:
         batch = self.buffer.sample(batch_size)
         if len(batch) < batch_size:
             logger.warning(f"Not enough samples in replay buffer to train. Got {len(batch)}, needed {batch_size}")
-            return
+            return False
             
         # Check if model weights are NaN
         is_nan = any(torch.isnan(p).any() for p in self.model.parameters())
@@ -182,13 +186,14 @@ class PPOTrainer:
             }
         }
 
-        
         # Since trainer might run synchronously, we can dispatch it via the running loop or a new one
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._publish_metrics(payload))
         except RuntimeError:
             asyncio.run(self._publish_metrics(payload))
+            
+        return True
             
     async def _publish_metrics(self, payload: dict):
         try:
@@ -230,19 +235,58 @@ async def run_training_loop():
         logger.warning(f"Could not load existing model, starting fresh: {e}")
     
     # V3 Upgrade: Limit PyTorch CPU threads to 1 or 2 to prevent 100% core starvation on VPS
-    torch.set_num_threads(1)
+    local_mode = os.getenv("LOCAL_MODE") == "True"
     
-    trainer = PPOTrainer(model=model)
+    if local_mode:
+        logger.info("⚡ LOCAL MODE DETECTED: Running at MAXIMUM POWER (Using all CPU cores & 16GB RAM)")
+        # Do not restrict threads locally
+        limit = 2000
+        epochs = 4
+        sleep_time = 0.0
+        
+        # Start DB Auto-Syncer in a background thread so it doesn't pause training
+        try:
+            import threading
+            import time
+            from scripts.sync_db import sync_experiences
+            
+            def background_syncer():
+                logger.info("Background DB Syncer started!")
+                while True:
+                    try:
+                        sync_experiences()
+                    except Exception as e:
+                        logger.error(f"Sync failed: {e}")
+                    time.sleep(15) # Check for new trades every 15 seconds
+                    
+            threading.Thread(target=background_syncer, daemon=True).start()
+        except Exception as e:
+            logger.error(f"Could not start background syncer: {e}")
+            
+    else:
+        logger.info("🐢 VPS MODE DETECTED: Running in STARVATION MODE (1 CPU Core, 300 RAM limit)")
+        torch.set_num_threads(1)
+        limit = 300
+        epochs = 2
+        sleep_time = 30.0
+    
+    trainer = PPOTrainer(model=model, limit=limit)
     logger.info("Starting continuous PPO training on historical/live data...")
     
     step = 0
     try:
         while True:
             # CPU FIX: Cut epochs to 2 to halve the math computation time.
-            trainer.train_step(batch_size=64, epochs=2)
+            success = trainer.train_step(batch_size=64, epochs=epochs)
             
+            if not success:
+                # If there's no data yet, sleep for 2 seconds and try again so we don't spam
+                await asyncio.sleep(2.0)
+                continue
+                
             # SAFETY BREATHER: 5 second rest to prevent host from suspending the server
-            await asyncio.sleep(5.0)
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
 
             step += 1
             if step % 100 == 0:
@@ -252,8 +296,8 @@ async def run_training_loop():
                 trainer.buffer.cache.clear()
                 gc.collect()
                 
-                # Refresh cache from DB (MUST MATCH initial limit of 300)
-                trainer.buffer.load_cache_from_db(limit=300)
+                # Refresh cache from DB 
+                trainer.buffer.load_cache_from_db(limit=limit)
                 gc.collect() # Release old cache objects before new ones fully settle
                 
                 # Auto-delete data older than 30 days to save VPS disk space
@@ -262,6 +306,15 @@ async def run_training_loop():
                     
                 try:
                     registry.save_model(model)
+                    
+                    if local_mode:
+                        logger.info("🚀 Pushing new Brain (model_v1.pt) to VPS in the background...")
+                        import subprocess
+                        subprocess.Popen(
+                            ["scp", "models/production/model_v1.pt", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/model_v1.pt"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
                     
                     # Schedule model update broadcast
                     try:

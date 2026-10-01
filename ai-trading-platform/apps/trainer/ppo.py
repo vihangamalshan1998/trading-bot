@@ -274,6 +274,7 @@ async def run_training_loop():
     logger.info("Starting continuous PPO training on historical/live data...")
     
     step = 0
+    last_push_time = 0.0
     try:
         while True:
             # CPU FIX: Cut epochs to 2 to halve the math computation time.
@@ -307,8 +308,9 @@ async def run_training_loop():
                 try:
                     registry.save_model(model)
                     
-                    if local_mode:
-                        logger.info("🚀 Pushing new Brain (model_v1.pt) to VPS in the background...")
+                    if local_mode and (time.time() - last_push_time > 300):
+                        logger.info("🚀 Pushing new Brain (model_v1.pt) to VPS in the background (max once per 5 min)...")
+                        last_push_time = time.time()
                         import subprocess
                         subprocess.Popen(
                             ["scp", "models/production/model_v1.pt", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/model_v1.pt"],

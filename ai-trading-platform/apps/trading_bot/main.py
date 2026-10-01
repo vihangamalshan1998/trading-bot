@@ -365,11 +365,7 @@ class ProductionTradingBot:
                             "marginType": p.get("marginType", "cross")
                         })
                     
-                    dashboard_data = {
-                        "equity": self.portfolio_state.equity,
-                        "positions": formatted_positions
-                    }
-                    await redis_manager.redis.set("dashboard:portfolio", json.dumps(dashboard_data))
+                    # Dashboard push removed
             except Exception as e:
                 logger.error(f"Dashboard sync failed: {e}")
             await asyncio.sleep(5.0)
@@ -464,16 +460,6 @@ class ProductionTradingBot:
                                 if not any(str(o.get('orderId')) == str(self.active_orders[sym]['order_id']) or o.get('clientOrderId') == self.active_orders[sym]['order_id'] for o in open_orders):
                                     logger.info(f"[{sym}] LIMIT ORDER FILLED/NO LONGER OPEN! Removing from tracker.")
                                     
-                                    # Push to dashboard history ONLY when filled
-                                    if 'trade_record' in self.active_orders[sym]:
-                                        try:
-                                            # Validate JSON before pushing
-                                            safe_json = json.dumps(self.active_orders[sym]['trade_record'])
-                                            await redis_manager.redis.lpush("dashboard:trade_history", safe_json)
-                                            await redis_manager.redis.ltrim("dashboard:trade_history", 0, 99)
-                                        except Exception as e:
-                                            logger.error(f"[{sym}] FAILED to push trade history to Redis: {e}")
-                                        
                                     del self.active_orders[sym]
                                     
                                     # No need to sync position here. We optimistically updated it when the order was placed.
@@ -557,24 +543,7 @@ class ProductionTradingBot:
                     elif action_val > 0.2: predicted_side = "LONG"
                     else: predicted_side = "HOLD"
                     
-                    # 2. Publish AI internal state to Redis for the Dashboard
-                    # FATAL REDIS/CPU FIX: We ONLY send the latest 200-slot slice to the dashboard.
-                    list_repr = state_vector.squeeze(0).tolist()
-                    if len(list_repr) > 0 and isinstance(list_repr[0], list):
-                        latest_state_slice = list_repr[-1] # 2D Sequence, grab last timestep
-                    else:
-                        latest_state_slice = list_repr # 1D Vector, grab the whole thing
-                    
-                    ai_state_data = {
-                        "confidence": float(confidence),
-                        "action_val": float(action_val),
-                        "target_size": float(target_size),
-                        "price_offset": float(price_offset),
-                        "predicted_side": predicted_side,
-                        "state_vector": latest_state_slice
-                    }
-                    asyncio.create_task(redis_manager.redis.set(f"ai:state:{sym}", json.dumps(ai_state_data)))
-
+                    # 2. (Dashboard publish removed for speed)
                     
                     if confidence < 0.3: 
                         logger.info(f"[{sym}] SKIPPING (Low Confidence: {confidence:.2f})")

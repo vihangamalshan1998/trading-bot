@@ -365,7 +365,13 @@ class ProductionTradingBot:
                             "marginType": p.get("marginType", "cross")
                         })
                     
-                    # Dashboard push removed
+                    if self.redis.redis:
+                        payload = {
+                            "equity": self.portfolio_state.equity,
+                            "positions": formatted_positions
+                        }
+                        await self.redis.redis.set("dashboard:portfolio", json.dumps(payload))
+                        
             except Exception as e:
                 logger.error(f"Dashboard sync failed: {e}")
             await asyncio.sleep(5.0)
@@ -543,7 +549,13 @@ class ProductionTradingBot:
                     elif action_val > 0.2: predicted_side = "LONG"
                     else: predicted_side = "HOLD"
                     
-                    # 2. (Dashboard publish removed for speed)
+                    if self.redis.redis:
+                        ai_state = {
+                            "predicted_side": predicted_side,
+                            "confidence": float(confidence),
+                            "target_size": float(target_size)
+                        }
+                        await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
                     
                     if confidence < 0.3: 
                         logger.info(f"[{sym}] SKIPPING (Low Confidence: {confidence:.2f})")
@@ -705,6 +717,10 @@ class ProductionTradingBot:
                                             self.session_wins += 1
                                             self.last_win_time = time.time()
                                         self.session_win_rate = self.session_wins / self.session_trades
+                                        
+                                    if self.redis.redis:
+                                        await self.redis.redis.lpush("dashboard:trade_history", json.dumps(trade_record))
+                                        await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                         
                                     # Track the limit order so we don't spam
                                     self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time(), 'trade_record': trade_record}

@@ -24,10 +24,9 @@ class PPOTrainer:
         self.buffer = ReplayBuffer()
         
         # V3 Upgrade: The 300-frame sequence is massive (2MB per record). 
-        # Cache limit math: 500 exp × 300 frames × 200 features × 4 bytes = ~117MB cache.
-        # With gc.collect() after every step, total trainer RAM stays ~500MB (safe for VPS).
-        # 500 is the sweet spot: enough diversity for sampler without risking OOM.
-        self.buffer.load_cache_from_db(limit=500)
+        # Cache limit math: 300 exp × 300 frames × 200 features × 4 bytes = ~70MB cache.
+        # Dropped from 500 to 300 to prevent OOM killer on restricted VPS.
+        self.buffer.load_cache_from_db(limit=300)
 
         
     def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -239,9 +238,9 @@ async def run_training_loop():
     step = 0
     try:
         while True:
-            trainer.train_step(batch_size=64, epochs=4)
-            # Increased sleep to 15s to significantly reduce CPU duty cycle
-            # (Allows the CPU to rest between intensive 50s matrix math sessions)
+            # CPU FIX: Cut epochs to 2 to halve the math computation time.
+            trainer.train_step(batch_size=64, epochs=2)
+            # Increased sleep to 30s to keep host CPU under the 20% penalty cap
             await asyncio.sleep(15.0) 
 
             step += 1
@@ -252,8 +251,8 @@ async def run_training_loop():
                 trainer.buffer.cache.clear()
                 gc.collect()
                 
-                # Refresh cache from DB to prevent Mode Collapse (keep at 500 to match init limit)
-                trainer.buffer.load_cache_from_db(limit=500)
+                # Refresh cache from DB (MUST MATCH initial limit of 300)
+                trainer.buffer.load_cache_from_db(limit=300)
                 gc.collect() # Release old cache objects before new ones fully settle
                 
                 # Auto-delete data older than 30 days to save VPS disk space

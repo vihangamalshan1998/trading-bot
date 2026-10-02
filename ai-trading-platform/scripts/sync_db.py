@@ -85,15 +85,15 @@ def sync_experiences():
                 format_strings = ','.join(['%s'] * len(chunk_ids))
                 
                 # Ask VPS if it has calculated the rewards for these rows yet
-                remote_cursor.execute(f"SELECT id, reward, reward_4h FROM experiences WHERE id IN ({format_strings}) AND (reward IS NOT NULL OR reward_4h IS NOT NULL)", tuple(chunk_ids))
+                remote_cursor.execute(f"SELECT id, reward, reward_5m, reward_1h, reward_4h FROM experiences WHERE id IN ({format_strings}) AND (reward IS NOT NULL OR reward_4h IS NOT NULL)", tuple(chunk_ids))
                 vps_updates = remote_cursor.fetchall()
                 
                 for vps_row in vps_updates:
                     local_cursor.execute("""
                         UPDATE experiences 
-                        SET reward = %s, reward_4h = %s 
+                        SET reward = %s, reward_5m = %s, reward_1h = %s, reward_4h = %s 
                         WHERE id = %s
-                    """, (vps_row['reward'], vps_row['reward_4h'], vps_row['id']))
+                    """, (vps_row['reward'], vps_row['reward_5m'], vps_row['reward_1h'], vps_row['reward_4h'], vps_row['id']))
                     updated_count += 1
             
             if updated_count > 0:

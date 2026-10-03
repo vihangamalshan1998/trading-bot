@@ -99,6 +99,10 @@ async def get_system_state():
     # Get market states and AI states
     market_states = {}
     keys = await redis_manager.redis.keys("market:state:*")
+    
+    import msgpack
+    import math
+    
     for key in keys:
         symbol = key.decode("utf-8").split(":")[-1] if isinstance(key, bytes) else key.split(":")[-1]
         state_raw = await redis_manager.redis.get(key)
@@ -107,10 +111,12 @@ async def get_system_state():
         ai_state_raw = await redis_manager.redis.get(f"ai:state:{symbol}")
         
         if state_raw:
-            parsed_state = json.loads(state_raw)
+            try:
+                parsed_state = msgpack.unpackb(state_raw)
+            except Exception:
+                parsed_state = json.loads(state_raw)
             
             # Sanitize floats to prevent FastAPI JSON serialization crashes
-            import math
             def sanitize_float(val):
                 if val is None or not isinstance(val, (int, float)): return 0.0
                 return 0.0 if math.isnan(val) or math.isinf(val) else val
@@ -120,7 +126,10 @@ async def get_system_state():
                 parsed_state["features"] = [sanitize_float(x) for x in parsed_state["features"]]
                 
             if ai_state_raw:
-                ai_data = json.loads(ai_state_raw)
+                try:
+                    ai_data = msgpack.unpackb(ai_state_raw)
+                except Exception:
+                    ai_data = json.loads(ai_state_raw)
                 
                 parsed_state["ai_confidence"] = sanitize_float(ai_data.get("confidence", 0.0))
                 parsed_state["ai_target_size"] = sanitize_float(ai_data.get("target_size", 0.0))

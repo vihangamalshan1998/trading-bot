@@ -468,6 +468,12 @@ class ProductionTradingBot:
                                 if not any(str(o.get('orderId')) == str(self.active_orders[sym]['order_id']) or o.get('clientOrderId') == self.active_orders[sym]['order_id'] for o in open_orders):
                                     logger.info(f"[{sym}] LIMIT ORDER FILLED/NO LONGER OPEN! Removing from tracker.")
                                     
+                                    # CRITICAL FIX: Publish to dashboard history ONLY WHEN FILLED!
+                                    if 'trade_record' in self.active_orders[sym] and self.redis.redis:
+                                        self.active_orders[sym]['trade_record']['timestamp'] = time.time()
+                                        await self.redis.redis.lpush("dashboard:trade_history", json.dumps(self.active_orders[sym]['trade_record']))
+                                        await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
+                                        
                                     del self.active_orders[sym]
                                     
                                     # No need to sync position here. We optimistically updated it when the order was placed.
@@ -720,7 +726,7 @@ class ProductionTradingBot:
                                             self.last_win_time = time.time()
                                         self.session_win_rate = self.session_wins / self.session_trades
                                         
-                                    if self.redis.redis:
+                                    if self.redis.redis and hard_stop_triggered:
                                         await self.redis.redis.lpush("dashboard:trade_history", json.dumps(trade_record))
                                         await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                         

@@ -34,14 +34,14 @@ In the original architecture, the AI only looked at a small snapshot. In the new
 
 ### Step D: State Broadcasting & Persistence
 Once the state vector is updated:
-1. **The Fast Path (Live Inference):** The state is serialized and pushed to a local **Redis** instance.
-2. **The Slow Path (Experience Storage):** When a trade occurs, the entire 200-dimension matrix is batched into an `Experience` object. These experiences are bulk-inserted into **MySQL** via SQLAlchemy into the `experiences` table. *Batching is critical to prevent SQL transaction locks from stalling the WebSocket listener.*
+1. **The Fast Path (Live Inference):** The state is binary-compressed via **Msgpack** and pushed to a local **Redis** instance.
+2. **The Slow Path (Experience Storage):** When a trade occurs, the entire 300x200 2D matrix (a 5-minute chronological window) is compressed via Msgpack into an `Experience` object. These experiences are bulk-inserted into **MySQL** via SQLAlchemy into the `experiences` table.
 
 ### Step E: AI Inference (The Brain)
-Running in a completely separate process, the `TradingBotService` constantly monitors the Redis state bus. 
-1. It pulls the latest 200-dimension state vector.
-2. It feeds the massive tensor into `AITradingStrategy`, which loads a pre-trained **PyTorch Neural Network**.
-3. The network runs a `forward()` pass, evaluating the momentum and order book shifts, and outputs a deterministic action: **Buy**, **Sell**, or **Hold**.
+Running in a completely separate process, the `TradingBotService` executes our **V3 LSTM Architecture**:
+1. **Batched Inference:** It stacks the 300x200 state matrices for all 6 coins into a single batched tensor.
+2. **True Memory:** It retrieves the physical `hidden_state` memory array from the previous tick and feeds it alongside the batch into the PyTorch Neural Network (`SingleSymbolActorCritic`).
+3. **Execution:** The network runs a `forward()` pass. Because it has perfect chronological memory of the session, it evaluates the momentum with extreme precision and outputs a deterministic action: **Buy**, **Sell**, or **Hold**. It then saves the new `hidden_state` back into RAM for the next tick.
 
 ### Step F: Safety & Execution
 If the AI decides to "Buy", the intent is intercepted by the `RiskManager`.
@@ -63,11 +63,11 @@ If the AI decides to "Buy", the intent is intercepted by the `RiskManager`.
 
 ---
 
-## 4. The Machine Learning Lifecycle
+## 4. The Machine Learning Lifecycle (V3)
 
 The platform is not just an execution engine; it is a research laboratory.
 
-1. **Data Gathering:** The collector runs 24/7, amassing millions of rows of `MarketFeatures` in MySQL.
-2. **The Environment:** We provide a custom `SpotTradingEnv` that perfectly mimics the live environment. It implements the standard OpenAI `Gymnasium` API, tracking simulated Mark-to-Market PnL and deducting 0.1% trading fees.
-3. **Training:** Researchers can run `train.py`. The RL agent (e.g., using REINFORCE or PPO algorithms) plays through the historical MySQL data millions of times. It is rewarded for profit and heavily penalized for drawdowns, slowly updating its PyTorch weights.
-4. **Deployment:** The best model weights (`.pth` file) are dropped into the `models/` directory. The live `AITradingStrategy` automatically hot-loads them, instantly bridging the gap between offline research and live deployment.
+1. **Data Gathering:** The collector runs 24/7, amassing thousands of `Experiences` in MySQL.
+2. **The Teacher's Assistant:** A background job (`reward_calculator.py`) scans the database for trades older than 4 hours, and hardcodes the exact 5m, 1h, and 4h future profit margins perfectly into the database row.
+3. **Training:** You run `ppo.py`. A Priority Experience Replay (PER) **SumTree** actively searches the database for the AI's biggest financial mistakes. The neural network learns to target the exact future returns calculated by the Teacher (bypassing the mathematical errors of traditional Temporal Difference learning).
+4. **Deployment:** The best model weights (`.pt` file) are dropped into the `models/` directory. The live `AITradingStrategy` automatically hot-loads them, instantly bridging the gap between offline research and live deployment.

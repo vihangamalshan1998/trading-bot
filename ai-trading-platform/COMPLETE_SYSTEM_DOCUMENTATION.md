@@ -62,19 +62,17 @@ At the very top sits `run_system.py`.
     *   If the unrealized loss drops below the `maintenance_margin_rate`, it simulates a **Liquidation**, instantly wiping the position and slapping the AI with a massive negative reward penalty. 
     *   It supports trading `N` symbols at the exact same time (cross-margin).
 
-### 4.2 Latent World Model (`apps/research/world_model.py` / `model.py`)
-*   **Purpose**: The "Brain" of the operation. In V2, we upgraded to an **LSTM (Long Short-Term Memory)** architecture. Instead of just reacting to the current price, this AI learns how the market works over a 10-minute historical context window.
+### 4.2 V3 Actor-Critic Brain (`apps/research/model.py`)
+*   **Purpose**: The "Brain" of the operation. In V3, we use a **SingleSymbolActorCritic** architecture driven by an **LSTM (Long Short-Term Memory)** network. Instead of just reacting to the current price, this AI retains perfect chronological memory of the trading session.
 *   **Logic**:
-    1.  **3D Tensor Input**: Takes a massive `[Batch, 120, 41]` tensor representing a 10-minute sliding window (120 steps). Each step contains 41 features (31 live market data points + 10 placeholder `0.0` slots for future alt-data).
-    2.  **Encoder**: Takes the massive array of prices, spreads, and macro events and compresses it into a small, dense vector called the `latent_state`.
-    3.  **LSTM Layer**: A type of memory node. It takes the previous hidden state and the current latent state to maintain a running memory of the chart's history, tracking velocity and momentum.
-    4.  **Transition Model**: The most important part. It tries to predict what the *next* latent state will be before it even happens. It learns to "dream" market movements.
-    5.  **Decoder**: Takes the "dream" and tries to reconstruct the actual prices and predict the expected PnL (Reward).
-    6.  **Policy**: The actual trading logic. It looks at the "dream" and decides whether to BUY, SELL, or HOLD.
+    1.  **3D Tensor Input**: Takes a massive `[Batch, 300, 200]` tensor representing a 5-minute sliding window (300 steps). Each step contains 200 features.
+    2.  **LSTM Layer**: Takes the current state and the previous physical `hidden_state` to maintain a running memory of the chart's history, tracking velocity and momentum. It continuously passes this hidden state forward tick-by-tick.
+    3.  **Actor Head**: The trading logic. It looks at the LSTM output and decides whether to BUY, SELL, or HOLD.
+    4.  **Multi-Horizon Critic Head**: Guesses the exact future profit of the trade across 3 distinct time horizons (5-minute, 1-hour, 4-hour).
 
-### 4.3 Offline Training Loop (`apps/research/train_world_model.py`)
-*   **Purpose**: To teach the World Model how to trade using historical data.
-*   **Logic**: It feeds millions of historical mock ticks through the model. It calculates the `Reconstruction Loss` (how bad was the model at predicting the future price?) and uses PyTorch's Autograd to update the neural network weights via Gradient Descent, slowly making the AI smarter over thousands of epochs.
+### 4.3 Offline PPO Training Loop (`apps/trainer/ppo.py`)
+*   **Purpose**: To teach the Brain how to trade using historical data.
+*   **Logic**: A background Teacher's Assistant calculates the *exact* future returns of old trades. The Proximal Policy Optimization (PPO) script bypasses traditional TD-learning math, forcing the Critic to target those exact, ground-truth returns. It uses a **PER SumTree** to sample the database, heavily prioritizing trades where the AI made massive financial mistakes, allowing for extremely fast convergence.
 
 ### 4.4 Forward Testing Engine (`apps/research/forward_test.py`)
 *   **Purpose**: The final exam for the AI.
@@ -91,27 +89,27 @@ At the very top sits `run_system.py`.
     *   Is the current macro sentiment apocalyptic? (Macro Sentiment Block)
     If any safety limit is breached, the Risk Manager overrides the AI, changes the action to `HOLD` or `CLOSE`, and prevents the trade from reaching Binance.
 
-### 5.2 Live Replay Buffer (`apps/trading_bot/replay_buffer.py`)
-*   **Purpose**: To record history as it happens.
-*   **Logic**: Every time the live Trading Bot takes an action, it logs the `[state, action, reward, next_state]` into a fast in-memory `deque` (queue). In a full production setup, this is also asynchronously flushed to the MySQL `Experience` table for permanent storage.
+### 5.2 Live Replay Buffer (`core/ai/replay_buffer.py`)
+*   **Purpose**: To record history as it happens for future offline training.
+*   **Logic**: Every time the live Trading Bot acts, it compresses the massive 300x200 state matrix into a **Msgpack** binary string to save RAM/Network bandwidth. It pushes this to MySQL via bulk `add_all` SQLAlchemy inserts to prevent transaction locking.
 
-### 5.3 Continuous Online Trainer (`apps/trading_bot/online_trainer.py`)
-*   **Purpose**: To adapt to the market in real-time. A model trained in 2024 might fail in 2026.
-*   **Logic**: It runs silently in the background while the bot trades. Every few seconds, it pulls a random batch of recent live trades from the Replay Buffer. It performs a micro-update (gradient descent) on the World Model's weights. This allows the AI to learn from its live mistakes and continuously adapt to new market regimes without needing to be shut down.
+### 5.3 Continuous Online Trainer / The Teacher's Assistant
+*   **Purpose**: To adapt to the market in real-time and grade the AI.
+*   **Logic**: The `reward_calculator.py` runs silently in the background. It finds trades that are older than 4 hours, analyzes the database to see what happened *after* the AI bought, and hardcodes the true 5m, 1h, and 4h returns. The AI trainer then uses this perfectly graded data to update its weights.
 
 ### 5.4 Production Trading Bot (`apps/trading_bot/main.py`)
 *   **Purpose**: The heart that ties everything together and actually trades.
 *   **Logic**: 
     1. It connects to the Redis streams fed by the `Market Data Collector`.
-    2. It pulls the latest Macro Events from the `Event Memory System`.
-    3. It concatenates this data into a 41-dimensional vector, padding the 10 placeholder slots with `0.0`.
-    4. It pushes this vector into a `collections.deque(maxlen=120)` to maintain a sliding 10-minute window.
-    5. It feeds the massive 2D matrix into the `LSTM Model` for an action (e.g., `OPEN_LONG`).
-    6. It passes the action through the `RiskManager`.
-    7. If approved, it queries the `SymbolRegistry` to format the price/quantity perfectly.
-    8. Finally, it fires the trade to the `BinanceFuturesClient`.
-    9. It logs the result (including the massive 120-step matrix) into the `ReplayBuffer` for offline/online PPO training.
-    *(This entire loop runs asynchronously thousands of times per minute, reacting instantly to market shifts).*
+    2. It updates a sliding `collections.deque(maxlen=300)` for all 6 active coins.
+    3. **Batched Inference:** It stacks all 6 coins into a single `[6, 300, 200]` tensor to save CPU cycles.
+    4. **True Memory:** It retrieves the `hidden_states` (LSTM memory) for all 6 coins from the previous tick.
+    5. It feeds the batched tensor and the hidden states into the PyTorch `SingleSymbolActorCritic`.
+    6. It saves the newly generated `hidden_states` back into RAM for the next tick.
+    7. It passes the resulting 6 actions through the `RiskManager`.
+    8. If approved, it dynamically formats the price/quantity via `SymbolRegistry` and fires the trades to the exchange.
+    9. It compresses the states via **Msgpack** and logs them for training.
+    *(This entire loop runs asynchronously thousands of times per minute, perfectly retaining physical memory across time).*
 
 ---
 **END OF DOCUMENTATION**

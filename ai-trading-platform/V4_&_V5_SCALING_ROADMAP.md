@@ -138,12 +138,13 @@ V5 represents the absolute ceiling of algorithmic trading. It is not a trading b
 
 ### 📊 The Statistical Reality (V3 vs V4 vs V5)
 
-**V3 (Your Current Baseline):**
+**V3 (Your Current Baseline - Highly Advanced):**
 *   **Target Win Rate:** ~55% - 60%
 *   **Average Trade Duration:** Hours to Days (Swing Trading)
 *   **Execution Latency:** ~200 - 500 milliseconds (Python Sequential Inference)
 *   **Processing Scale:** 6 Coins (Limited by JSON parsing and sequential CPU loops)
-*   **Max Drawdown Risk:** Moderate (Relies on a single AI model with basic stop-losses)
+*   **Max Drawdown Risk:** Very Low (Protected by Gemini Macro LLM Override & Hard Drawdown Stop-Losses)
+*   **Active Edge:** Utilizes God-Tier Derivatives (Open Interest, Liquidations) normally reserved for Hedge Funds.
 
 **V4 (The Hedge Fund Model):**
 *   **Target Win Rate:** ~65% - 72%
@@ -166,6 +167,7 @@ V5 represents the absolute ceiling of algorithmic trading. It is not a trading b
 2.  **LLM Sentiment Integration (The Crystal Ball):** A specialized Large Language Model (e.g., LLaMA) reads Twitter and Bloomberg in real-time.
     *   **The Pipeline:** It calculates an emotional sentiment score (a vector array from -1.0 to 1.0) and injects it directly into the PyTorch Actor-Critic network before the news even hits the price chart.
     *   **How to Code it:** Deploy a local open-source LLM (like `Llama-3-8B`) via `vLLM` or `Ollama`. Pass news headlines into the LLM prompt, return the embedding, and concatenate it to the 200-dimensional market feature tensor before it hits the LSTM layer.
+    *   **V3 Status (Already Achieved):** You have already built the foundational step for this in V3! Your `RiskManager` currently uses the Gemini API as a "Macro LLM Override" to read news and block the AI from trading during extremely bearish/bullish Black Swan events. V5 will simply evolve this from a "Risk Block" into a direct mathematical injection.
 3.  **C++ / Rust Execution (Zero Latency):** Python is completely abandoned for live trading. Python is far too slow for V5 because the Global Interpreter Lock (GIL) limits Python to ~50ms.
     *   **The Pipeline:** PyTorch models are compiled into raw C++ (`libtorch`) and run on FPGAs colocated inside the Binance server building. The bot connects directly to the exchange via the raw FIX Protocol, bypassing REST entirely.
     *   **How to Code it:** Export the Python PyTorch model using `torch.jit.script` (TorchScript). Load the `.pt` file inside a high-performance C++ executable.

@@ -352,18 +352,20 @@ class ProductionTradingBot:
                             self.portfolio_state.positions[sym].entry_price = float(p.get("entryPrice", 0))
                             self.portfolio_state.positions[sym].leverage = int(p.get("leverage", 10))
                             
-                        pnl = float(p.get("unRealizedProfit", 0))
-                        formatted_positions.append({
-                            "symbol": sym,
-                            "side": "LONG" if amt > 0 else "SHORT",
-                            "quantity": abs(amt),
-                            "pnl": pnl,
-                            "entryPrice": float(p.get("entryPrice", 0)),
-                            "markPrice": float(p.get("markPrice", 0)),
-                            "leverage": int(p.get("leverage", 1)),
-                            "liquidationPrice": float(p.get("liquidationPrice", 0)),
-                            "marginType": p.get("marginType", "cross")
-                        })
+                        # CRITICAL FIX: Only send active positions to the dashboard (filter out ghost/closed records)
+                        if abs(amt) > 0:
+                            pnl = float(p.get("unRealizedProfit", 0))
+                            formatted_positions.append({
+                                "symbol": sym,
+                                "side": "LONG" if amt > 0 else "SHORT",
+                                "quantity": abs(amt),
+                                "pnl": pnl,
+                                "entryPrice": float(p.get("entryPrice", 0)),
+                                "markPrice": float(p.get("markPrice", 0)),
+                                "leverage": int(p.get("leverage", 1)),
+                                "liquidationPrice": float(p.get("liquidationPrice", 0)),
+                                "marginType": p.get("marginType", "cross")
+                            })
                     
                     if self.redis.redis:
                         payload = {

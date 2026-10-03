@@ -34,11 +34,12 @@ class PPOTrainer:
 
         
     def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Computes Generalized Advantage Estimation (GAE) for Multi-Horizon."""
-        # Both rewards and values are shape (batch_size, 3)
-        deltas = rewards + self.gamma * next_values * (1.0 - dones) - values
-        advantages = deltas
-        returns = advantages + values
+        """
+        CRITICAL FIX: Since the database pre-calculates the exact Multi-Horizon sums (5m, 1h, 4h),
+        the rewards tensor IS the true return. We do not need recursive TD learning.
+        """
+        returns = rewards
+        advantages = returns - values
         return advantages, returns
         
     def train_step(self, batch_size: int = 64, epochs: int = 4):

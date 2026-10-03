@@ -158,14 +158,14 @@ class SingleSymbolActorCritic(nn.Module):
         # Critic Head (Now predicts 3 horizons: 5m, 1h, 4h)
         self.critic_fc = nn.Linear(hidden_dim, 3)
         
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, hidden_state=None, return_hidden=False):
         # Support both (batch_size, input_dim) and (batch_size, seq_len, input_dim)
         if x.dim() == 2:
             x = x.unsqueeze(1) # (batch_size, 1, input_dim)
             
         x = self.shared_norm(x)
         
-        lstm_out, _ = self.lstm(x)
+        lstm_out, new_hidden = self.lstm(x, hidden_state)
         
         # Take the output from the last time step in the sequence
         last_out = lstm_out[:, -1, :]
@@ -173,4 +173,6 @@ class SingleSymbolActorCritic(nn.Module):
         actor_out = torch.tanh(self.actor_fc(last_out))
         critic_out = self.critic_fc(last_out)
         
+        if return_hidden:
+            return actor_out, critic_out, new_hidden
         return actor_out, critic_out

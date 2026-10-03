@@ -10,78 +10,29 @@ Before writing any code, here are the absolute failure points you must watch out
 
 ---
 
-## 🛠️ Step 1: Implementing Vector Compression (Msgpack)
+## ✅ COMPLETED IMPLEMENTATIONS
 
-**1. Install Dependency:**
-```bash
-pip install msgpack-python
-```
+The following items have been fully hardcoded and deployed into the current architecture.
 
-**2. Update `main.py` (Publishing):**
-Find the line where the bot sends the experience:
-```python
-# OLD
-await redis_manager.redis.publish("experience:completed", json.dumps(exp_data))
+### 1. Vector Compression (Msgpack) [✅ COMPLETED]
+Replaced bloated JSON strings in Redis Pub/Sub with `msgpack` binary serialization in `main.py` and `storage.py`.
 
-# NEW
-import msgpack
-await redis_manager.redis.publish("experience:completed", msgpack.packb(exp_data, use_bin_type=True))
-```
+### 2. Batched Live Inference [✅ COMPLETED]
+`main.py` now collects all coin tensors and executes a single batched `torch.stack` inference pass, slashing PyTorch CPU load.
 
-**3. Update `apps/experience/storage.py` (Subscribing):**
-Find the line where the storage reads the Redis message:
-```python
-# OLD
-exp_data = json.loads(message['data'])
+### 3. The "Double-Counting" Math Bug [✅ COMPLETED]
+Updated `apps/trainer/ppo.py` to stop applying recursive Temporal Difference (TD) learning since the database already calculates the exact future multi-horizon returns perfectly.
 
-# NEW
-import msgpack
-exp_data = msgpack.unpackb(message['data'], raw=False)
-```
+### 4. The LSTM "Amnesia" Bug [✅ COMPLETED]
+Updated `apps/research/model.py` and `apps/trading_bot/main.py` to retain and pass the LSTM `hidden_state` per-symbol on every tick, giving the AI true continuous memory.
 
----
+### 5. Priority Experience Replay (PER) SumTree [✅ COMPLETED]
+Created `core/ai/sumtree.py` and updated `core/ai/replay_buffer.py` to sample proportional to the absolute value of rewards, forcing the AI to focus on its biggest mistakes.
 
-## 🛠️ Step 2: Implementing Batched Live Inference
 
-**Update `main.py` (Inference Loop):**
-Instead of calling `self.model(seq_tensor)` inside the loop, we collect them all and execute once.
+## ⏳ PENDING UPGRADES (Phase 1)
 
-```python
-# 1. Collect all valid sequences with an ironclad safety check
-batch_tensors = []
-batch_symbols = []
-
-for sym in SYMBOLS:
-    # Check if we have enough history
-    if len(self.state_history[sym]) == 300:
-        seq_tensor = torch.tensor(list(self.state_history[sym]), dtype=torch.float32)
-        
-        # SAFETY SHIELD: Verify exact shape before adding to batch
-        if seq_tensor.shape == (300, 200): # Ensure exactly 300 frames and 200 features
-            batch_tensors.append(seq_tensor)
-            batch_symbols.append(sym)
-        else:
-            logger.warning(f"Skipping {sym}: Corrupted shape {seq_tensor.shape}")
-
-# 2. Execute Batch Inference (Only if we have valid symbols to process)
-if len(batch_tensors) > 0:
-    # Stack them into shape [N, 300, 200]
-    # Because of the safety shield above, this torch.stack will NEVER crash!
-    final_batch = torch.stack(batch_tensors).to(self.device)
-    
-    with torch.no_grad():
-        # 1 single PyTorch execution for all coins!
-        action_preds, values = self.model(final_batch)
-        
-    # 3. Distribute results back to symbols
-    for i, sym in enumerate(batch_symbols):
-        pred = action_preds[i]
-        # ... proceed to Risk Manager logic ...
-```
-
----
-
-## 🛠️ Step 3: Implementing Smart Memory (Volatility Triggers)
+### 🛠️ Pending Task 1: Implementing Smart Memory (Volatility Triggers)
 
 **Update `main.py` (Market Data Loop):**
 We abandon the 1-second timer and only record data if price moves.
@@ -106,37 +57,3 @@ if price_change >= 0.1:
     self.last_price[sym] = current_price # Reset trigger
 ```
 *CRITICAL: You must wipe the database and `.pt` file immediately after pushing this code.*
-
----
-
-## 🛠️ Step 4: Implementing PER SumTree
-
-**1. Create `core/ai/sumtree.py`:**
-```python
-import numpy as np
-
-class SumTree:
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.tree = np.zeros(2 * capacity - 1)
-        self.data = np.zeros(capacity, dtype=object)
-        self.write_idx = 0
-
-    def update(self, idx, priority):
-        change = priority - self.tree[idx]
-        self.tree[idx] = priority
-        while idx != 0:
-            idx = (idx - 1) // 2
-            self.tree[idx] += change
-
-    def add(self, priority, data):
-        idx = self.write_idx + self.capacity - 1
-        self.data[self.write_idx] = data
-        self.update(idx, priority)
-        self.write_idx += 1
-        if self.write_idx >= self.capacity:
-            self.write_idx = 0
-```
-
-**2. Update `ppo.py`:**
-Remove random sampling and sample proportionally from the SumTree based on the absolute value of the reward `abs(reward)`.

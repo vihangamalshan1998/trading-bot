@@ -90,6 +90,9 @@ class ProductionTradingBot:
         self.sequence_length = 300
         self.state_history = collections.defaultdict(lambda: collections.deque(maxlen=self.sequence_length))
         
+        # LSTM True Memory State Tracking
+        self.hidden_states = {sym: None for sym in self.symbols}
+        
         # Limit Order Tracking
         self.active_orders = {} # symbol -> {'order_id': str, 'timestamp': float}
         
@@ -427,10 +430,29 @@ class ProductionTradingBot:
                     try:
                         final_batch = torch.stack(batch_tensors)  # [N, seq_len, 200]
                         final_batch = torch.nan_to_num(final_batch, nan=0.0, posinf=1.0, neginf=-1.0)
+                        
+                        # Build batched hidden state
+                        h_list, c_list = [], []
+                        has_hidden = False
+                        hidden_dim = getattr(self.model.lstm, 'hidden_size', 256) if hasattr(self.model, 'lstm') else 256
+                        for sym in batch_syms:
+                            h = self.hidden_states.get(sym)
+                            if h is not None:
+                                h_list.append(h[0])
+                                c_list.append(h[1])
+                                has_hidden = True
+                            else:
+                                h_list.append(torch.zeros(1, 1, hidden_dim, device=final_batch.device))
+                                c_list.append(torch.zeros(1, 1, hidden_dim, device=final_batch.device))
+                        
+                        batch_hidden = (torch.cat(h_list, dim=1), torch.cat(c_list, dim=1)) if has_hidden else None
+
                         with torch.no_grad():
-                            batch_logits, _ = self.model(final_batch)  # [N, action_dim]
+                            batch_logits, _, new_hidden_batch = self.model(final_batch, hidden_state=batch_hidden, return_hidden=True)
                         for i, sym in enumerate(batch_syms):
                             precomputed_actions[sym] = batch_logits[i].numpy()
+                            # Save independent hidden state for next tick
+                            self.hidden_states[sym] = (new_hidden_batch[0][:, i:i+1, :].detach(), new_hidden_batch[1][:, i:i+1, :].detach())
                     except Exception as e:
                         logger.warning(f"Batch inference failed, falling back to individual: {e}")
                         precomputed_actions = {}  # Force fallback
@@ -504,8 +526,9 @@ class ProductionTradingBot:
                         state_tensor = torch.tensor([seq], dtype=torch.float32)
                         state_tensor = torch.nan_to_num(state_tensor, nan=0.0, posinf=1.0, neginf=-1.0)
                         with torch.no_grad():
-                            action_logits_t, expected_return = self.model(state_tensor)
+                            action_logits_t, expected_return, new_h = self.model(state_tensor, hidden_state=self.hidden_states.get(sym), return_hidden=True)
                             action_logits = action_logits_t[0].numpy()
+                            self.hidden_states[sym] = new_h
 
                         
                     market = self.market_states[sym]

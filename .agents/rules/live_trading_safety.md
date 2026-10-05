@@ -93,3 +93,27 @@ except ExchangeError as e:
 - [ ] Generate VPS-specific API keys with IP binding.
 - [ ] Set `MAX_ORDER_SIZE_USD` ceiling.
 - [ ] Test the Exception Handling block by temporarily turning off internet on the VPS.
+
+---
+
+## 6. Official Safety Settings (From V1 Blueprint)
+Currently, your `settings.py` has limits set to `9999999.0` (which is likely for testing/training). Before going live, you **MUST** revert the `core/config/settings.py` values back to these historically safe thresholds:
+
+```python
+    # ============================================================
+    # Phase 1 RISK LIMITS (MANDATORY FOR LIVE)
+    # ============================================================
+    max_position_size: float = Field(default=10.0, gt=0)
+    max_symbol_exposure_pct: float = Field(default=0.20, gt=0, le=1)
+    max_portfolio_exposure_pct: float = Field(default=0.50, gt=0, le=1)
+
+    max_leverage: int = Field(default=10, gt=0)
+    max_order_size: float = Field(default=5.0, gt=0)
+    max_open_positions: int = Field(default=5, gt=0)
+
+    max_daily_loss_pct: float = Field(default=0.05, gt=0, le=1)
+    max_drawdown_pct: float = Field(default=0.10, gt=0, le=1)
+
+    max_market_data_age_seconds: float = Field(default=60.0, gt=0)
+    correlated_exposure_limit_pct: float = Field(default=0.40, gt=0, le=1)
+```

@@ -64,7 +64,9 @@ class ReplayBuffer:
             if self.capacity > 0 and len(self.cache) > 0:
                 self.sumtree.rebuild_from_list(self.cache, alpha=0.6)
         except Exception as e:
-            pass
+            from core.logging.logger import logger
+            import traceback
+            logger.error(f"CRITICAL ERROR loading cache from DB: {e}\n{traceback.format_exc()}")
 
     def cleanup_old_data(self, days: int = 30):
         """Automatically deletes experiences older than X days to prevent database bloat."""

@@ -282,7 +282,10 @@ async def run_training_loop():
             success = trainer.train_step(batch_size=64, epochs=epochs)
             
             if not success:
-                # If there's no data yet, sleep for 2 seconds and try again so we don't spam
+                # CRITICAL FIX: If train_step fails (usually because cache is empty),
+                # we MUST try to reload the cache from the DB. Otherwise, we hit an infinite sleep loop.
+                logger.warning("Train step failed (likely empty cache). Forcing cache reload...")
+                trainer.buffer.load_cache_from_db(limit=limit)
                 await asyncio.sleep(2.0)
                 continue
                 

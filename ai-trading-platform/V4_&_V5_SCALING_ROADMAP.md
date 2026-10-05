@@ -180,3 +180,20 @@ To achieve V5, you leave standard VPS hosting behind and enter the world of ente
 *   **Software Requirements:** C++20, Rust, `libtorch`, `ZeroMQ`, `Ray RLlib`, FIX Protocol implementation.
 
 *Recommendation: V5 requires a team of PhDs and C++ engineers with massive capital backing. Focus entirely on perfecting V3, scaling to V4 Phase 1, and letting Phase 2 remain on the horizon until your platform generates enough revenue to justify the server costs.*
+
+---
+
+## Appendix: LSTM Sequence Length Scaling (The "Camera Resolution" Strategy)
+
+If during the scaling phases it becomes apparent that the AI's standard 25-minute sequence (300 frames × 5 seconds) is not providing enough momentum context for the Critic's 4-hour horizon, you have two methods to increase the vision window:
+
+### Option 1: Double the Frames (The Brute Force Way)
+*   **Action:** Increase `seq_len` in `ppo.py` from 300 to 600.
+*   **Result:** The AI watches a 50-minute video.
+*   **Consequences:** High risk of "Vanishing Gradients" (the LSTM forgetting the start of the sequence by the end). Your MySQL database size will double, and PyTorch training time will double. Not recommended for limited VPS hardware.
+
+### Option 2: Slow Down the Camera (The Smart Scaling Way)
+*   **Action:** Keep `seq_len` at 300 frames, but change the Live Bot's data collection tick rate from 5 seconds to **15 seconds**.
+*   **Math:** 300 frames × 15 seconds = 4,500 seconds.
+*   **Result:** The sequence remains exactly 300 frames long (keeping the database small and training lightning-fast), but that sequence now covers **1 Hour and 15 Minutes** of market action!
+*   **Recommendation:** This is the industry-standard way to scale LSTM vision without hardware penalties. Use this if the AI struggles with market noise in V3/V4.

@@ -117,3 +117,26 @@ Currently, your `settings.py` has limits set to `9999999.0` (which is likely for
     max_market_data_age_seconds: float = Field(default=60.0, gt=0)
     correlated_exposure_limit_pct: float = Field(default=0.40, gt=0, le=1)
 ```
+
+---
+
+## 7. Re-Enable Hard Stop Loss (Real Money Safety)
+During testnet, the Hard Stop Loss (originally set to -10% leveraged PNL) was disabled so the AI could learn how to manage exits itself without being choked out by market noise. 
+However, **before deploying to Live Trading with real money**, you must re-enable this or set a wider stop loss (e.g., -30%) in `main.py` to protect against sudden market crashes if the AI freezes.
+
+**Implementation:**
+In `main.py` (around line 552), uncomment the safety block:
+```python
+if pnl_pct_leveraged <= -0.30: # -30% HARD STOP LOSS
+    logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI.")
+    hard_stop_triggered = True
+```
+
+---
+
+## 8. The Long-Game Strategy (Surviving Massive Waves in Live)
+To allow the AI to successfully predict the "long game" and hold through massive market swings without getting liquidated or prematurely stopped out, adhere to this specific 3-part strategy:
+
+* **A. "Catastrophe-Only" Stop Loss:** Do not disable the stop loss entirely in Live. Set it wide (e.g., `-40%` or `-50%`). This gives the AI the room to ride out standard market volatility while still providing a strict safety net against a "Black Swan" flash crash.
+* **B. Lower Leverage (3x to 5x):** High leverage (e.g., 20x) is the enemy of the long game because a mere 5% swing will liquidate your account. By lowering your max leverage in `settings.py` to `3x` or `5x`, you give the bot a massive cushion (20%-33% swing) to survive dips before any exchange liquidation occurs.
+* **C. Rely on Max Daily Loss (Shadow Mode):** Rely heavily on the Shadow Mode switch (Section 1). If the bot mispredicts the long game entirely and hits your daily loss limit (e.g., -$50), it will seamlessly switch to paper trading and prevent further damage.

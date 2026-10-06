@@ -474,11 +474,19 @@ class ProductionTradingBot:
                             # Revert optimistic portfolio update since order timed out and didn't fill
                             if 'trade_record' in self.active_orders[sym]:
                                 side = self.active_orders[sym]['trade_record']['side']
-                                qty = self.active_orders[sym]['trade_record']['quantity']
+                                qty = float(self.active_orders[sym]['trade_record']['quantity'])
+                                price = float(self.active_orders[sym]['trade_record']['price'])
+                                margin_used = (qty * price) / settings.max_leverage
+                                
                                 if "OPEN_LONG" in side or "CLOSE_SHORT" in side:
-                                    self.portfolio_state.positions[sym].quantity -= float(qty)
+                                    self.portfolio_state.positions[sym].quantity -= qty
                                 elif "CLOSE_LONG" in side or "OPEN_SHORT" in side:
-                                    self.portfolio_state.positions[sym].quantity += float(qty)
+                                    self.portfolio_state.positions[sym].quantity += qty
+                                    
+                                if "OPEN" in side:
+                                    self.portfolio_state.free_margin += margin_used
+                                elif "CLOSE" in side:
+                                    self.portfolio_state.free_margin -= margin_used
                             del self.active_orders[sym]
 
                             continue

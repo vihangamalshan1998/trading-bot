@@ -609,24 +609,39 @@ class ProductionTradingBot:
                         # If the AI never sees a HOLD in the training buffer, it forgets that
                         # holding is a valid option and collapses into 100% BUY or SELL.
                         if random.random() < 0.05:
+                            hold_dur = 0
+                            if pos.entry_price > 0 and getattr(pos, 'entry_time', 0.0) > 0:
+                                hold_dur = int(time.time() - pos.entry_time)
+                                
                             exp_data = {
                                 "experience_id": str(uuid.uuid4()),
                                 "timestamp": int(time.time()),
                                 "symbol": sym,
                                 "market_state": seq, 
                                 "macro_state": None, 
-                                "portfolio_state": None, 
+                                "portfolio_state": {
+                                    "free_margin": float(self.portfolio_state.free_margin),
+                                    "total_unrealized_pnl": float(self.portfolio_state.total_unrealized_pnl)
+                                },
                                 "derivatives_state": {
                                     "target_size": float(target_size),
                                     "price_offset": float(price_offset)
                                 },
                                 "position_before": float(pos.quantity),
+                                "position_after": float(pos.quantity),
                                 "entry_price": float(pos.entry_price),
+                                "exit_price": None,
+                                "leverage": int(pos.leverage) if hasattr(pos, 'leverage') else 10,
+                                "margin": (float(pos.quantity) * market.mid_price / pos.leverage) if pos.leverage and pos.quantity else 0.0,
+                                "fees": 0.0,
+                                "holding_duration": hold_dur,
                                 "action": "HOLD",
+                                "action_probability": float(confidence),
                                 "confidence": float(confidence),
                                 "model_version": "v1",
-                                "reward": 0.0, # Immediate is 0. Teacher's Assistant will grade it later!
-                                "realized_pnl": 0.0
+                                "reward": 0.0, 
+                                "realized_pnl": 0.0,
+                                "unrealized_pnl": float(pos.unrealized_pnl) if hasattr(pos, 'unrealized_pnl') else 0.0
                             }
                             asyncio.create_task(redis_manager.publish_binary("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
                     

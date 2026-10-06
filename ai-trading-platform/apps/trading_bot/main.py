@@ -780,7 +780,21 @@ class ProductionTradingBot:
                                     # Calculate immediate RL Reward
                                     imm_reward = 0.0
                                     imm_pnl = 0.0
+                                    exit_px = None
+                                    trade_fees = 0.0
+                                    hold_dur = None
+                                    
                                     if "CLOSE" in side and entry_px > 0:
+                                        exit_px = float(market.mid_price)
+                                        notional_cost = float(qty_str) * exit_px
+                                        # Estimate Binance Taker Fees (0.04%) for both entry and exit volume
+                                        trade_fees = (entry_px * float(qty_str) * 0.0004) + (notional_cost * 0.0004)
+                                        pnl = pnl - trade_fees  # Deduct fees from PnL
+                                        
+                                        entry_t = getattr(self.portfolio_state.positions[sym], 'entry_time', 0.0)
+                                        if entry_t > 0:
+                                            hold_dur = int(time.time() - entry_t)
+                                        
                                         # --- SHARPE RATIO & ASYMMETRIC REWARD UPGRADE ---
                                         if roi < 0:
                                             # Drawdown Penalty: Heavy punishment for closing at a loss
@@ -797,8 +811,11 @@ class ProductionTradingBot:
                                     elif "OPEN" in side:
                                         # Limit Maker fee penalty proxy for opening a trade
                                         notional_cost = float(qty_str) * market.mid_price
-                                        imm_reward = -(notional_cost * 0.0002) # 0.02% fee penalty
+                                        trade_fees = notional_cost * 0.0002
+                                        imm_reward = -trade_fees # 0.02% fee penalty
                                         
+                                    pos_after = float(self.portfolio_state.positions[sym].quantity)
+                                    
                                     # Record Experience
                                     exp_data = {
                                         "experience_id": str(uuid.uuid4()),
@@ -806,18 +823,29 @@ class ProductionTradingBot:
                                         "symbol": sym,
                                         "market_state": seq, # Save full 2D sequence [300, 108] so the AI has the full movie for this specific trade!
                                         "macro_state": None, 
-                                        "portfolio_state": None, 
+                                        "portfolio_state": {
+                                            "free_margin": float(self.portfolio_state.free_margin),
+                                            "total_unrealized_pnl": float(self.portfolio_state.total_unrealized_pnl)
+                                        },
                                         "derivatives_state": {
                                             "target_size": float(target_size),
                                             "price_offset": float(price_offset)
                                         },
                                         "position_before": float(pos.quantity),
+                                        "position_after": pos_after,
                                         "entry_price": float(pos.entry_price),
+                                        "exit_price": exit_px,
+                                        "leverage": int(pos_leverage),
+                                        "margin": float(margin_used),
+                                        "fees": float(trade_fees) if trade_fees else 0.0,
+                                        "holding_duration": hold_dur,
                                         "action": side,
+                                        "action_probability": float(confidence),
                                         "confidence": float(confidence),
                                         "model_version": "v1",
                                         "reward": float(imm_reward),
-                                        "realized_pnl": float(imm_pnl)
+                                        "realized_pnl": float(imm_pnl),
+                                        "unrealized_pnl": 0.0
                                     }
                                     experience_payload = msgpack.packb(
                                         exp_data,

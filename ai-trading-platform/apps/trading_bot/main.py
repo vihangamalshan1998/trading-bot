@@ -829,6 +829,15 @@ class ProductionTradingBot:
                                     )
                                 except Exception as e:
                                     logger.error(f"[{sym}] ORDER/EXPERIENCE FAILED: {e}")
+                                    if "-4118" in str(e) or "ReduceOnly Order Failed" in str(e):
+                                        logger.warning(f"[{sym}] Ghost limit order detected. Clearing order book to unstuck AI.")
+                                        try:
+                                            await self.binance.cancel_all_orders(sym)
+                                            # Clean up local active orders tracking to match reality
+                                            if sym in self.active_orders:
+                                                del self.active_orders[sym]
+                                        except Exception as cancel_e:
+                                            logger.error(f"[{sym}] Failed to clear ghost orders: {cancel_e}")
                                     
                             else:
                                 logger.info(f"[{sym}] NO ORDER (Blocked by final safety gate): {side} {qty_str}")

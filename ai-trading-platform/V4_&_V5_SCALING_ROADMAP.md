@@ -197,3 +197,35 @@ If during the scaling phases it becomes apparent that the AI's standard 25-minut
 *   **Math:** 300 frames × 15 seconds = 4,500 seconds.
 *   **Result:** The sequence remains exactly 300 frames long (keeping the database small and training lightning-fast), but that sequence now covers **1 Hour and 15 Minutes** of market action!
 *   **Recommendation:** This is the industry-standard way to scale LSTM vision without hardware penalties. Use this if the AI struggles with market noise in V3/V4.
+
+---
+
+## Appendix: Upgrading the Brain Architecture (Increasing Synapses)
+
+If you decide the AI needs a "bigger brain" (more synapses/parameters) to understand more complex data in V4 or V5, you can easily scale the mathematical architecture inside `apps/research/model.py`.
+
+### Method 1: Make the Brain "Wider" (Increase Hidden Dimension)
+The default architecture processes 256 hidden connections at a time. Increasing this expands the parameter count massively.
+*   **Action:** Modify the `SingleSymbolActorCritic` constructor.
+    ```python
+    # Current (471k parameters, 1.8MB)
+    def __init__(self, input_dim: int = 200, hidden_dim: int = 256):
+    
+    # Upgraded (~1.5M parameters)
+    def __init__(self, input_dim: int = 200, hidden_dim: int = 512):
+    ```
+
+### Method 2: Make the Brain "Deeper" (Stacking LSTM Layers)
+Adding layers allows the AI to learn higher-level abstract concepts (e.g., Layer 1 detects price drops, Layer 2 detects if volume matches, Layer 3 makes the final decision).
+*   **Action:** Modify the LSTM core definition.
+    ```python
+    # Current (1 Layer)
+    self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, batch_first=True)
+    
+    # Upgraded (2 Layers stacked, +500k parameters)
+    self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, batch_first=True, num_layers=2)
+    ```
+
+> [!WARNING]
+> **THE GOLDEN RULE OF UPGRADING:** If you change `hidden_dim` or `num_layers`, you **MUST delete your current `model_v1.pt` file**. 
+> The old 1.8MB mathematical grid is physically shaped for 256 neurons. If you change the code, the old grid will literally not fit inside the new architecture, causing a PyTorch `Shape Mismatch Error`. Upgrading the brain means the AI must be reborn and restart its training from scratch.

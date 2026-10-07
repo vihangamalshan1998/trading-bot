@@ -229,3 +229,23 @@ Adding layers allows the AI to learn higher-level abstract concepts (e.g., Layer
 > [!WARNING]
 > **THE GOLDEN RULE OF UPGRADING:** If you change `hidden_dim` or `num_layers`, you **MUST delete your current `model_v1.pt` file**. 
 > The old 1.8MB mathematical grid is physically shaped for 256 neurons. If you change the code, the old grid will literally not fit inside the new architecture, causing a PyTorch `Shape Mismatch Error`. Upgrading the brain means the AI must be reborn and restart its training from scratch.
+
+---
+
+## V4/V5 DATA LIFECYCLE & CONTINUOUS LEARNING ARCHITECTURE
+
+To prevent Catastrophic Forgetting and manage server disk space during continuous live training, V4 and V5 must implement the **"Golden Batch + Rolling Buffer"** architecture.
+
+### 1. Data Segregation
+*   **The Live Buffer (6 Months):** A rolling window containing the last 6 months of everyday live market data. Any everyday data older than 6 months and 1 day is permanently deleted from the active server via an automated pruning script to save disk space.
+*   **The Golden Batch (Permanent Vault):** A tiny dataset consisting of only the most extreme market conditions (e.g., massive flash crashes, 300% volume spikes, trades with PNL > +200 or < -100). This dataset has no expiration date and is never deleted.
+
+### 2. The Data Loading Strategy (90/10 Ratio)
+When the PPO agent trains on live data, the data loader must fetch data from both sources:
+1.  **Oversampling:** Because the Golden Batch is extremely small compared to the Live Buffer, the data loader must intentionally duplicate (oversample) the Golden Batch rows so they make up exactly **10%** of every training batch. 
+2.  **Shuffling:** The 10% Golden Data and 90% Live Data must be perfectly mixed/shuffled to prevent sequential bias.
+3.  **Deduplication:** The data loader must run `.drop_duplicates(subset=['id'])` to ensure no overlapping experiences are accidentally fed to the network.
+
+### 3. Preventing Overfitting (Epoch Control)
+Because the Golden Batch is oversampled, training the neural network for too many epochs will cause it to memorize specific past trades rather than learning the underlying mathematical rules.
+*   **Solution:** Keep PPO training epochs strictly low (e.g., 3 to 5 epochs per update). The fact that the 90% Live Buffer changes slightly every single day acts as a natural regularization mechanism that prevents the AI from memorizing the static 10% Golden Batch.

@@ -57,7 +57,7 @@ def extract_golden_batch():
                 AND reward_5m IS NOT NULL /* GUARANTEE: Only extract fully graded/marked data */
                 AND (
                     /* The Whales: Massive absolute dollar amounts */
-                    (realized_pnl >= 200 OR realized_pnl <= -200) 
+                    (realized_pnl >= 150 OR realized_pnl <= -150) 
                     OR 
                     /* The Snipers: High percentage ROI with a minimum $50 floor */
                     (

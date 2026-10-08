@@ -166,11 +166,10 @@ class PPOTrainer:
             sells = float((act_types < 0.0).sum().item()) / actual_size if actual_size > 0 else 0.0
 
         # MEMORY FIX: Now safe to delete large tensors - all scalar values already extracted above
-        import gc
         del states, actions, rewards, next_states, dones
         del old_action_preds, old_values, next_values
         del old_log_probs, safe_rewards, advantages, returns, actor_advantages
-        gc.collect()
+        # Note: Do NOT call gc.collect() here. It causes GIL deadlocks and freezes PyTorch.
             
         # Publish metrics to Redis asynchronously via asyncio.create_task or run_coroutine_threadsafe
         # We assume trainer loop might be sync or async. Let's provide a safe sync wrapper or fire-and-forget
@@ -296,14 +295,9 @@ async def run_training_loop():
             step += 1
             if step % 100 == 0:
                 logger.info(f"Completed {step} training steps. Refreshing cache and saving model...")
-                # Clear memory before pulling new data to prevent RAM spikes
-                import gc
-                trainer.buffer.cache.clear()
-                gc.collect()
                 
-                # Refresh cache from DB 
+                # Refresh cache from DB (sumtree rebuild automatically drops old references)
                 trainer.buffer.load_cache_from_db(limit=limit)
-                gc.collect() # Release old cache objects before new ones fully settle
                 
                 # Auto-delete data older than 30 days to save VPS disk space
                 if step % 1000 == 0:

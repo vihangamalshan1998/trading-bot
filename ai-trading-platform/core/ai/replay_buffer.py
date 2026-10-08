@@ -44,13 +44,10 @@ class ReplayBuffer:
                     if len(self.cache) > self.capacity:
                         self.cache.pop(0)
                         
-            # Periodic GC to prevent Python memory fragmentation over long runs
+            # We let Python handle its own garbage collection natively
             if not hasattr(self, '_write_count'):
                 self._write_count = 0
             self._write_count += 1
-            if self._write_count % 100 == 0:
-                import gc
-                gc.collect()
         except Exception as e:
             pass
 
@@ -58,9 +55,13 @@ class ReplayBuffer:
     def load_cache_from_db(self, limit: int = 10000):
         """Loads recent experiences from DB into RAM. Rebuilds SumTree after load."""
         try:
+            # Enforce 90% Normal / 10% Golden rule directly in the pull
+            normal_limit = int(limit * 0.90)
+            golden_limit = int(limit * 0.10)
+            
             with self.SessionLocal() as session:
                 # OPTIMIZATION FIX: Fetch IDs first to force MySQL to use the index, avoiding a massive filesort of JSON blobs
-                recent_ids_query = session.query(Experience.id).order_by(Experience.timestamp.desc()).limit(limit).all()
+                recent_ids_query = session.query(Experience.id).order_by(Experience.timestamp.desc()).limit(normal_limit).all()
                 recent_ids = [r[0] for r in recent_ids_query]
                 
                 if recent_ids:
@@ -77,7 +78,7 @@ class ReplayBuffer:
             from sqlalchemy.sql import text
             try:
                 # OPTIMIZATION FIX: Fetch IDs first to avoid massive filesort on RAND()
-                golden_ids_query = session.execute(text("SELECT id FROM golden_experiences ORDER BY RAND() LIMIT 500")).fetchall()
+                golden_ids_query = session.execute(text(f"SELECT id FROM golden_experiences ORDER BY RAND() LIMIT {golden_limit}")).fetchall()
                 golden_ids = [r[0] for r in golden_ids_query]
                 
                 if golden_ids:
@@ -246,14 +247,28 @@ class ReplayBuffer:
                     idx = -1
                     
                 if idx != -1:
-                    # It's in the cache. The bot ticks every ~5 seconds, so:
-                    # 5 min  = 300s  / 5s per tick = 60 cache slots
-                    # 1 hour = 3600s / 5s per tick = 720 cache slots  
-                    # 4 hour = 14400s/ 5s per tick = 2880 cache slots
+                    # BUG FIX (User Spotted!): Filter by the EXACT same coin (symbol)
+                    # Because we trade 6 coins at once, 5 minutes of data spans ~360 database rows, not 60.
                     cache_len = len(self.cache)
-                    r_5m = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 60, cache_len)))
-                    r_1h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 720, cache_len)))
-                    r_4h = sum((self.cache[i].reward or 0.0) for i in range(idx, min(idx + 2880, cache_len)))
+                    r_5m = 0.0
+                    r_1h = 0.0
+                    r_4h = 0.0
+                    match_count = 0
+                    
+                    for i in range(idx, cache_len):
+                        # Only add the profit if it's the exact same coin
+                        if getattr(self.cache[i], 'symbol', None) == getattr(exp, 'symbol', None):
+                            r = self.cache[i].reward or 0.0
+                            if match_count < 60:   # 5 mins (60 ticks of THIS specific coin)
+                                r_5m += r
+                            if match_count < 720:  # 1 hour
+                                r_1h += r
+                            if match_count < 2880: # 4 hours
+                                r_4h += r
+                                
+                            match_count += 1
+                            if match_count >= 2880:
+                                break
                 else:
                     # Isolated rare DB sample that somehow wasn't graded yet (Edge case)
                     r_5m = r_1h = r_4h = (exp.reward or 0.0)

@@ -818,24 +818,25 @@ class ProductionTradingBot:
                                         if entry_t > 0:
                                             hold_dur = int(time.time() - entry_t)
                                         
-                                        # --- SHARPE RATIO & ASYMMETRIC REWARD UPGRADE ---
+                                        # --- ACCOUNT-AGNOSTIC REWARD UPGRADE ---
+                                        # Use ROI (Percentage) instead of absolute PnL so the AI 
+                                        # does not get confused when moving from $100k Testnet to $500 Live.
                                         if roi < 0:
                                             # Drawdown Penalty: Heavy punishment for closing at a loss
-                                            imm_reward = pnl * 2.5 
+                                            imm_reward = roi * 2.5 
                                         elif roi > 0 and roi < 1.0:
                                             # Time Decay Proxy: Punish tiny "lazy" wins (< 1% ROI)
                                             # Forces the AI to look for real momentum instead of micro-scalping
-                                            imm_reward = -abs(pnl * 0.5) 
+                                            imm_reward = -abs(roi * 0.5) 
                                         else:
                                             # Sniper Bonus: Huge reward for clean, high-momentum trades
-                                            imm_reward = pnl * 1.5
+                                            imm_reward = roi * 1.5
                                             
                                         imm_pnl = pnl
                                     elif "OPEN" in side:
-                                        # Limit Maker fee penalty proxy for opening a trade
-                                        notional_cost = float(qty_str) * market.mid_price
-                                        trade_fees = notional_cost * 0.0002
-                                        imm_reward = -trade_fees # 0.02% fee penalty
+                                        # Maker fee penalty (Standardized to ROI percentage to avoid scale-attachment)
+                                        # 0.04% fee * leverage penalty
+                                        imm_reward = -0.04 * pos_leverage
                                         
                                     pos_after = float(self.portfolio_state.positions[sym].quantity)
                                     

@@ -55,10 +55,19 @@ def extract_golden_batch():
                 WHERE id NOT IN (SELECT id FROM golden_experiences)
                 AND ((timestamp >= %s AND timestamp <= %s) OR (timestamp >= %s AND timestamp <= %s))
                 AND (
-                    (margin > 0 AND (realized_pnl / margin) >= %s) OR 
-                    (margin > 0 AND (realized_pnl / margin) <= %s) OR 
-                    (margin > 0 AND (reward_5m / margin) >= %s) OR 
-                    (margin > 0 AND (reward_5m / margin) <= %s)
+                    /* The Whales: Massive absolute dollar amounts */
+                    (realized_pnl >= 200 OR realized_pnl <= -200) 
+                    OR 
+                    /* The Snipers: High percentage ROI with a minimum $50 floor */
+                    (
+                        (realized_pnl >= 50 OR realized_pnl <= -50) 
+                        AND (
+                            (margin > 0 AND (realized_pnl / margin) >= %s) OR 
+                            (margin > 0 AND (realized_pnl / margin) <= %s) OR 
+                            (margin > 0 AND (reward_5m / margin) >= %s) OR 
+                            (margin > 0 AND (reward_5m / margin) <= %s)
+                        )
+                    )
                 );
             """
             

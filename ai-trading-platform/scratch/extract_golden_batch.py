@@ -54,6 +54,7 @@ def extract_golden_batch():
                 SELECT id FROM experiences 
                 WHERE id NOT IN (SELECT id FROM golden_experiences)
                 AND ((timestamp >= %s AND timestamp <= %s) OR (timestamp >= %s AND timestamp <= %s))
+                AND reward_5m IS NOT NULL /* GUARANTEE: Only extract fully graded/marked data */
                 AND (
                     /* The Whales: Massive absolute dollar amounts */
                     (realized_pnl >= 200 OR realized_pnl <= -200) 

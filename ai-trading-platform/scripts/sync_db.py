@@ -21,7 +21,7 @@ def sync_experiences():
     logger.info("Connecting to databases to sync new live trades...")
     try:
         # Local Laragon Database
-        local_conn = pymysql.connect(host="127.0.0.1", port=3306, user=LOCAL_USER, password=LOCAL_PASS, database=LOCAL_DB, read_timeout=30, connect_timeout=10)
+        local_conn = pymysql.connect(host="127.0.0.1", port=3306, user=LOCAL_USER, password=LOCAL_PASS, database=LOCAL_DB, read_timeout=300, connect_timeout=10)
     except Exception as e:
         logger.error(f"LOCAL Database Connection error: {e}")
         logger.error("Make sure Laragon MySQL is running!")
@@ -29,7 +29,7 @@ def sync_experiences():
 
     try:
         # Remote VPS Database (via SSH Tunnel on port 3307)
-        remote_conn = pymysql.connect(host="127.0.0.1", port=3307, user=REMOTE_USER, password=REMOTE_PASS, database=REMOTE_DB, read_timeout=30, connect_timeout=10)
+        remote_conn = pymysql.connect(host="127.0.0.1", port=3307, user=REMOTE_USER, password=REMOTE_PASS, database=REMOTE_DB, read_timeout=300, connect_timeout=10)
     except Exception as e:
         logger.error(f"REMOTE VPS Database Connection error: {e}")
         logger.error("Make sure the SSH tunnel is open and the VPS database password matches!")

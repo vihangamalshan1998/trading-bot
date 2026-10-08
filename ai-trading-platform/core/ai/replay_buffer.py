@@ -59,7 +59,15 @@ class ReplayBuffer:
         """Loads recent experiences from DB into RAM. Rebuilds SumTree after load."""
         try:
             with self.SessionLocal() as session:
-                recent = session.query(Experience).order_by(Experience.timestamp.desc()).limit(limit).all()
+                # OPTIMIZATION FIX: Fetch IDs first to force MySQL to use the index, avoiding a massive filesort of JSON blobs
+                recent_ids_query = session.query(Experience.id).order_by(Experience.timestamp.desc()).limit(limit).all()
+                recent_ids = [r[0] for r in recent_ids_query]
+                
+                if recent_ids:
+                    recent = session.query(Experience).filter(Experience.id.in_(recent_ids)).order_by(Experience.timestamp.desc()).all()
+                else:
+                    recent = []
+                    
                 self.cache = recent[::-1] # Reverse to chronological
             # Phase 4: Rebuild SumTree from new cache so priorities are fresh
             if self.capacity > 0 and len(self.cache) > 0:
@@ -68,10 +76,17 @@ class ReplayBuffer:
             # Phase 5: Golden Batch Integration (The 10% Permanent Memory)
             from sqlalchemy.sql import text
             try:
-                golden_records = session.query(Experience).from_statement(
-                    text("SELECT * FROM golden_experiences ORDER BY RAND() LIMIT 500")
-                ).all()
-                self.golden_cache = golden_records
+                # OPTIMIZATION FIX: Fetch IDs first to avoid massive filesort on RAND()
+                golden_ids_query = session.execute(text("SELECT id FROM golden_experiences ORDER BY RAND() LIMIT 500")).fetchall()
+                golden_ids = [r[0] for r in golden_ids_query]
+                
+                if golden_ids:
+                    format_strings = ','.join([':id_' + str(i) for i in range(len(golden_ids))])
+                    query = text(f"SELECT * FROM golden_experiences WHERE id IN ({format_strings})")
+                    params = {f"id_{i}": golden_ids[i] for i in range(len(golden_ids))}
+                    self.golden_cache = session.query(Experience).from_statement(query).params(**params).all()
+                else:
+                    self.golden_cache = []
             except Exception:
                 self.golden_cache = []
                 

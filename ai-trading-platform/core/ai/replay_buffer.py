@@ -21,6 +21,7 @@ class ReplayBuffer:
         
         # RAM Cache
         self.cache: List[Experience] = []
+        self.golden_cache: List[Experience] = []
         
         # Phase 4: PER SumTree — replaces slow ORDER BY ABS(reward) DB query.
         # Rebuilt every time cache is refreshed. O(log n) priority sampling.
@@ -63,6 +64,17 @@ class ReplayBuffer:
             # Phase 4: Rebuild SumTree from new cache so priorities are fresh
             if self.capacity > 0 and len(self.cache) > 0:
                 self.sumtree.rebuild_from_list(self.cache, alpha=0.6)
+                
+            # Phase 5: Golden Batch Integration (The 10% Permanent Memory)
+            from sqlalchemy.sql import text
+            try:
+                golden_records = session.query(Experience).from_statement(
+                    text("SELECT * FROM golden_experiences ORDER BY RAND() LIMIT 500")
+                ).all()
+                self.golden_cache = golden_records
+            except Exception:
+                self.golden_cache = []
+                
         except Exception as e:
             from core.logging.logger import logger
             import traceback
@@ -85,8 +97,9 @@ class ReplayBuffer:
     def sample(self, batch_size: int, 
                recent_pct: float = 0.3, 
                historical_pct: float = 0.2, 
-               rare_pct: float = 0.4, # UPGRADED: 40% Priority Experience Replay
-               random_pct: float = 0.1) -> List[Experience]:
+               rare_pct: float = 0.3, # 30% Priority Experience Replay
+               random_pct: float = 0.1,
+               golden_pct: float = 0.1) -> List[Experience]: # 10% Golden Batch
         """
         Samples a batch using configured categories to prevent catastrophic forgetting.
         """
@@ -96,12 +109,22 @@ class ReplayBuffer:
             
         n_recent = int(batch_size * recent_pct)
         n_rare = int(batch_size * rare_pct)
+        n_golden = int(batch_size * golden_pct)
         n_random = int(batch_size * random_pct)
-        n_historical = batch_size - n_recent - n_rare - n_random
+        n_historical = batch_size - n_recent - n_rare - n_golden - n_random
         
         batch = []
         
-        # 1. Recent (tail of cache)
+        # 1. Golden Batch (The 10% permanent anchor against Forgetting)
+        if hasattr(self, 'golden_cache') and len(self.golden_cache) > 0:
+            actual_golden = min(n_golden, len(self.golden_cache))
+            batch.extend(random.sample(self.golden_cache, actual_golden))
+            # If we don't have enough golden, shift the remainder to random
+            n_random += (n_golden - actual_golden)
+        else:
+            n_random += n_golden
+        
+        # 2. Recent (tail of cache)
         if len(self.cache) > 0:
             recent_pool = self.cache[-n_recent*5:] # Pool of recent items
             batch.extend(random.sample(recent_pool, min(n_recent, len(recent_pool))))
@@ -121,12 +144,30 @@ class ReplayBuffer:
         # 3. Random
         batch.extend(random.sample(self.cache, min(n_random, len(self.cache))))
         
-        # 4. Historical (random from entire DB)
+        # 5. Historical (random from entire DB)
         # BUG FIX: Never query the DB during the active training loop. It parses massive JSONs and freezes the thread.
         # The cache is already populated with thousands of rows via load_cache_from_db.
         batch.extend(random.sample(self.cache, min(n_historical, len(self.cache))))
+        
+        # 6. Deduplication (Safety Net)
+        # Ensure no overlapping experiences are accidentally fed
+        unique_batch = []
+        seen_ids = set()
+        for exp in batch:
+            if exp.id not in seen_ids:
+                seen_ids.add(exp.id)
+                unique_batch.append(exp)
+                
+        # 7. Fill missing slots (if deduplication removed anything)
+        missing = batch_size - len(unique_batch)
+        if missing > 0 and len(self.cache) > 0:
+            fallback_pool = [e for e in self.cache if e.id not in seen_ids]
+            if len(fallback_pool) >= missing:
+                unique_batch.extend(random.sample(fallback_pool, missing))
+            else:
+                unique_batch.extend(fallback_pool) # Add whatever is left
             
-        return batch
+        return unique_batch
 
     def _extract_sequence(self, exp: Experience, seq_len: int) -> List[List[float]]:
         # If the market_state is already a 2D movie (list of lists)

@@ -1,5 +1,5 @@
 import pymysql
-import pandas as pd
+import time
 from datetime import datetime
 
 # ==========================================
@@ -10,92 +10,118 @@ DB_USER = "root"
 DB_PASSWORD = ""
 DB_NAME = "ai_trading"
 
-# Set the time period you want to scan (in YYYY-MM-DD format)
-# You can change these dates before running!
 START_DATE = "2023-10-01" 
 END_DATE = "2026-11-01"
 
-# Define what an "Extreme" trade is (Using PERCENTAGES to scale perfectly!)
-# 0.10 means a 10% gain on the margin risked
-# -0.05 means a 5% loss on the margin risked
-MIN_WIN_PCT = 0.10    
-MAX_LOSS_PCT = -0.05  
+MIN_WIN_PCT = 0.20    
+MAX_LOSS_PCT = -0.10  
 # ==========================================
 
 def extract_golden_batch():
     print(f"Connecting to {DB_NAME} database...")
     try:
-        connection = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASSWORD, database=DB_NAME)
+        connection = pymysql.connect(
+            host=DB_HOST, 
+            user=DB_USER, 
+            password=DB_PASSWORD, 
+            database=DB_NAME,
+            cursorclass=pymysql.cursors.DictCursor
+        )
     except Exception as e:
         print(f"Database connection failed: {e}")
-        print("\nNote: Make sure your venv is activated and has the required packages:")
-        print("pip install pymysql pandas sqlalchemy")
         return
 
-    # Build the query
-    query = "SELECT * FROM experiences WHERE 1=1"
-    params = []
-    
-    if START_DATE and END_DATE:
-        # Convert dates to unix timestamps
-        start_ts = int(datetime.strptime(START_DATE, "%Y-%m-%d").timestamp())
-        end_ts = int(datetime.strptime(END_DATE, "%Y-%m-%d").timestamp())
-        
-        # We check both standard timestamps (seconds) and JS timestamps (milliseconds)
-        query += " AND ((timestamp >= %s AND timestamp <= %s) OR (timestamp >= %s AND timestamp <= %s))"
-        params.extend([start_ts, end_ts, start_ts * 1000, end_ts * 1000])
-
-    print(f"Scanning experiences from {START_DATE} to {END_DATE}...")
-    
     try:
-        df = pd.read_sql_query(query, connection, params=params)
+        with connection.cursor() as cursor:
+            # 1. Create the Golden Data table identical to experiences
+            print("Creating 'golden_experiences' table if it doesn't exist...")
+            cursor.execute("CREATE TABLE IF NOT EXISTS golden_experiences LIKE experiences;")
+            connection.commit()
+
+            start_ts = int(datetime.strptime(START_DATE, "%Y-%m-%d").timestamp())
+            end_ts = int(datetime.strptime(END_DATE, "%Y-%m-%d").timestamp())
+
+            print(f"Scanning experiences and inserting extreme trades natively inside MySQL (Ultra Fast)...")
+            start_time = time.time()
+            
+            # Prevent Locking! The Live Bot is constantly writing to `experiences`. 
+            # We must use READ UNCOMMITTED so we don't cause a lock timeout!
+            cursor.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;")
+            
+            # 2. Fetch ONLY the IDs first (Ultra Fast)
+            print("Querying for extreme trade IDs...")
+            select_ids_query = """
+                SELECT id FROM experiences 
+                WHERE id NOT IN (SELECT id FROM golden_experiences)
+                AND ((timestamp >= %s AND timestamp <= %s) OR (timestamp >= %s AND timestamp <= %s))
+                AND (
+                    (margin > 0 AND (realized_pnl / margin) >= %s) OR 
+                    (margin > 0 AND (realized_pnl / margin) <= %s) OR 
+                    (margin > 0 AND (reward_5m / margin) >= %s) OR 
+                    (margin > 0 AND (reward_5m / margin) <= %s)
+                );
+            """
+            
+            params = [
+                start_ts, end_ts, 
+                start_ts * 1000, end_ts * 1000, 
+                MIN_WIN_PCT, MAX_LOSS_PCT,
+                MIN_WIN_PCT, MAX_LOSS_PCT
+            ]
+            
+            cursor.execute(select_ids_query, params)
+            extreme_ids = [row['id'] for row in cursor.fetchall()]
+            
+            print(f"Found {len(extreme_ids)} extreme trades. Moving them one by one...")
+            
+            # 3. Pull each row into Python, then insert it (Bypasses MySQL Source Table Locks!)
+            rows_inserted = 0
+            for i, exp_id in enumerate(extreme_ids):
+                # Fetch row directly into Python memory
+                cursor.execute("SELECT * FROM experiences WHERE id = %s;", (exp_id,))
+                row_data = cursor.fetchone()
+                
+                if row_data:
+                    # Construct INSERT query dynamically based on the dictionary keys
+                    import json
+                    columns = ', '.join(row_data.keys())
+                    placeholders = ', '.join(['%s'] * len(row_data))
+                    
+                    insert_vals = []
+                    for val in row_data.values():
+                        if isinstance(val, (dict, list)):
+                            insert_vals.append(json.dumps(val))
+                        else:
+                            insert_vals.append(val)
+                    
+                    insert_query = f"INSERT IGNORE INTO golden_experiences ({columns}) VALUES ({placeholders});"
+                    cursor.execute(insert_query, tuple(insert_vals))
+                    rows_inserted += cursor.rowcount
+                
+                # Commit every 100 rows and print progress
+                if (i + 1) % 100 == 0:
+                    connection.commit()
+                    print(f"Progress: {i + 1} / {len(extreme_ids)} moved...")
+                    
+            connection.commit()
+            
+            elapsed = time.time() - start_time
+            
+            print("\n=================================")
+            print("        RESULTS SUMMARY          ")
+            print("=================================")
+            print(f"Execution Time: {elapsed:.2f} seconds")
+            print(f"New Golden Trades Extracted: {rows_inserted}")
+            print("=================================")
+            
+            print(f"\n[SUCCESS] Extracted new extreme trades to the 'golden_experiences' SQL table!")
+            print("You can now safely run the 30-day auto-pruning script on the 'experiences' table.")
+
     except Exception as e:
-        print(f"Error reading from database: {e}")
+        print(f"Error: {e}")
+        connection.rollback()
+    finally:
         connection.close()
-        return
-        
-    connection.close()
-
-    total_rows = len(df)
-    if total_rows == 0:
-        print("No trades found in this specific time period!")
-        return
-
-    # Protect against divide-by-zero if margin is 0
-    # Create a safe ROI column (realized_pnl / margin)
-    df['roi_pct'] = df.apply(
-        lambda row: (row['realized_pnl'] / row['margin']) if pd.notnull(row['margin']) and row['margin'] > 0 else 0, 
-        axis=1
-    )
-
-    # Filter for Extreme Wins and Extreme Losses based on PERCENTAGE
-    extreme_wins = df[df['roi_pct'] >= MIN_WIN_PCT]
-    extreme_losses = df[df['roi_pct'] <= MAX_LOSS_PCT]
-    
-    # Combine them to create the Golden Batch
-    golden_batch = pd.concat([extreme_wins, extreme_losses]).drop_duplicates(subset=['id'])
-
-    print("\n=================================")
-    print("        RESULTS SUMMARY          ")
-    print("=================================")
-    print(f"Total Trades Analyzed: {total_rows}")
-    print(f"Extreme Wins (>{int(MIN_WIN_PCT*100)}% ROI): {len(extreme_wins)}")
-    print(f"Extreme Losses (<{int(MAX_LOSS_PCT*100)}% ROI): {len(extreme_losses)}")
-    print(f"Total Golden Batch Candidates: {len(golden_batch)}")
-    print("=================================")
-    
-    if len(golden_batch) > 0:
-        # Save to CSV
-        output_file = f"data/golden_batch/golden_batch_extraction_{START_DATE}_to_{END_DATE}.csv"
-        
-        # Ensure the directory exists
-        import os
-        os.makedirs("data/golden_batch", exist_ok=True)
-        
-        golden_batch.to_csv(output_file, index=False)
-        print(f"\n[SUCCESS] Saved {len(golden_batch)} extreme trades to:")
-        print(f"-> {output_file}")
-        print("\nYou can now safely delete the boring everyday data from this period!")
 
 if __name__ == "__main__":
     extract_golden_batch()

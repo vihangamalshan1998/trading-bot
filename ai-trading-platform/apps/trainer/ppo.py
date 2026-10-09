@@ -244,19 +244,31 @@ async def run_training_loop():
         epochs = 4
         sleep_time = 0.0
         
-        # Start DB Auto-Syncer in a background thread so it doesn't pause training
+        # Start DB Auto-Syncer and Golden Extractor in a background thread so they don't pause training
         try:
             import threading
             import time
+            import subprocess
             from scripts.sync_db import sync_experiences
             
             def background_syncer():
-                logger.info("Background DB Syncer started!")
+                logger.info("Background DB Syncer & Golden Extractor started!")
                 while True:
                     try:
                         sync_experiences()
                     except Exception as e:
                         logger.error(f"Sync failed: {e}")
+                        
+                    try:
+                        # Automatically extract new golden experiences
+                        result = subprocess.run(["python", "scratch/extract_golden_batch.py"], capture_output=True, text=True)
+                        if "New Golden Trades Extracted: " in result.stdout:
+                            count_str = result.stdout.split("New Golden Trades Extracted: ")[1].split("\n")[0].strip()
+                            if count_str != "0":
+                                logger.info(f"⛏️ GOLDEN EXTRACTOR: Successfully secured {count_str} highly profitable trades into permanent memory!")
+                    except Exception as e:
+                        pass
+                        
                     time.sleep(15) # Check for new trades every 15 seconds
                     
             threading.Thread(target=background_syncer, daemon=True).start()
@@ -270,10 +282,24 @@ async def run_training_loop():
         epochs = 2
         sleep_time = 30.0
     
+    # 1. AUTO-BACKUP: Save the current good brain before we risk overwriting it
+    if local_mode:
+        import shutil
+        from datetime import datetime
+        model_path = "models/production/model_v1.pt"
+        if os.path.exists(model_path):
+            backup_name = f"models/production/model_v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
+            try:
+                shutil.copy2(model_path, backup_name)
+                logger.info(f"💾 Created pre-training backup: {backup_name}")
+            except Exception as e:
+                logger.error(f"Failed to create backup: {e}")
+
     trainer = PPOTrainer(model=model, limit=limit)
     logger.info("Starting continuous PPO training on historical/live data...")
     
     step = 0
+    push_count = 0
     last_push_time = 0.0
     try:
         while True:
@@ -294,20 +320,14 @@ async def run_training_loop():
 
             step += 1
             if step % 100 == 0:
-                logger.info(f"Completed {step} training steps. Refreshing cache and saving model...")
+                logger.info(f"Completed {step} training steps. Saving model and pushing to VPS...")
                 
-                # Refresh cache from DB (sumtree rebuild automatically drops old references)
-                trainer.buffer.load_cache_from_db(limit=limit)
-                
-                # Auto-delete data older than 30 days to save VPS disk space
-                if step % 1000 == 0:
-                    trainer.buffer.cleanup_old_data(days=30)
-                    
                 try:
                     registry.save_model(model)
                     
                     if local_mode and (time.time() - last_push_time > 300):
-                        logger.info("🚀 Pushing new Brain (model_v1.pt) to VPS in the background (max once per 5 min)...")
+                        push_count += 1
+                        logger.info(f"🚀 Pushing new Brain (model_v1.pt) to VPS in the background ({push_count}/6)...")
                         last_push_time = time.time()
                         import subprocess
                         subprocess.Popen(
@@ -315,6 +335,12 @@ async def run_training_loop():
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL
                         )
+                        
+                        # Auto-Shutdown after 6 successful pushes (approx 1 to 1.5 hours)
+                        if push_count >= 6:
+                            logger.info("✅ Successfully completed 6 Brain pushes. Auto-shutting down Master Trainer!")
+                            import sys
+                            sys.exit(0)
                     
                     # Schedule model update broadcast
                     try:
@@ -324,6 +350,14 @@ async def run_training_loop():
                         asyncio.run(trainer._publish_model_update())
                 except Exception as e:
                     logger.error(f"Failed to save model: {e}")
+                    
+                # Refresh cache AFTER saving, so the GC freeze doesn't block the actual deployment
+                logger.info("Refreshing RAM cache from DB (this may take a minute)...")
+                trainer.buffer.load_cache_from_db(limit=limit)
+                
+                # Auto-delete data older than 30 days to save VPS disk space
+                if step % 1000 == 0:
+                    trainer.buffer.cleanup_old_data(days=30)
                     
     except asyncio.CancelledError:
         logger.info("PPO Training Engine shutting down...")

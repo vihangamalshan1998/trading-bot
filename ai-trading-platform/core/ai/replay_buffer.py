@@ -253,21 +253,23 @@ class ReplayBuffer:
                     r_5m = 0.0
                     r_1h = 0.0
                     r_4h = 0.0
-                    match_count = 0
+                    t_start = getattr(exp, 'timestamp', 0)
                     
                     for i in range(idx, cache_len):
                         # Only add the profit if it's the exact same coin
                         if getattr(self.cache[i], 'symbol', None) == getattr(exp, 'symbol', None):
                             r = self.cache[i].reward or 0.0
-                            if match_count < 60:   # 5 mins (60 ticks of THIS specific coin)
+                            t_future = getattr(self.cache[i], 'timestamp', 0)
+                            
+                            # CRITICAL FIX: Use exact timestamps, NOT row counts!
+                            if t_future <= t_start + 300:
                                 r_5m += r
-                            if match_count < 720:  # 1 hour
+                            if t_future <= t_start + 3600:
                                 r_1h += r
-                            if match_count < 2880: # 4 hours
+                            if t_future <= t_start + 14400:
                                 r_4h += r
                                 
-                            match_count += 1
-                            if match_count >= 2880:
+                            if t_future > t_start + 14400:
                                 break
                 else:
                     # Isolated rare DB sample that somehow wasn't graded yet (Edge case)

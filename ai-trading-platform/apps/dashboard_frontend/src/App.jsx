@@ -602,14 +602,15 @@ function App() {
                     <th>SIZE</th>
                     <th>ENTRY PRICE</th>
                     <th>CLOSE PRICE</th>
-                    <th>PNL (ROI)</th>
+                    <th>GROSS PNL</th>
+                    <th>NET PNL (ROI)</th>
                     <th>DETAILS</th>
                   </tr>
                 </thead>
                 <tbody>
                   {tradeHistory.length === 0 ? (
                     <tr>
-                      <td colSpan="8" className="empty-text">No trade history found.</td>
+                      <td colSpan="9" className="empty-text">No trade history found.</td>
                     </tr>
                   ) : (
                     tradeHistory.map((trade, idx) => {
@@ -628,9 +629,16 @@ function App() {
                             </td>
                             <td>{trade.side.includes("CLOSE") ? `$${trade.price.toFixed(4)}` : '-'}</td>
                             <td>
+                              {trade.gross_pnl !== undefined ? (
+                                <span className={trade.gross_pnl >= 0 ? "profit" : "loss"}>
+                                  {trade.gross_pnl >= 0 ? '+' : ''}${Math.abs(trade.gross_pnl).toFixed(2)}
+                                </span>
+                              ) : '-'}
+                            </td>
+                            <td>
                               {trade.realized_pnl !== undefined ? (
-                                <span className={trade.realized_pnl > 0 ? "profit" : "loss"}>
-                                  ${trade.realized_pnl.toFixed(2)} ({trade.roi_pct > 0 ? '+' : ''}{trade.roi_pct.toFixed(2)}%)
+                                <span className={trade.realized_pnl >= 0 ? "profit" : "loss"}>
+                                  {trade.realized_pnl >= 0 ? '+' : ''}${Math.abs(trade.realized_pnl).toFixed(2)} ({trade.roi_pct >= 0 ? '+' : ''}{trade.roi_pct.toFixed(2)}%)
                                 </span>
                               ) : (
                                 '-'
@@ -642,7 +650,7 @@ function App() {
                           </tr>
                           {isExpanded && (
                             <tr className="accordion-details">
-                              <td colSpan="8">
+                              <td colSpan="9">
                                 <div className="details-container">
                                   <div className="detail-col">
                                     <strong>Trade Metadata</strong>

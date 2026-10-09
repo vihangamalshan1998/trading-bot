@@ -755,13 +755,22 @@ class ProductionTradingBot:
                                         close_px = market.mid_price
                                         qty_closed = float(qty_str)
                                         if side == "CLOSE_LONG":
-                                            pnl = (close_px - entry_px) * qty_closed
-                                            roi = ((close_px - entry_px) / entry_px) * 100 * pos_leverage
+                                            gross_pnl = (close_px - entry_px) * qty_closed
                                         else:
-                                            pnl = (entry_px - close_px) * qty_closed
-                                            roi = ((entry_px - close_px) / entry_px) * 100 * pos_leverage
+                                            gross_pnl = (entry_px - close_px) * qty_closed
+                                            
+                                        # Deduct Binance Taker Fees (0.04%) for both entry and exit
+                                        notional_cost_exit = qty_closed * close_px
+                                        dashboard_trade_fees = (entry_px * qty_closed * 0.0004) + (notional_cost_exit * 0.0004)
+                                        pnl = gross_pnl - dashboard_trade_fees
+                                        
+                                        # Calculate Net ROI
+                                        margin_used_for_trade = (entry_px * qty_closed) / pos_leverage
+                                        roi = (pnl / margin_used_for_trade) * 100 if margin_used_for_trade > 0 else 0.0
                                             
                                         trade_record["entry_price"] = entry_px
+                                        trade_record["gross_pnl"] = gross_pnl
+                                        trade_record["fees_paid"] = dashboard_trade_fees
                                         trade_record["realized_pnl"] = pnl
                                         trade_record["roi_pct"] = roi
                                         
@@ -812,7 +821,7 @@ class ProductionTradingBot:
                                         notional_cost = float(qty_str) * exit_px
                                         # Estimate Binance Taker Fees (0.04%) for both entry and exit volume
                                         trade_fees = (entry_px * float(qty_str) * 0.0004) + (notional_cost * 0.0004)
-                                        pnl = pnl - trade_fees  # Deduct fees from PnL
+                                        # pnl is already net of fees from above calculation
                                         
                                         entry_t = getattr(self.portfolio_state.positions[sym], 'entry_time', 0.0)
                                         if entry_t > 0:

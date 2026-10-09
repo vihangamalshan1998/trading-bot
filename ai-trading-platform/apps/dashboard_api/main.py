@@ -185,13 +185,21 @@ async def get_trade_history():
 @app.get("/api/logs/{bot_name}")
 async def get_bot_logs(bot_name: str):
     """Returns the last 50 lines of the requested bot's log file."""
-    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector", "reward_calculator"]
+    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector", "reward_calculator", "teacher_assistant"]
     if bot_name not in allowed_bots:
         return {"logs": ["Invalid bot name requested."]}
         
+    # Standard local path
     log_path = f"logs/{bot_name}.log"
+    
+    # If standard path doesn't exist, check PM2 log path (for VPS)
     if not os.path.exists(log_path):
-        return {"logs": [f"Log file not found: {log_path} (Bot may not have started yet)"]}
+        pm2_name = bot_name.replace('_', '-')
+        pm2_path = f"/root/.pm2/logs/{pm2_name}-out.log"
+        if os.path.exists(pm2_path):
+            log_path = pm2_path
+        else:
+            return {"logs": [f"Log file not found at {log_path} or PM2 {pm2_path} (Bot may not have started yet)"]}
         
     try:
         with open(log_path, "r", encoding="utf-8") as f:
@@ -203,13 +211,19 @@ async def get_bot_logs(bot_name: str):
 @app.get("/api/logs/download/{bot_name}")
 async def download_bot_logs(bot_name: str):
     """Downloads the full log file for the given bot."""
-    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector", "reward_calculator"]
+    allowed_bots = ["market_collector", "ai_trainer", "trading_bot", "whale_tracker", "statarb_collector", "reward_calculator", "teacher_assistant"]
     if bot_name not in allowed_bots:
         return {"error": "Invalid bot name requested."}
         
     log_path = f"logs/{bot_name}.log"
+    
     if not os.path.exists(log_path):
-        return {"error": "Log file not found"}
+        pm2_name = bot_name.replace('_', '-')
+        pm2_path = f"/root/.pm2/logs/{pm2_name}-out.log"
+        if os.path.exists(pm2_path):
+            log_path = pm2_path
+        else:
+            return {"error": "Log file not found"}
         
     return FileResponse(path=log_path, filename=f"{bot_name}.log", media_type="text/plain")
 

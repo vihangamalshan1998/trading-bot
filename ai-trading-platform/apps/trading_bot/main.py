@@ -824,8 +824,8 @@ class ProductionTradingBot:
                                         if roi < 0:
                                             # Drawdown Penalty: Heavy punishment for closing at a loss
                                             imm_reward = roi * 2.5 
-                                        elif roi > 0 and roi < 1.0:
-                                            # Time Decay Proxy: Punish tiny "lazy" wins (< 1% ROI)
+                                        elif roi > 0 and roi < 5.0: # CHANGED: Increased from 1.0 to 5.0
+                                            # Time Decay Proxy: Punish tiny "lazy" wins (< 5% ROI)
                                             # Forces the AI to look for real momentum instead of micro-scalping
                                             imm_reward = -abs(roi * 0.5) 
                                         else:

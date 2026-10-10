@@ -59,13 +59,26 @@ class ReplayBuffer:
             normal_limit = int(limit * 0.90)
             golden_limit = int(limit * 0.10)
             
+            recent_limit = int(normal_limit * 0.50)
+            historical_limit = normal_limit - recent_limit
+            
             with self.SessionLocal() as session:
-                # OPTIMIZATION FIX: Fetch IDs first to force MySQL to use the index, avoiding a massive filesort of JSON blobs
-                recent_ids_query = session.query(Experience.id).order_by(Experience.timestamp.desc()).limit(normal_limit).all()
+                from sqlalchemy.sql import text
+                
+                # OPTIMIZATION FIX: Fetch half Recent and half Random Historical to prevent overfitting to recent market conditions
+                recent_ids_query = session.query(Experience.id).order_by(Experience.timestamp.desc()).limit(recent_limit).all()
                 recent_ids = [r[0] for r in recent_ids_query]
                 
-                if recent_ids:
-                    recent = session.query(Experience).filter(Experience.id.in_(recent_ids)).order_by(Experience.timestamp.desc()).all()
+                try:
+                    historical_ids_query = session.execute(text(f"SELECT id FROM experiences ORDER BY RAND() LIMIT {historical_limit}")).fetchall()
+                    historical_ids = [r[0] for r in historical_ids_query]
+                except Exception:
+                    historical_ids = []
+                    
+                all_normal_ids = list(set(recent_ids + historical_ids))
+                
+                if all_normal_ids:
+                    recent = session.query(Experience).filter(Experience.id.in_(all_normal_ids)).order_by(Experience.timestamp.desc()).all()
                 else:
                     recent = []
                     

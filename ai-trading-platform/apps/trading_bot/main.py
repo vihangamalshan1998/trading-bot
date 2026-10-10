@@ -572,7 +572,7 @@ class ProductionTradingBot:
                     elif random.random() < 0.02:
                         # Exploration Noise (2% chance to explore a random strategy)
                         action_val = random.uniform(-1.0, 1.0)
-                        confidence = random.uniform(0.3, 1.0) # Ensure it passes the 0.3 threshold to trade
+                        confidence = random.uniform(0.65, 1.0) # Ensure it passes the 0.65 threshold to trade
                         target_size = random.uniform(0.1, 1.0)
                         price_offset = random.uniform(0.0, 1.0) # Limit Order Offset
                         logger.info(f"[{sym}] EXPLORING: Applying curiosity noise to discover new strategies.")
@@ -596,8 +596,8 @@ class ProductionTradingBot:
                         }
                         await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
                     
-                    if confidence < 0.3: 
-                        logger.info(f"[{sym}] SKIPPING (Low Confidence: {confidence:.2f})")
+                    if confidence < 0.65: 
+                        logger.info(f"[{sym}] SKIPPING (Low Confidence: {confidence:.2f} < 0.65)")
                         continue 
                         
                     margin_allocated = max(0, self.portfolio_state.free_margin) * target_size

@@ -596,13 +596,17 @@ class ProductionTradingBot:
                         }
                         await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
                     
-                    if confidence < 0.65: 
-                        logger.info(f"[{sym}] SKIPPING (Low Confidence: {confidence:.2f} < 0.65)")
+                    pos = self.portfolio_state.positions[sym]
+                    is_closing = (pos.quantity > 0 and action_val < -0.2) or (pos.quantity < 0 and action_val > 0.2)
+                    
+                    if not is_closing and confidence < 0.65: 
+                        logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.65)")
                         continue 
+                    elif is_closing and confidence < 0.30:
+                        logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < 0.30)")
+                        continue
                         
                     margin_allocated = max(0, self.portfolio_state.free_margin) * target_size
-                        
-                    pos = self.portfolio_state.positions[sym]
                     notional_requested = margin_allocated * pos.leverage
                     
                     side = "HOLD"

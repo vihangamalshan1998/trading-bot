@@ -290,6 +290,7 @@ class ReplayBuffer:
 
             # Action Mapping  (BUG FIX: this block is now INSIDE the for loop)
             target_size = exp.derivatives_state.get("target_size", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
+            price_offset = exp.derivatives_state.get("price_offset", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
             # GROUND CONFIDENCE IN REAL PROFIT (Replay Buffer Fix)
             # Ground-truth conviction based on whether the action actually generated net profit!
             net_return = getattr(exp, "realized_pnl", 0.0) or 0.0

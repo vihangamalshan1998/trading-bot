@@ -623,7 +623,6 @@ class ProductionTradingBot:
                     if side == "HOLD":
                         logger.info(f"[{sym}] HOLDING (Action Val: {action_val:.2f})")
                         
-                        import random
                         # CRITICAL FIX: Record HOLD experiences probabilistically (5% chance).
                         # If the AI never sees a HOLD in the training buffer, it forgets that
                         # holding is a valid option and collapses into 100% BUY or SELL.

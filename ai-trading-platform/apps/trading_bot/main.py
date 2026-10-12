@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import time
 import os
+import random
 import collections
 import msgpack  # Phase 1: Binary compression for experience messages
 from typing import Dict, Any
@@ -565,7 +566,7 @@ class ProductionTradingBot:
                             # Leverage amplifies PNL %
                             pnl_pct_leveraged = pnl_pct * pos_check.leverage
                             
-                            if pnl_pct_leveraged <= -0.10: # -10% HARD STOP LOSS
+                            if pnl_pct_leveraged <= -0.30: # -30% HARD STOP LOSS
                                 logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI.")
                                 hard_stop_triggered = True
                                 
@@ -575,6 +576,13 @@ class ProductionTradingBot:
                         confidence = 1.0
                         target_size = 0.0
                         price_offset = 0.0 # Force immediate execution (0 offset)
+                    elif random.random() < 0.02:
+                        # Curiosity Exploration (2% chance to explore novel strategies in Testnet)
+                        action_val = random.uniform(-1.0, 1.0)
+                        confidence = random.uniform(0.65, 1.0) # Ensure it passes the 0.65 threshold to trade
+                        target_size = random.uniform(0.1, 1.0)
+                        price_offset = random.uniform(0.0, 1.0) # Limit Order Offset
+                        logger.info(f"[{sym}] EXPLORING: Applying curiosity noise to discover new strategies.")
                     else:
                         # Deterministic Policy (Learned AI Weights)
                         action_val = action_logits[0]
@@ -750,7 +758,12 @@ class ProductionTradingBot:
                                         "quantity": float(qty_str),
                                         "price": market.mid_price,
                                         "confidence": float(confidence),
-                                        "order_id": actual_order_id
+                                        "order_id": actual_order_id,
+                                        "entry_price": entry_px if entry_px > 0 else market.mid_price,
+                                        "gross_pnl": 0.0,
+                                        "fees_paid": 0.0,
+                                        "realized_pnl": 0.0,
+                                        "roi_pct": 0.0
                                     }
                                     
                                     # Add Analytics for Closures

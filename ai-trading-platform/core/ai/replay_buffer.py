@@ -290,8 +290,29 @@ class ReplayBuffer:
 
             # Action Mapping  (BUG FIX: this block is now INSIDE the for loop)
             target_size = exp.derivatives_state.get("target_size", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
-            price_offset = exp.derivatives_state.get("price_offset", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
-            raw_confidence = (exp.confidence * 2.0) - 1.0 if exp.confidence is not None else 0.0
+            # GROUND CONFIDENCE IN REAL PROFIT (Replay Buffer Fix)
+            # Ground-truth conviction based on whether the action actually generated net profit!
+            net_return = getattr(exp, "realized_pnl", 0.0) or 0.0
+            fees = getattr(exp, "fees", 0.0) or 0.0
+            actual_profit = net_return - fees
+            
+            # Combine immediate trade net profit with 5m and 1h multi-horizon forward returns
+            if (actual_profit > 0 and r_5m >= 0) or (r_5m > 0 and r_1h > 0):
+                # Strong verified winner -> High confidence target [0.5 to 0.95]
+                raw_confidence = min(0.95, 0.4 + max(0.0, r_5m / 50.0))
+            elif actual_profit < 0 or (r_5m < 0 and r_1h < 0):
+                # Net loss or sustained drawdown -> Low confidence / skepticism target [-0.8 to -0.3]
+                raw_confidence = max(-0.8, -0.3 + min(0.0, r_5m / 50.0))
+            elif r_5m > 0:
+                # Moderate short-term scalp win -> Slight positive confidence
+                raw_confidence = 0.2
+            elif r_5m < 0:
+                # Mild negative drift
+                raw_confidence = -0.2
+            else:
+                # Neutral / flat
+                raw_confidence = 0.0
+                
             raw_target_size = (target_size * 2.0) - 1.0 if target_size > 0 else 0.0
             raw_price_offset = (price_offset * 2.0) - 1.0 if price_offset > 0 else 0.0
             

@@ -138,7 +138,8 @@ class PPOTrainer:
                 entropy = torch.tensor(0.0, device=action_preds.device)
                 
             entropy = torch.nan_to_num(entropy, nan=0.0) # Absolute safety net
-            entropy_coef = 0.01 # Standard PPO value. 0.15 was way too high and fought against the Actor learning a real policy.
+            # BOOSTED: Increased from 0.01 to 0.035 to break stubborn mode collapse (prevents permanent 100% SHORT bias)
+            entropy_coef = 0.035 
             
             loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
             

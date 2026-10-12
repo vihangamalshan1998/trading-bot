@@ -1017,7 +1017,10 @@ class ProductionTradingBot:
             tasks.append(asyncio.create_task(self.listen_whale(sym)))
             tasks.append(asyncio.create_task(self.listen_statarb(sym)))
             
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            await self.binance.close()
         
     def stop(self):
         self.running = False

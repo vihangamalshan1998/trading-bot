@@ -54,7 +54,9 @@ class ReplayBuffer:
             
     def load_cache_from_db(self, limit: int = 10000):
         """Loads recent experiences from DB into RAM. Rebuilds SumTree after load."""
+        from core.logging.logger import logger
         try:
+            logger.info(f"📥 Loading up to {limit} experiences from MySQL into RAM cache...")
             # Enforce 90% Normal / 10% Golden rule directly in the pull
             normal_limit = int(limit * 0.90)
             golden_limit = int(limit * 0.10)
@@ -65,8 +67,8 @@ class ReplayBuffer:
             with self.SessionLocal() as session:
                 from sqlalchemy.sql import text
                 
-                # OPTIMIZATION FIX: Fetch half Recent and half Random Historical to prevent overfitting to recent market conditions
-                recent_ids_query = session.query(Experience.id).order_by(Experience.timestamp.desc()).limit(recent_limit).all()
+                # OPTIMIZATION FIX: Fetch half Recent and half Random Historical using indexed id.desc()
+                recent_ids_query = session.query(Experience.id).order_by(Experience.id.desc()).limit(recent_limit).all()
                 recent_ids = [r[0] for r in recent_ids_query]
                 
                 try:
@@ -78,31 +80,33 @@ class ReplayBuffer:
                 all_normal_ids = list(set(recent_ids + historical_ids))
                 
                 if all_normal_ids:
-                    recent = session.query(Experience).filter(Experience.id.in_(all_normal_ids)).order_by(Experience.timestamp.desc()).all()
+                    # INDEXED LOOKUP: Order by primary key id.desc() to avoid multi-gigabyte disk filesort!
+                    recent = session.query(Experience).filter(Experience.id.in_(all_normal_ids)).order_by(Experience.id.desc()).all()
                 else:
                     recent = []
                     
                 self.cache = recent[::-1] # Reverse to chronological
-            # Phase 4: Rebuild SumTree from new cache so priorities are fresh
+                
+                # Golden Batch Integration (The 10% Permanent Memory)
+                try:
+                    golden_ids_query = session.execute(text(f"SELECT id FROM golden_experiences ORDER BY RAND() LIMIT {golden_limit}")).fetchall()
+                    golden_ids = [r[0] for r in golden_ids_query]
+                    
+                    if golden_ids:
+                        format_strings = ','.join([':id_' + str(i) for i in range(len(golden_ids))])
+                        query = text(f"SELECT * FROM golden_experiences WHERE id IN ({format_strings})")
+                        params = {f"id_{i}": golden_ids[i] for i in range(len(golden_ids))}
+                        self.golden_cache = session.query(Experience).from_statement(query).params(**params).all()
+                    else:
+                        self.golden_cache = []
+                except Exception:
+                    self.golden_cache = []
+                    
+            # Rebuild SumTree from new cache so priorities are fresh
             if self.capacity > 0 and len(self.cache) > 0:
                 self.sumtree.rebuild_from_list(self.cache, alpha=0.6)
                 
-            # Phase 5: Golden Batch Integration (The 10% Permanent Memory)
-            from sqlalchemy.sql import text
-            try:
-                # OPTIMIZATION FIX: Fetch IDs first to avoid massive filesort on RAND()
-                golden_ids_query = session.execute(text(f"SELECT id FROM golden_experiences ORDER BY RAND() LIMIT {golden_limit}")).fetchall()
-                golden_ids = [r[0] for r in golden_ids_query]
-                
-                if golden_ids:
-                    format_strings = ','.join([':id_' + str(i) for i in range(len(golden_ids))])
-                    query = text(f"SELECT * FROM golden_experiences WHERE id IN ({format_strings})")
-                    params = {f"id_{i}": golden_ids[i] for i in range(len(golden_ids))}
-                    self.golden_cache = session.query(Experience).from_statement(query).params(**params).all()
-                else:
-                    self.golden_cache = []
-            except Exception:
-                self.golden_cache = []
+            logger.info(f"✅ Replay buffer cache loaded successfully ({len(self.cache)} normal, {len(self.golden_cache)} golden trades in RAM)!")
                 
         except Exception as e:
             from core.logging.logger import logger

@@ -244,38 +244,6 @@ async def run_training_loop():
         limit = 2000
         epochs = 4
         sleep_time = 0.0
-        
-        # Start DB Auto-Syncer and Golden Extractor in a background thread so they don't pause training
-        try:
-            import threading
-            import time
-            import subprocess
-            from scripts.sync_db import sync_experiences
-            
-            def background_syncer():
-                logger.info("Background DB Syncer & Golden Extractor started!")
-                while True:
-                    try:
-                        sync_experiences()
-                    except Exception as e:
-                        logger.error(f"Sync failed: {e}")
-                        
-                    try:
-                        # Automatically extract new golden experiences
-                        result = subprocess.run(["python", "scratch/extract_golden_batch.py"], capture_output=True, text=True)
-                        if "New Golden Trades Extracted: " in result.stdout:
-                            count_str = result.stdout.split("New Golden Trades Extracted: ")[1].split("\n")[0].strip()
-                            if count_str != "0":
-                                logger.info(f"⛏️ GOLDEN EXTRACTOR: Successfully secured {count_str} highly profitable trades into permanent memory!")
-                    except Exception as e:
-                        pass
-                        
-                    time.sleep(15) # Check for new trades every 15 seconds
-                    
-            threading.Thread(target=background_syncer, daemon=True).start()
-        except Exception as e:
-            logger.error(f"Could not start background syncer: {e}")
-            
     else:
         logger.info("🐢 VPS MODE DETECTED: Running in STARVATION MODE (1 CPU Core, 300 RAM limit)")
         torch.set_num_threads(1)
@@ -296,8 +264,45 @@ async def run_training_loop():
             except Exception as e:
                 logger.error(f"Failed to create backup: {e}")
 
+    # 2. PRIORITY #1: Load Cache into RAM FIRST (Unobstructed, zero DB lock contention)
     trainer = PPOTrainer(model=model, limit=limit)
     logger.info("Starting continuous PPO training on historical/live data...")
+
+    # 3. PRIORITY #2: Start DB Auto-Syncer & Golden Extractor in background thread AFTER cache is in RAM
+    if local_mode:
+        try:
+            import threading
+            import time
+            import sys
+            import subprocess
+            from scripts.sync_db import sync_experiences
+            
+            def background_syncer():
+                logger.info("Background DB Syncer & Golden Extractor started!")
+                last_golden_time = 0.0
+                while True:
+                    try:
+                        sync_experiences()
+                    except Exception as e:
+                        logger.error(f"Sync failed: {e}")
+                        
+                    try:
+                        # Extract golden trades every 5 minutes (300s) to keep DB fast
+                        if time.time() - last_golden_time > 300:
+                            last_golden_time = time.time()
+                            result = subprocess.run([sys.executable, "scratch/extract_golden_batch.py"], capture_output=True, text=True)
+                            if "New Golden Trades Extracted: " in result.stdout:
+                                count_str = result.stdout.split("New Golden Trades Extracted: ")[1].split("\n")[0].strip()
+                                if count_str != "0":
+                                    logger.info(f"⛏️ GOLDEN EXTRACTOR: Successfully secured {count_str} highly profitable trades into permanent memory!")
+                    except Exception as e:
+                        pass
+                        
+                    time.sleep(30) # Check for new trades every 30 seconds
+                    
+            threading.Thread(target=background_syncer, daemon=True).start()
+        except Exception as e:
+            logger.error(f"Could not start background syncer: {e}")
     
     step = 0
     push_count = 0

@@ -88,16 +88,18 @@ def sync_experiences():
                 remote_cursor.execute(f"SELECT id, reward, reward_5m, reward_1h, reward_4h FROM experiences WHERE id IN ({format_strings}) AND (reward IS NOT NULL OR reward_4h IS NOT NULL)", tuple(chunk_ids))
                 vps_updates = remote_cursor.fetchall()
                 
-                for vps_row in vps_updates:
-                    local_cursor.execute("""
-                        UPDATE experiences 
-                        SET reward = %s, reward_5m = %s, reward_1h = %s, reward_4h = %s 
-                        WHERE id = %s
-                    """, (vps_row['reward'], vps_row['reward_5m'], vps_row['reward_1h'], vps_row['reward_4h'], vps_row['id']))
-                    updated_count += 1
+                if vps_updates:
+                    for vps_row in vps_updates:
+                        local_cursor.execute("""
+                            UPDATE experiences 
+                            SET reward = %s, reward_5m = %s, reward_1h = %s, reward_4h = %s 
+                            WHERE id = %s
+                        """, (vps_row['reward'], vps_row['reward_5m'], vps_row['reward_1h'], vps_row['reward_4h'], vps_row['id']))
+                        updated_count += 1
+                    # Commit each chunk immediately so row locks are released immediately
+                    local_conn.commit()
             
             if updated_count > 0:
-                local_conn.commit()
                 logger.info(f"Successfully synced {updated_count} delayed rewards from VPS to Laptop!")
 
     local_conn.close()

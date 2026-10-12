@@ -327,7 +327,7 @@ async def run_training_loop():
                     
                     if local_mode and (time.time() - last_push_time > 300):
                         push_count += 1
-                        logger.info(f"🚀 Pushing new Brain (model_v1.pt) to VPS in the background ({push_count}/6)...")
+                        logger.info(f"🚀 Pushing new Brain (model_v1.pt) to VPS in the background ({push_count}/20)...")
                         last_push_time = time.time()
                         import subprocess
                         subprocess.Popen(
@@ -337,8 +337,8 @@ async def run_training_loop():
                         )
                         
                         # Auto-Shutdown after 6 successful pushes (approx 1 to 1.5 hours)
-                        if push_count >= 6:
-                            logger.info("✅ Successfully completed 6 Brain pushes. Auto-shutting down Master Trainer!")
+                        if push_count >= 20:
+                            logger.info("✅ Successfully completed 20 Brain pushes. Auto-shutting down Master Trainer!")
                             import sys
                             sys.exit(0)
                     

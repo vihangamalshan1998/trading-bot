@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 REMOTE_USER = os.getenv("VPS_MYSQL_USER", "root")
-REMOTE_PASS = os.getenv("VPS_MYSQL_PASSWORD", "Vihanga@19980314")
+REMOTE_PASS = os.getenv("VPS_MYSQL_PASSWORD", "")
 REMOTE_DB = os.getenv("VPS_MYSQL_DATABASE", "ai_trading")
 
 conn = pymysql.connect(

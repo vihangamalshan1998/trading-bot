@@ -620,12 +620,15 @@ function App() {
                     tradeHistory.map((trade, idx) => {
                       const isExpanded = expandedTradeIdx === idx;
                       const isOpenTrade = trade.side && trade.side.includes("OPEN");
+                      const isLong = trade.side && trade.side.includes("LONG");
+                      const actionColor = isLong ? '#00e676' : '#ffb74d';
+                      
                       return (
                         <React.Fragment key={idx}>
                           <tr className={`accordion-row ${isExpanded ? 'expanded' : ''}`} onClick={() => toggleAccordion(idx)}>
                             <td>{new Date(trade.timestamp * 1000).toLocaleString()}</td>
                             <td className="symbol">{trade.symbol}</td>
-                            <td className={isOpenTrade ? "loss" : (trade.side.includes("LONG") ? "long" : "short")}>{trade.side}</td>
+                            <td style={{ color: actionColor, fontWeight: '700' }}>{trade.side}</td>
                             <td>{trade.quantity} {trade.symbol.replace('USDT', '')}</td>
                             <td>
                               {trade.entry_price 
@@ -634,16 +637,20 @@ function App() {
                             </td>
                             <td>{trade.side.includes("CLOSE") ? `$${trade.price.toFixed(4)}` : '-'}</td>
                             <td>
-                              {trade.gross_pnl !== undefined ? (
-                                <span className={isOpenTrade ? "loss" : (trade.gross_pnl >= 0 ? "profit" : "loss")}>
-                                  {isOpenTrade ? '' : (trade.gross_pnl >= 0 ? '+' : '')}${Math.abs(trade.gross_pnl).toFixed(2)}
+                              {isOpenTrade ? (
+                                <span style={{ color: '#8b9bb4' }}>— (Open)</span>
+                              ) : trade.gross_pnl !== undefined ? (
+                                <span className={trade.gross_pnl > 0 ? "profit" : trade.gross_pnl < 0 ? "loss" : ""} style={{ color: trade.gross_pnl === 0 ? '#a0a0a0' : undefined }}>
+                                  {trade.gross_pnl > 0 ? '+' : ''}${trade.gross_pnl.toFixed(2)}
                                 </span>
                               ) : '-'}
                             </td>
                             <td>
-                              {trade.realized_pnl !== undefined ? (
-                                <span className={isOpenTrade ? "loss" : (trade.realized_pnl >= 0 ? "profit" : "loss")}>
-                                  {isOpenTrade ? '' : (trade.realized_pnl >= 0 ? '+' : '')}${Math.abs(trade.realized_pnl).toFixed(2)} ({isOpenTrade ? '' : (trade.roi_pct >= 0 ? '+' : '')}{(trade.roi_pct || 0).toFixed(2)}%)
+                              {isOpenTrade ? (
+                                <span style={{ color: '#8b9bb4' }}>— (Open)</span>
+                              ) : trade.realized_pnl !== undefined ? (
+                                <span className={trade.realized_pnl > 0 ? "profit" : trade.realized_pnl < 0 ? "loss" : ""} style={{ color: trade.realized_pnl === 0 ? '#a0a0a0' : undefined }}>
+                                  {trade.realized_pnl > 0 ? '+' : ''}${trade.realized_pnl.toFixed(2)} ({trade.roi_pct > 0 ? '+' : ''}{(trade.roi_pct || 0).toFixed(2)}%)
                                 </span>
                               ) : (
                                 '-'

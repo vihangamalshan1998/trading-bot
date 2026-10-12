@@ -436,9 +436,21 @@ function App() {
                       {data.positions.map((pos, idx) => {
                         if (pos.quantity === 0) return null;
                         const isLong = pos.side.toUpperCase().includes("LONG");
-                        const pnlClass = pos.pnl >= 0 ? 'profit' : 'loss';
-                        const margin = pos.margin ? pos.margin : ((Math.abs(pos.quantity) * (pos.entryPrice || pos.entry_price || 0)) / (pos.leverage || 1));
-                        const roi = margin > 0 ? (pos.pnl / margin) * 100 : 0;
+                        const entryP = pos.entryPrice || pos.entry_price || 0;
+                        const notional = Math.abs(pos.quantity) * entryP;
+                        const margin = pos.margin ? pos.margin : (notional / (pos.leverage || 1));
+                        
+                        // Binance USDT-M Maker Fee: 0.02% open + 0.02% close = 0.04% round-trip
+                        const estFee = notional * 0.0004;
+                        const grossPnl = pos.pnl || 0;
+                        const netPnl = grossPnl - estFee;
+                        
+                        const netRoi = margin > 0 ? (netPnl / margin) * 100 : 0;
+                        const grossRoi = margin > 0 ? (grossPnl / margin) * 100 : 0;
+                        
+                        const netPnlClass = netPnl >= 0 ? 'profit' : 'loss';
+                        const grossPnlClass = grossPnl >= 0 ? 'profit' : 'loss';
+                        
                         return (
                           <div key={idx} className="position-card">
                             <div className="pos-header" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
@@ -451,18 +463,20 @@ function App() {
                                 <span>{Math.abs(pos.quantity).toFixed(4)} / ${margin.toFixed(2)}</span>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                                <span style={{ color: '#888' }}>PnL (ROI)</span>
-                                <span className={pnlClass} style={{ fontWeight: 'bold' }}>
-                                  {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT <span style={{ fontSize: '0.8rem', opacity: 0.9 }}>({roi >= 0 ? '+' : ''}{roi.toFixed(2)}%)</span>
+                                <span style={{ color: '#888' }}>Net PnL (After Fee)</span>
+                                <span className={netPnlClass} style={{ fontWeight: 'bold' }}>
+                                  {netPnl >= 0 ? '+' : ''}{netPnl.toFixed(2)} USDT <span style={{ fontSize: '0.8rem', opacity: 0.9 }}>({netRoi >= 0 ? '+' : ''}{netRoi.toFixed(2)}%)</span>
                                 </span>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                <span style={{ color: '#888' }}>Entry Price</span>
-                                <span>${pos.entryPrice ? pos.entryPrice.toFixed(4) : pos.entry_price ? pos.entry_price.toFixed(4) : '0.00'}</span>
+                                <span style={{ color: '#888' }}>Entry / Liq Price</span>
+                                <span>${entryP.toFixed(4)} / <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span></span>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                                <span style={{ color: '#888' }}>Liq Price</span>
-                                <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span>
+                                <span style={{ color: '#888' }}>Gross PnL (Fee: -${estFee.toFixed(2)})</span>
+                                <span className={grossPnlClass} style={{ fontSize: '0.8rem' }}>
+                                  {grossPnl >= 0 ? '+' : ''}{grossPnl.toFixed(2)} USDT ({grossRoi >= 0 ? '+' : ''}{grossRoi.toFixed(2)}%)
+                                </span>
                               </div>
                             </div>
                             <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.1)', fontSize: '0.75rem', color: '#a0a0a0', textAlign: 'center' }}>
@@ -556,9 +570,21 @@ function App() {
                   {data.positions.map((pos, idx) => {
                     if (pos.quantity === 0) return null;
                     const isLong = pos.side.toUpperCase().includes("LONG");
-                    const pnlClass = pos.pnl >= 0 ? 'profit' : 'loss';
-                    const margin = pos.margin ? pos.margin : ((Math.abs(pos.quantity) * (pos.entryPrice || pos.entry_price || 0)) / (pos.leverage || 1));
-                    const roi = margin > 0 ? (pos.pnl / margin) * 100 : 0;
+                    const entryP = pos.entryPrice || pos.entry_price || 0;
+                    const notional = Math.abs(pos.quantity) * entryP;
+                    const margin = pos.margin ? pos.margin : (notional / (pos.leverage || 1));
+                    
+                    // Binance USDT-M Maker Fee: 0.02% open + 0.02% close = 0.04% round-trip
+                    const estFee = notional * 0.0004;
+                    const grossPnl = pos.pnl || 0;
+                    const netPnl = grossPnl - estFee;
+                    
+                    const netRoi = margin > 0 ? (netPnl / margin) * 100 : 0;
+                    const grossRoi = margin > 0 ? (grossPnl / margin) * 100 : 0;
+                    
+                    const netPnlClass = netPnl >= 0 ? 'profit' : 'loss';
+                    const grossPnlClass = grossPnl >= 0 ? 'profit' : 'loss';
+                    
                     return (
                       <div key={idx} className="position-card">
                         <div className="pos-header" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
@@ -571,18 +597,20 @@ function App() {
                             <span>{Math.abs(pos.quantity).toFixed(4)} / ${margin.toFixed(2)}</span>
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                            <span style={{ color: '#888' }}>PnL (ROI)</span>
-                            <span className={pnlClass} style={{ fontWeight: 'bold' }}>
-                              {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT <span style={{ fontSize: '0.8rem', opacity: 0.9 }}>({roi >= 0 ? '+' : ''}{roi.toFixed(2)}%)</span>
+                            <span style={{ color: '#888' }}>Net PnL (After Fee)</span>
+                            <span className={netPnlClass} style={{ fontWeight: 'bold' }}>
+                              {netPnl >= 0 ? '+' : ''}{netPnl.toFixed(2)} USDT <span style={{ fontSize: '0.8rem', opacity: 0.9 }}>({netRoi >= 0 ? '+' : ''}{netRoi.toFixed(2)}%)</span>
                             </span>
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ color: '#888' }}>Entry Price</span>
-                            <span>${pos.entryPrice ? pos.entryPrice.toFixed(4) : pos.entry_price ? pos.entry_price.toFixed(4) : '0.00'}</span>
+                            <span style={{ color: '#888' }}>Entry / Liq Price</span>
+                            <span>${entryP.toFixed(4)} / <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span></span>
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                            <span style={{ color: '#888' }}>Liq Price</span>
-                            <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span>
+                            <span style={{ color: '#888' }}>Gross PnL (Fee: -${estFee.toFixed(2)})</span>
+                            <span className={grossPnlClass} style={{ fontSize: '0.8rem' }}>
+                              {grossPnl >= 0 ? '+' : ''}{grossPnl.toFixed(2)} USDT ({grossRoi >= 0 ? '+' : ''}{grossRoi.toFixed(2)}%)
+                            </span>
                           </div>
                         </div>
                         <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.1)', fontSize: '0.75rem', color: '#a0a0a0', textAlign: 'center' }}>

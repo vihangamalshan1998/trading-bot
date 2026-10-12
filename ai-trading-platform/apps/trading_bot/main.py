@@ -504,6 +504,14 @@ class ProductionTradingBot:
                                         await self.redis.redis.lpush("dashboard:trade_history", json.dumps(self.active_orders[sym]['trade_record']))
                                         await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                         
+                                    # CRITICAL FIX: Publish experience to Redis ONLY WHEN CONFIRMED FILLED!
+                                    # Prevents phantom experiences from entering training buffer if cancelled!
+                                    if 'experience_payload' in self.active_orders[sym]:
+                                        await redis_manager.publish_binary(
+                                            "experience:completed",
+                                            self.active_orders[sym]['experience_payload'],
+                                        )
+                                        
                                     del self.active_orders[sym]
                                     
                                     # No need to sync position here. We optimistically updated it when the order was placed.
@@ -557,27 +565,18 @@ class ProductionTradingBot:
                             # Leverage amplifies PNL %
                             pnl_pct_leveraged = pnl_pct * pos_check.leverage
                             
-                            # if pnl_pct_leveraged <= -0.10: # -10% HARD STOP LOSS
-                            #     logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI.")
-                            #     hard_stop_triggered = True
+                            if pnl_pct_leveraged <= -0.10: # -10% HARD STOP LOSS
+                                logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI.")
+                                hard_stop_triggered = True
                                 
-                    import random
-                    
                     if hard_stop_triggered:
-                        # Force a MARKET CLOSE
+                        # Force an immediate MARKET CLOSE
                         action_val = -1.0 if pos_check.quantity > 0 else 1.0
                         confidence = 1.0
                         target_size = 0.0
                         price_offset = 0.0 # Force immediate execution (0 offset)
-                    elif random.random() < 0.02:
-                        # Exploration Noise (2% chance to explore a random strategy)
-                        action_val = random.uniform(-1.0, 1.0)
-                        confidence = random.uniform(0.65, 1.0) # Ensure it passes the 0.65 threshold to trade
-                        target_size = random.uniform(0.1, 1.0)
-                        price_offset = random.uniform(0.0, 1.0) # Limit Order Offset
-                        logger.info(f"[{sym}] EXPLORING: Applying curiosity noise to discover new strategies.")
                     else:
-                        # Deterministic Policy (85% chance to use learned weights)
+                        # Deterministic Policy (Learned AI Weights)
                         action_val = action_logits[0]
                         confidence = (action_logits[1] + 1.0) / 2.0
                         target_size = (action_logits[2] + 1.0) / 2.0
@@ -888,10 +887,15 @@ class ProductionTradingBot:
                                         exp_data,
                                         use_bin_type=True,
                                     )
-                                    await redis_manager.publish_binary(
-                                        "experience:completed",
-                                        experience_payload,
-                                    )
+                                    if hard_stop_triggered:
+                                        # Market order executed immediately
+                                        await redis_manager.publish_binary(
+                                            "experience:completed",
+                                            experience_payload,
+                                        )
+                                    elif sym in self.active_orders:
+                                        # Limit order: attach to active_orders to publish ONLY when filled!
+                                        self.active_orders[sym]['experience_payload'] = experience_payload
                                 except Exception as e:
                                     logger.error(f"[{sym}] ORDER/EXPERIENCE FAILED: {e}")
                                     if "-4118" in str(e) or "ReduceOnly Order Failed" in str(e):

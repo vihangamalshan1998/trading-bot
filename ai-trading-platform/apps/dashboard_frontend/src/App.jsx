@@ -437,21 +437,23 @@ function App() {
                         if (pos.quantity === 0) return null;
                         const isLong = pos.side.toUpperCase().includes("LONG");
                         const pnlClass = pos.pnl >= 0 ? 'profit' : 'loss';
+                        const margin = pos.margin ? pos.margin : ((Math.abs(pos.quantity) * (pos.entryPrice || pos.entry_price || 0)) / (pos.leverage || 1));
+                        const roi = margin > 0 ? (pos.pnl / margin) * 100 : 0;
                         return (
-                          <div key={idx} className={`position-card ${isLong ? 'long' : 'short'}`}>
+                          <div key={idx} className="position-card">
                             <div className="pos-header" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                               <span className="symbol" style={{ fontWeight: 'bold' }}>{pos.symbol} <span style={{ fontSize: '0.8rem', color: '#888' }}>{pos.leverage}x</span></span>
-                              <span className="side">{pos.side}</span>
+                              <span className={`side ${isLong ? 'long' : 'short'}`}>{pos.side}</span>
                             </div>
                             <div className="pos-details" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem' }}>
                               <div style={{ display: 'flex', flexDirection: 'column' }}>
                                 <span style={{ color: '#888' }}>Size / Margin</span>
-                                <span>{Math.abs(pos.quantity).toFixed(4)} / ${pos.margin ? pos.margin.toFixed(2) : ((Math.abs(pos.quantity) * (pos.entryPrice || pos.entry_price || 0)) / (pos.leverage || 1)).toFixed(2)}</span>
+                                <span>{Math.abs(pos.quantity).toFixed(4)} / ${margin.toFixed(2)}</span>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                                <span style={{ color: '#888' }}>PnL</span>
+                                <span style={{ color: '#888' }}>PnL (ROI)</span>
                                 <span className={pnlClass} style={{ fontWeight: 'bold' }}>
-                                  {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT
+                                  {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT <span style={{ fontSize: '0.8rem', opacity: 0.9 }}>({roi >= 0 ? '+' : ''}{roi.toFixed(2)}%)</span>
                                 </span>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column' }}>
@@ -555,21 +557,23 @@ function App() {
                     if (pos.quantity === 0) return null;
                     const isLong = pos.side.toUpperCase().includes("LONG");
                     const pnlClass = pos.pnl >= 0 ? 'profit' : 'loss';
+                    const margin = pos.margin ? pos.margin : ((Math.abs(pos.quantity) * (pos.entryPrice || pos.entry_price || 0)) / (pos.leverage || 1));
+                    const roi = margin > 0 ? (pos.pnl / margin) * 100 : 0;
                     return (
-                      <div key={idx} className={`position-card ${isLong ? 'long' : 'short'}`}>
+                      <div key={idx} className="position-card">
                         <div className="pos-header" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                           <span className="symbol" style={{ fontWeight: 'bold' }}>{pos.symbol} <span style={{ fontSize: '0.8rem', color: '#888' }}>{pos.leverage}x</span></span>
-                          <span className="side">{pos.side}</span>
+                          <span className={`side ${isLong ? 'long' : 'short'}`}>{pos.side}</span>
                         </div>
                         <div className="pos-details" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem' }}>
                           <div style={{ display: 'flex', flexDirection: 'column' }}>
                             <span style={{ color: '#888' }}>Size / Margin</span>
-                            <span>{Math.abs(pos.quantity).toFixed(4)} / ${pos.margin ? pos.margin.toFixed(2) : ((Math.abs(pos.quantity) * (pos.entryPrice || pos.entry_price || 0)) / (pos.leverage || 1)).toFixed(2)}</span>
+                            <span>{Math.abs(pos.quantity).toFixed(4)} / ${margin.toFixed(2)}</span>
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                            <span style={{ color: '#888' }}>PnL</span>
+                            <span style={{ color: '#888' }}>PnL (ROI)</span>
                             <span className={pnlClass} style={{ fontWeight: 'bold' }}>
-                              {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT
+                              {pos.pnl >= 0 ? '+' : ''}{pos.pnl.toFixed(2)} USDT <span style={{ fontSize: '0.8rem', opacity: 0.9 }}>({roi >= 0 ? '+' : ''}{roi.toFixed(2)}%)</span>
                             </span>
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column' }}>

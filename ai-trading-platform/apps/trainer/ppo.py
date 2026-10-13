@@ -377,31 +377,31 @@ async def run_training_loop():
     
     if local_mode:
         total_cores = os.cpu_count() or 4
-        # HARD CORE AFFINITY: Lock Windows scheduling strictly to Core 0 (Mask = 1).
-        # This physically stops Windows from waking up the other 7 threads!
+        # HARD CORE AFFINITY: Lock Windows scheduling strictly to Core 0 and Core 1 (Mask = 3).
+        # Gives 2x compute power while leaving 6 threads completely free for cooling.
         try:
             import ctypes
             handle = ctypes.windll.kernel32.GetCurrentProcess()
             ctypes.windll.kernel32.SetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-            ctypes.windll.kernel32.SetProcessAffinityMask(handle, 1)
+            ctypes.windll.kernel32.SetProcessAffinityMask(handle, 3)
             # Set Process Priority to BELOW_NORMAL (0x00004000)
             ctypes.windll.kernel32.SetPriorityClass(handle, 0x00004000)
-            logger.info("❄️ HARD AFFINITY APPLIED: Process locked strictly to 1 CPU core & BELOW_NORMAL priority.")
+            logger.info("❄️ BALANCED AFFINITY APPLIED: Process locked strictly to 2 CPU cores & BELOW_NORMAL priority.")
         except Exception as aff_e:
             logger.warning(f"Could not apply affinity mask: {aff_e}")
 
-        # PyTorch thread cap: 1 thread (Ultra-cool mode)
-        safe_threads = 1
+        # PyTorch thread cap: 2 threads (Balanced performance mode)
+        safe_threads = 2
         torch.set_num_threads(safe_threads)
         try:
             torch.set_num_interop_threads(1)
         except Exception:
             pass
 
-        logger.info(f"❄️ MAXIMUM COOLING ACTIVE: PyTorch restricted to {safe_threads} core with 2.0s rest cycles.")
+        logger.info(f"❄️ BALANCED COOLING ACTIVE: PyTorch running on {safe_threads} cores with 0.75s rest cycles.")
         limit = 2000
-        epochs = 4  # Halves mathematical workload to keep temperatures low
-        sleep_time = 2.0  # 2.0s cooling breather after every step (50% duty cycle)
+        epochs = 4  # Deep PPO passes per batch
+        sleep_time = 0.75  # 0.75s cooling breather after every step
     else:
         logger.info("🐢 VPS MODE DETECTED: Running in STARVATION MODE (1 CPU Core, 300 RAM limit)")
         torch.set_num_threads(1)

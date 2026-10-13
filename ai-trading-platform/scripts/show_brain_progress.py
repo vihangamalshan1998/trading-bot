@@ -26,17 +26,24 @@ def main():
         print("Tournament history is empty.")
         return
 
-    print("=" * 118)
-    print("                              AI BRAIN EVOLUTION & TOURNAMENT LEADERBOARD")
-    print("=" * 118)
+    total_width = 138
+    print("=" * total_width)
+    print("                                      AI BRAIN EVOLUTION & TOURNAMENT LEADERBOARD")
+    print("=" * total_width)
     header = (
-        f"{'#':<3} | {'DATE & TIME':<19} | {'VERSION':<18} | {'RESULT':<11} | "
-        f"{'SCORE DELTA':<17} | {'CRITIC MSE DELTA':<23} | {'SIM PNL':<9} | {'ENTROPY':<8}"
+        f"{'#':<3} | {'DATE & TIME':<19} | {'VERSION':<18} | {'RESULT':<10} | "
+        f"{'SCORE (NEW vs CHAMP)':<23} | {'CRITIC MSE (NEW vs CHAMP)':<24} | {'SIM PNL (NEW vs CHAMP)':<24} | {'ENTROPY':<8}"
     )
     print(header)
-    print("-" * 118)
+    print("-" * total_width)
 
     base_mse = None
+    promotions = 0
+    rejections = 0
+    active_champion = "baseline"
+    champ_peak_pnl = 0.0
+    champ_peak_score = 0.0
+
     for idx, h in enumerate(history, 1):
         c_score = h.get("challenger_score") or 0.0
         champ_score = h.get("champion_score") or 0.0
@@ -53,40 +60,59 @@ def main():
         if base_mse is None and c_mse > 0:
             base_mse = c_mse
 
-        # Result badge (safe ASCII)
+        # Track active champion and stats
+        if approved:
+            active_champion = ver
+            promotions += 1
+            if c_pnl > champ_peak_pnl:
+                champ_peak_pnl = c_pnl
+            if c_score > champ_peak_score:
+                champ_peak_score = c_score
+        else:
+            rejections += 1
+            if champ_pnl > champ_peak_pnl:
+                champ_peak_pnl = champ_pnl
+            if champ_score > champ_peak_score:
+                champ_peak_score = champ_score
+
+        # Format Columns
         if idx == 1 and "BASELINE" in reason:
             res_str = "[BASELINE]"
-            score_delta_str = f"{c_score:.2f} (Base)"
-            mse_delta_str = f"{c_mse:.2f} (Base Error)"
-            pnl_str = f"+{c_pnl:.2f}"
+            score_str = f"{c_score:.2f} (Base)"
+            mse_str = f"{c_mse:.2f} (Base Error)"
+            pnl_str = f"+{c_pnl:.2f} (Base PnL)"
         else:
             res_str = "[PROMOTED]" if approved else "[REJECTED]"
-            
-            # Score delta
+
+            # Score: Challenger vs Champion (Delta)
             d_score = c_score - champ_score
-            d_score_pct = (d_score / abs(champ_score) * 100) if champ_score else 0.0
             sign_s = "+" if d_score >= 0 else ""
-            score_delta_str = f"{sign_s}{d_score:.2f} ({sign_s}{d_score_pct:.1f}%)"
+            score_str = f"{c_score:.2f} vs {champ_score:.2f} ({sign_s}{d_score:.2f})"
 
-            # MSE delta (Lower is better)
+            # Critic MSE: Challenger vs Champion (Delta)
             d_mse = c_mse - champ_mse
-            d_mse_pct = (d_mse / champ_mse * 100) if champ_mse else 0.0
             sign_m = "+" if d_mse >= 0 else ""
-            indicator = "Better" if d_mse < 0 else "Worse"
-            mse_delta_str = f"{sign_m}{d_mse:.2f} ({sign_m}{d_mse_pct:.1f}% {indicator})"
+            mse_str = f"{c_mse:.2f} vs {champ_mse:.2f} ({sign_m}{d_mse:.2f})"
 
-            # PnL
-            sign_p = "+" if c_pnl >= 0 else ""
-            pnl_str = f"{sign_p}{c_pnl:.2f}"
+            # Sim PnL: Challenger vs Champion (Delta)
+            d_pnl = c_pnl - champ_pnl
+            sign_p = "+" if d_pnl >= 0 else ""
+            pnl_str = f"{c_pnl:.2f} vs {champ_pnl:.2f} ({sign_p}{d_pnl:.2f})"
 
         entropy_str = f"{entropy:.2f}"
         row = (
-            f"{idx:<3} | {date_str:<19} | {ver:<18} | {res_str:<11} | "
-            f"{score_delta_str:<17} | {mse_delta_str:<23} | {pnl_str:<9} | {entropy_str:<8}"
+            f"{idx:<3} | {date_str:<19} | {ver:<18} | {res_str:<10} | "
+            f"{score_str:<23} | {mse_str:<24} | {pnl_str:<24} | {entropy_str:<8}"
         )
         print(row)
 
-    print("=" * 118)
+    print("=" * total_width)
+
+    # Summary Statistics Bar
+    total_matches = len(history)
+    print(f"📊 SUMMARY: Total Tournaments: {total_matches} | Promoted to VPS: {promotions} ({promotions/total_matches*100:.1f}%) | Rejected by Safety Gate: {rejections} ({rejections/total_matches*100:.1f}%)")
+    print(f"👑 REIGNING CHAMPION ON VPS: {active_champion} | Peak Benchmark Score: {champ_peak_score:.2f} | Peak Benchmark PnL: +{champ_peak_pnl:.2f}")
+    print("=" * total_width)
 
     # Latest Brain Detailed Head-to-Head Card
     latest = history[-1]
@@ -104,8 +130,8 @@ def main():
     l_ent = latest.get("entropy", 0.0)
 
     print(f"\n[*] LATEST SHOWDOWN ANALYSIS: {l_ver} vs REIGNING CHAMPION")
-    print("-" * 118)
-    status_label = "APPROVED & DEPLOYED TO LIVE VPS BOT" if l_approved else "REJECTED (Retained Current Champion)"
+    print("-" * total_width)
+    status_label = "APPROVED & DEPLOYED TO LIVE VPS BOT" if l_approved else "REJECTED (Retained Current Champion on VPS)"
     print(f" * Promotion Status:    {status_label}")
     print(f" * Matchup Reason:       {l_reason}")
     print(f" * Decision Score:       {l_score:.4f} vs Champion {l_cscore:.4f} (Net Gain: {l_score - l_cscore:+.4f})")
@@ -119,7 +145,9 @@ def main():
     print(f" * Price Forecast MSE:  {l_mse:.4f} vs Champion {l_cmse:.4f} -> {accuracy_verdict}")
 
     pnl_diff = l_pnl - l_cpnl
-    print(f" * Simulated PnL Edge:   {l_pnl:+.4f} vs Champion {l_cpnl:+.4f} (Advantage: {pnl_diff:+.4f})")
+    pnl_pct = (pnl_diff / abs(l_cpnl) * 100) if l_cpnl else 0.0
+    advantage_str = f"{pnl_diff:+.4f} ({pnl_pct:+.1f}%)"
+    print(f" * Simulated PnL Edge:   {l_pnl:+.4f} vs Champion {l_cpnl:+.4f} (Advantage: {advantage_str})")
 
     ent_desc = "Optimal balance of exploration and conviction" if 0.5 <= l_ent <= 1.2 else "Watch closely"
     print(f" * Policy Entropy:       {l_ent:.4f} ({ent_desc})")
@@ -128,7 +156,7 @@ def main():
         cum_gain = ((l_mse - base_mse) / base_mse) * 100
         print(f" * Cumulative Progress:  Critic prediction error improved {abs(cum_gain):.1f}% since Day 1 Baseline ({base_mse:.2f} -> {l_mse:.2f})")
     
-    print("=" * 118)
+    print("=" * total_width)
 
 if __name__ == "__main__":
     main()

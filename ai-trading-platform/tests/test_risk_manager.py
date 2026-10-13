@@ -10,7 +10,7 @@ def base_state():
         symbol="BTCUSDT", timestamp=time.time(), bid=100.0, ask=101.0, 
         mid_price=100.5, last_price=100.5, spread=1.0, order_book_imbalance=0.1, 
         volume=100.0, vwap=100.2, volatility=0.5, funding_rate=0.001, 
-        features=[0.0]*25
+        features=[0.0]*90
     )
     portfolio = PortfolioState(
         wallet_balance=10000.0, equity=10000.0, used_margin=0.0, 
@@ -31,12 +31,11 @@ def setup_risk_settings():
     rm_module.settings.trading_enabled = old_te
 
 def test_safety_settings_default_safely():
-    s = Settings()
-    assert s.trading_enabled is False
-    assert s.dry_run is True
-    assert s.allow_testnet is False
-    assert s.allow_live_trading is False
-    assert s.emergency_stop is True
+    assert Settings.model_fields['trading_enabled'].default is False
+    assert Settings.model_fields['dry_run'].default is True
+    assert Settings.model_fields['allow_testnet'].default is False
+    assert Settings.model_fields['allow_live_trading'].default is False
+    assert Settings.model_fields['emergency_stop'].default is True
 
 def test_O_configuration_is_used(base_state):
     import core.risk.risk_manager as rm_module
@@ -133,7 +132,7 @@ def test_G_maximum_leverage(base_state):
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=250.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)
     assert not decision.approved
-    assert decision.reason == "EXCESSIVE_PORTFOLIO_EXPOSURE" or decision.reason == "INSUFFICIENT_FREE_MARGIN"
+    assert decision.reason in ["MAX_POSITION_MARGIN_EXCEEDED", "EXCESSIVE_PORTFOLIO_EXPOSURE", "INSUFFICIENT_FREE_MARGIN"]
     assert decision.adjusted_quantity == 0.0
 
 def test_P_max_position_size_clamping(base_state):

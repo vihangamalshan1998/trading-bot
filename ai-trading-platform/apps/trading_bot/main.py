@@ -105,6 +105,7 @@ class ProductionTradingBot:
         self.max_equity = 0.0
         self.last_win_time = time.time()
         self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
+        self.last_close_time = {sym: 0.0 for sym in self.symbols} # Cooldown tracking per symbol
         
     async def listen_macro(self):
         await self.redis.connect()
@@ -397,6 +398,7 @@ class ProductionTradingBot:
                 # Collect ALL valid symbol state vectors and run ONE model call instead of 6.
                 # SAFETY SHIELD: Symbols with wrong shape are silently skipped (fall back to individual inference).
                 precomputed_actions = {}  # {sym: action_logits_np_array}
+                precomputed_critics = {}  # {sym: critic_pred_np_array}
                 precomputed_seqs = {}     # {sym: (state_vector_tensor, seq_list)} — cache to avoid double build
                 
                 batch_tensors = []
@@ -449,14 +451,16 @@ class ProductionTradingBot:
                         batch_hidden = (torch.cat(h_list, dim=1), torch.cat(c_list, dim=1)) if has_hidden else None
 
                         with torch.no_grad():
-                            batch_logits, _, new_hidden_batch = self.model(final_batch, hidden_state=batch_hidden, return_hidden=True)
+                            batch_logits, batch_critic, new_hidden_batch = self.model(final_batch, hidden_state=batch_hidden, return_hidden=True)
                         for i, sym in enumerate(batch_syms):
                             precomputed_actions[sym] = batch_logits[i].numpy()
+                            precomputed_critics[sym] = batch_critic[i].numpy()
                             # Save independent hidden state for next tick
                             self.hidden_states[sym] = (new_hidden_batch[0][:, i:i+1, :].detach(), new_hidden_batch[1][:, i:i+1, :].detach())
                     except Exception as e:
                         logger.warning(f"Batch inference failed, falling back to individual: {e}")
                         precomputed_actions = {}  # Force fallback
+                        precomputed_critics = {}
                 
                 for sym in self.symbols:
                     if sym not in self.market_states:
@@ -545,6 +549,7 @@ class ProductionTradingBot:
                         with torch.no_grad():
                             action_logits_t, expected_return, new_h = self.model(state_tensor, hidden_state=self.hidden_states.get(sym), return_hidden=True)
                             action_logits = action_logits_t[0].numpy()
+                            precomputed_critics[sym] = expected_return[0].numpy()
                             self.hidden_states[sym] = new_h
 
                         
@@ -577,11 +582,11 @@ class ProductionTradingBot:
                         target_size = 0.0
                         price_offset = 0.0 # Force immediate execution (0 offset)
                     elif random.random() < 0.02:
-                        # Curiosity Exploration (2% chance to explore novel strategies in Testnet)
+                        # Curiosity Exploration (Micro-slice to prevent account drain in Testnet)
                         action_val = random.uniform(-1.0, 1.0)
-                        confidence = random.uniform(0.65, 1.0) # Ensure it passes the 0.65 threshold to trade
-                        target_size = random.uniform(0.1, 1.0)
-                        price_offset = random.uniform(0.0, 1.0) # Limit Order Offset
+                        confidence = random.uniform(0.65, 0.75)
+                        target_size = random.uniform(0.01, 0.05) # Tiny 1-5% exploration slice
+                        price_offset = random.uniform(0.0, 1.0)
                         logger.info(f"[{sym}] EXPLORING: Applying curiosity noise to discover new strategies.")
                     else:
                         # Deterministic Policy (Learned AI Weights)
@@ -606,14 +611,31 @@ class ProductionTradingBot:
                     pos = self.portfolio_state.positions[sym]
                     is_closing = (pos.quantity > 0 and action_val < -0.2) or (pos.quantity < 0 and action_val > 0.2)
                     
+
+
+                    # GUARD 3: Strict Confidence Filter
                     if not is_closing and confidence < 0.65: 
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.65)")
                         continue 
-                    elif is_closing and confidence < 0.30:
-                        logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < 0.30)")
+                    elif is_closing and confidence < settings.min_close_confidence:
+                        logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < {settings.min_close_confidence:.2f})")
                         continue
-                        
-                    margin_allocated = max(0, self.portfolio_state.free_margin) * target_size
+
+                    # GUARD 4: Critic Multi-Horizon Return Check (Reject trades if expected move cannot clear fees)
+                    critic_vals = precomputed_critics.get(sym)
+                    if not is_closing and critic_vals is not None and len(critic_vals) > 0:
+                        pred_ret_5m = float(critic_vals[0])
+                        min_hurdle = settings.min_open_expected_return_pct
+                        if action_val > 0.2 and pred_ret_5m < min_hurdle:
+                            logger.info(f"[{sym}] SKIPPING OPEN_LONG: Critic return {pred_ret_5m:.2f}% < {min_hurdle:.2f}% fee hurdle.")
+                            continue
+                        elif action_val < -0.2 and pred_ret_5m > -min_hurdle:
+                            logger.info(f"[{sym}] SKIPPING OPEN_SHORT: Critic return {pred_ret_5m:.2f}% > -{min_hurdle:.2f}% fee hurdle.")
+                            continue
+
+                    # GUARD 5: Safe Position Margin Budget (Max 15% equity allocated per position)
+                    max_margin_budget = max(0.0, self.portfolio_state.equity * settings.max_position_margin_pct)
+                    margin_allocated = min(max_margin_budget, max(0.0, self.portfolio_state.free_margin) * target_size)
                     notional_requested = margin_allocated * pos.leverage
                     
                     side = "HOLD"
@@ -623,13 +645,16 @@ class ProductionTradingBot:
                     if side == "HOLD":
                         logger.info(f"[{sym}] HOLDING (Action Val: {action_val:.2f})")
                         
-                        # CRITICAL FIX: Record HOLD experiences probabilistically (5% chance).
-                        # If the AI never sees a HOLD in the training buffer, it forgets that
-                        # holding is a valid option and collapses into 100% BUY or SELL.
-                        if random.random() < 0.05:
+                        # High-Quality HOLD Experiences (15% sample rate so the agent learns that holding is profitable)
+                        if random.random() < 0.15:
                             hold_dur = 0
                             if pos.entry_price > 0 and getattr(pos, 'entry_time', 0.0) > 0:
                                 hold_dur = int(time.time() - pos.entry_time)
+                            
+                            # Reward patience: If flat, +0.05 reward for preserving capital and avoiding fee bleed
+                            unreal_pnl = float(pos.unrealized_pnl) if hasattr(pos, 'unrealized_pnl') else 0.0
+                            hold_reward = 0.05 if pos.quantity == 0 else max(-1.0, min(1.0, unreal_pnl * 0.1))
+                            active_version = self.registry.get_current_version()
                                 
                             exp_data = {
                                 "experience_id": str(uuid.uuid4()),
@@ -649,21 +674,22 @@ class ProductionTradingBot:
                                 "position_after": float(pos.quantity),
                                 "entry_price": float(pos.entry_price),
                                 "exit_price": None,
-                                "leverage": int(pos.leverage) if hasattr(pos, 'leverage') else 10,
+                                "leverage": int(pos.leverage) if hasattr(pos, 'leverage') else settings.max_leverage,
                                 "margin": (float(pos.quantity) * market.mid_price / pos.leverage) if pos.leverage and pos.quantity else 0.0,
                                 "fees": 0.0,
                                 "holding_duration": hold_dur,
                                 "action": "HOLD",
                                 "action_probability": float(confidence),
                                 "confidence": float(confidence),
-                                "model_version": "v1",
-                                "reward": 0.0, 
+                                "model_version": active_version,
+                                "reward": float(hold_reward), 
                                 "realized_pnl": 0.0,
                                 "unrealized_pnl": float(pos.unrealized_pnl) if hasattr(pos, 'unrealized_pnl') else 0.0
                             }
                             asyncio.create_task(redis_manager.publish_binary("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
                     
                     if side != "HOLD":
+                        active_version = self.registry.get_current_version()
                         target_qty = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack
                         
                         # Only trade the difference between target and current position
@@ -680,7 +706,7 @@ class ProductionTradingBot:
                         request = OrderRequest(
                             symbol=sym, action_type=side, confidence=float(confidence),
                             requested_quantity=float(qty_raw), target_position=float(target_size),
-                            model_version="v1", timestamp=time.time()
+                            model_version=active_version, timestamp=time.time()
                         )
                         
                         # Evaluate Risk via Schema
@@ -774,10 +800,14 @@ class ProductionTradingBot:
                                         else:
                                             gross_pnl = (entry_px - close_px) * qty_closed
                                             
-                                        # Deduct Binance Taker Fees (0.04%) for both entry and exit
+                                        # Accurate trading fees: Maker for entry, Taker for market/hard stop or Maker for limit
                                         notional_cost_exit = qty_closed * close_px
-                                        dashboard_trade_fees = (entry_px * qty_closed * 0.0004) + (notional_cost_exit * 0.0004)
+                                        exit_fee_rate = settings.taker_fee_pct if hard_stop_triggered else settings.maker_fee_pct
+                                        dashboard_trade_fees = (entry_px * qty_closed * settings.maker_fee_pct) + (notional_cost_exit * exit_fee_rate)
                                         pnl = gross_pnl - dashboard_trade_fees
+                                        
+                                        # Record close timestamp for symbol cooldown (Guard 1)
+                                        self.last_close_time[sym] = time.time()
                                         
                                         # Calculate Net ROI
                                         margin_used_for_trade = (entry_px * qty_closed) / pos_leverage
@@ -833,9 +863,7 @@ class ProductionTradingBot:
                                     
                                     if "CLOSE" in side and entry_px > 0:
                                         exit_px = float(market.mid_price)
-                                        notional_cost = float(qty_str) * exit_px
-                                        # Estimate Binance Taker Fees (0.04%) for both entry and exit volume
-                                        trade_fees = (entry_px * float(qty_str) * 0.0004) + (notional_cost * 0.0004)
+                                        trade_fees = dashboard_trade_fees
                                         # pnl is already net of fees from above calculation
                                         
                                         entry_t = getattr(self.portfolio_state.positions[sym], 'entry_time', 0.0)
@@ -859,8 +887,7 @@ class ProductionTradingBot:
                                         imm_pnl = pnl
                                     elif "OPEN" in side:
                                         # Maker fee penalty (Standardized to ROI percentage to avoid scale-attachment)
-                                        # 0.04% fee * leverage penalty
-                                        imm_reward = -0.04 * pos_leverage
+                                        imm_reward = -(settings.maker_fee_pct * 100.0) * pos_leverage
                                         
                                     pos_after = float(self.portfolio_state.positions[sym].quantity)
                                     
@@ -890,7 +917,7 @@ class ProductionTradingBot:
                                         "action": side,
                                         "action_probability": float(confidence),
                                         "confidence": float(confidence),
-                                        "model_version": "v1",
+                                        "model_version": active_version,
                                         "reward": float(imm_reward),
                                         "realized_pnl": float(imm_pnl),
                                         "unrealized_pnl": 0.0

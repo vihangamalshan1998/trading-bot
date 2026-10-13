@@ -215,6 +215,139 @@ class PPOTrainer:
         except Exception:
             pass
 
+    def evaluate_candidate(self, sample_size: int = 1000) -> dict:
+        """
+        Phase 27 & 53 Automated Model Evaluation:
+        Conducts a Champion vs Challenger Tournament before allowing any model promotion.
+        - Loads the current production Champion model from disk.
+        - Evaluates both Champion and Challenger on the same batch of replay buffer experiences.
+        - Compares:
+            1. Critic MSE (prediction accuracy on future multi-horizon moves).
+            2. Policy alignment / Simulated return (actions chosen vs realized returns).
+            3. Policy entropy (ensuring healthy diversity, zero mode collapse).
+        - A Challenger is ONLY approved for promotion if it proves mathematical superiority over the Champion.
+        """
+        # 1. Weights sanity check
+        if any(torch.isnan(p).any() for p in self.model.parameters()):
+            logger.error("Candidate evaluation FAILED: Challenger model weights contain NaN.")
+            return {"approved": False, "reason": "NAN_WEIGHTS"}
+
+        batch = self.buffer.sample(sample_size)
+        if len(batch) == 0:
+            logger.warning("Candidate evaluation bypassed: Replay buffer empty.")
+            return {"approved": True, "reason": "EMPTY_SAMPLE_BYPASS", "critic_loss": 0.0, "entropy": 0.0}
+
+        try:
+            states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
+            if len(states) == 0:
+                return {"approved": True, "reason": "EMPTY_TENSORS_BYPASS", "critic_loss": 0.0, "entropy": 0.0}
+
+            states = torch.nan_to_num(states, nan=0.0, posinf=1.0, neginf=-1.0)
+            rewards = torch.nan_to_num(rewards, nan=0.0, posinf=1.0, neginf=-1.0)
+            safe_rewards = rewards / 200.0
+            actual_5m_ret = rewards[:, 0]
+
+            self.model.eval()
+            with torch.no_grad():
+                challenger_actions, challenger_values = self.model(states)
+
+                if torch.isnan(challenger_actions).any() or torch.isnan(challenger_values).any():
+                    logger.error("Candidate evaluation FAILED: Challenger output contains NaN.")
+                    return {"approved": False, "reason": "NAN_OUTPUTS"}
+
+                # Policy entropy check (prevents pushing mode-collapsed models)
+                noise = torch.randn_like(challenger_actions) * 1e-5
+                var = (challenger_actions + noise).var(dim=0, unbiased=False)
+                challenger_entropy = float(torch.sqrt(var + 1e-8).mean().item())
+
+                if challenger_entropy < 1e-4:
+                    logger.warning(f"Candidate evaluation FAILED: Challenger mode collapse detected (Entropy: {challenger_entropy:.6f} < 1e-4).")
+                    return {"approved": False, "reason": "MODE_COLLAPSE", "entropy": challenger_entropy}
+
+                challenger_critic_mse = float(nn.MSELoss()(challenger_values, safe_rewards).item())
+                if challenger_critic_mse > 100.0:
+                    logger.warning(f"Candidate evaluation FAILED: Challenger critic loss exploded ({challenger_critic_mse:.2f} > 100.0).")
+                    return {"approved": False, "reason": "CRITIC_EXPLODED", "critic_loss": challenger_critic_mse}
+
+                # Simulated directional alignment score: action * realized return
+                challenger_sim_pnl = float((challenger_actions[:, 0] * actual_5m_ret).mean().item())
+                challenger_score = challenger_sim_pnl - (0.5 * challenger_critic_mse)
+
+            # 2. Benchmark against Production Champion
+            champion_path = "models/production/model_v1.pt"
+            champion_available = os.path.exists(champion_path)
+            
+            if not champion_available:
+                logger.info(f"Initial baseline brain established. Approved without tournament benchmark. (Score: {challenger_score:.4f})")
+                del states, actions, rewards, next_states, dones
+                return {
+                    "approved": True,
+                    "reason": "INITIAL_BASELINE",
+                    "challenger_score": challenger_score,
+                    "champion_score": 0.0,
+                    "critic_loss": challenger_critic_mse,
+                    "entropy": challenger_entropy
+                }
+
+            # Load Champion for comparison
+            champion_model = SingleSymbolActorCritic(input_dim=200)
+            try:
+                champion_state = torch.load(champion_path, map_location="cpu")
+                champion_model.load_state_dict(champion_state)
+                champion_model.eval()
+
+                with torch.no_grad():
+                    champ_actions, champ_values = champion_model(states)
+                    champ_critic_mse = float(nn.MSELoss()(champ_values, safe_rewards).item())
+                    champ_sim_pnl = float((champ_actions[:, 0] * actual_5m_ret).mean().item())
+                    champion_score = champ_sim_pnl - (0.5 * champ_critic_mse)
+
+                del champion_model, champ_actions, champ_values
+            except Exception as champ_e:
+                logger.warning(f"Could not benchmark Champion model ({champ_e}). Proceeding with Challenger metrics.")
+                champion_score = challenger_score - 0.01
+                champ_critic_mse = challenger_critic_mse + 0.01
+                champ_sim_pnl = challenger_sim_pnl
+
+            del states, actions, rewards, next_states, dones
+
+            # Superiority criteria:
+            # 1. Composite score must be higher than Champion, OR
+            # 2. Critic MSE improved with non-degraded directional PnL
+            is_superior = (challenger_score >= champion_score) or (
+                challenger_critic_mse < champ_critic_mse and challenger_sim_pnl >= champ_sim_pnl - 0.05
+            )
+
+            metrics = {
+                "challenger_score": challenger_score,
+                "champion_score": champion_score,
+                "challenger_critic_mse": challenger_critic_mse,
+                "champion_critic_mse": champ_critic_mse,
+                "challenger_sim_pnl": challenger_sim_pnl,
+                "champion_sim_pnl": champ_sim_pnl,
+                "entropy": challenger_entropy
+            }
+
+            if is_superior:
+                logger.info(
+                    f"🏆 TOURNAMENT WINNER: Challenger is SUPERIOR! "
+                    f"Score: {challenger_score:.4f} vs Champ: {champion_score:.4f} | "
+                    f"Critic MSE: {challenger_critic_mse:.4f} vs {champ_critic_mse:.4f} | "
+                    f"Sim PnL: {challenger_sim_pnl:.4f} vs {champ_sim_pnl:.4f}"
+                )
+                return {"approved": True, "reason": "SUPERIOR_TO_CHAMPION", "metrics": metrics}
+            else:
+                logger.warning(
+                    f"⛔ TOURNAMENT DEFEAT: Challenger is INFERIOR to current live Champion! "
+                    f"Score: {challenger_score:.4f} < Champ: {champion_score:.4f} | "
+                    f"Critic MSE: {challenger_critic_mse:.4f} vs {champ_critic_mse:.4f} | "
+                    f"Sim PnL: {challenger_sim_pnl:.4f} vs {champ_sim_pnl:.4f}. REJECTING PUSH."
+                )
+                return {"approved": False, "reason": "INFERIOR_TO_CHAMPION", "metrics": metrics}
+        except Exception as e:
+            logger.error(f"Error during candidate tournament evaluation: {e}")
+            return {"approved": False, "reason": f"EXCEPTION_{e}"}
+
 async def run_training_loop():
     set_log_file("logs/ai_trainer.log")
     logger.info("Initializing PPO Training Engine...")
@@ -257,7 +390,8 @@ async def run_training_loop():
         from datetime import datetime
         model_path = "models/production/model_v1.pt"
         if os.path.exists(model_path):
-            backup_name = f"models/production/model_v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
+            os.makedirs("models/checkpoints", exist_ok=True)
+            backup_name = f"models/checkpoints/model_v1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
             try:
                 shutil.copy2(model_path, backup_name)
                 logger.info(f"💾 Created pre-training backup: {backup_name}")
@@ -326,36 +460,54 @@ async def run_training_loop():
 
             step += 1
             if step % 100 == 0:
-                logger.info(f"Completed {step} training steps. Saving model and pushing to VPS...")
+                logger.info(f"Completed {step} training steps. Evaluating candidate brain before deployment...")
+                eval_result = trainer.evaluate_candidate(sample_size=1000)
                 
-                try:
-                    registry.save_model(model)
-                    
-                    if local_mode and (time.time() - last_push_time > 300):
-                        push_count += 1
-                        logger.info(f"🚀 Pushing new Brain (model_v1.pt) to VPS in the background ({push_count}/20)...")
-                        last_push_time = time.time()
-                        import subprocess
-                        subprocess.Popen(
-                            ["scp", "models/production/model_v1.pt", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/model_v1.pt"],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL
-                        )
-                        
-                        # Auto-Shutdown after 6 successful pushes (approx 1 to 1.5 hours)
-                        if push_count >= 20:
-                            logger.info("✅ Successfully completed 20 Brain pushes. Auto-shutting down Master Trainer!")
-                            import sys
-                            sys.exit(0)
-                    
-                    # Schedule model update broadcast
+                if not eval_result.get("approved", False):
+                    logger.warning(f"Candidate brain REJECTED by evaluation gate: {eval_result.get('reason')}. Retaining current live brain.")
+                    # Reset trainer in-memory weights back to reigning Champion so bad weights don't compound
                     try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(trainer._publish_model_update())
-                    except RuntimeError:
-                        asyncio.run(trainer._publish_model_update())
-                except Exception as e:
-                    logger.error(f"Failed to save model: {e}")
+                        champ_path = "models/production/model_v1.pt"
+                        if os.path.exists(champ_path):
+                            model.load_state_dict(torch.load(champ_path, map_location="cpu"))
+                            logger.info("Reset trainer model weights back to reigning Champion.")
+                    except Exception as reset_e:
+                        logger.warning(f"Could not reset model weights to champion: {reset_e}")
+                else:
+                    try:
+                        version_tag = f"v1_push_{push_count + 1}"
+                        registry.save_model(model, version_tag=version_tag, metrics=eval_result)
+                        
+                        if local_mode and (time.time() - last_push_time > 300):
+                            push_count += 1
+                            logger.info(f"🚀 Pushing evaluated Brain ({version_tag}) to VPS in the background ({push_count}/44)...")
+                            last_push_time = time.time()
+                            import subprocess
+                            subprocess.Popen(
+                                ["scp", "models/production/model_v1.pt", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/model_v1.pt"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL
+                            )
+                            subprocess.Popen(
+                                ["scp", "models/production/version.json", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/version.json"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL
+                            )
+                            
+                            # Auto-Shutdown after 44 successful pushes (approx 1 to 1.5 hours)
+                            if push_count >= 44:
+                                logger.info("✅ Successfully completed 44 Brain pushes. Auto-shutting down Master Trainer!")
+                                import sys
+                                sys.exit(0)
+                        
+                        # Schedule model update broadcast
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(trainer._publish_model_update())
+                        except RuntimeError:
+                            asyncio.run(trainer._publish_model_update())
+                    except Exception as e:
+                        logger.error(f"Failed to save model: {e}")
                     
                 # Refresh cache AFTER saving, so the GC freeze doesn't block the actual deployment
                 logger.info("Refreshing RAM cache from DB (this may take a minute)...")

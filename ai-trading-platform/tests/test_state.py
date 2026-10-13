@@ -10,10 +10,10 @@ def test_market_state():
         symbol="BTCUSDT", timestamp=time.time(), bid=100.0, ask=101.0, 
         mid_price=100.5, last_price=100.5, spread=1.0, order_book_imbalance=0.1, 
         volume=1000.0, vwap=100.2, volatility=0.5, funding_rate=0.001, 
-        features=[0.0] * 25
+        features=[0.0] * 90
     )
     assert state.mid_price == 100.5
-    assert len(state.features) == 25
+    assert len(state.features) == 90
 
 def test_portfolio_state():
     state = PortfolioState(

@@ -88,7 +88,21 @@ class ModelRegistry:
         except Exception as e:
             raise ValueError(f"Failed to load production checkpoint: {e}")
 
+        self.current_version = self.get_current_version()
         return model
+
+    def get_current_version(self) -> str:
+        """Reads active model version from version.json or defaults to v1."""
+        version_file = os.path.join(self.model_dir, "version.json")
+        if os.path.exists(version_file):
+            try:
+                import json
+                with open(version_file, "r") as f:
+                    data = json.load(f)
+                    return data.get("version", "v1")
+            except Exception:
+                pass
+        return "v1"
 
     def check_for_updates(self) -> bool:
         """Returns True if a newer model checkpoint exists on disk."""
@@ -99,11 +113,38 @@ class ModelRegistry:
         current_mtime = os.path.getmtime(checkpoint_path)
         return current_mtime > self.last_loaded_mtime
 
-    def save_model(self, model):
-        """Saves the model to the production directory."""
+    def save_model(self, model, version_tag: str = None, metrics: dict = None):
+        """Saves the model to the production directory with version metadata and historical archive."""
+        import json
+        import time
+
         if not os.path.exists(self.model_dir):
             os.makedirs(self.model_dir, exist_ok=True)
             
         checkpoint_path = os.path.join(self.model_dir, "model_v1.pt")
         torch.save(model.state_dict(), checkpoint_path)
-        logger.info(f"Model saved to {checkpoint_path}")
+        
+        # Save version metadata
+        version = version_tag or f"v1_push_{int(time.time())}"
+        self.current_version = version
+        version_file = os.path.join(self.model_dir, "version.json")
+        try:
+            with open(version_file, "w") as f:
+                json.dump({
+                    "version": version,
+                    "timestamp": time.time(),
+                    "metrics": metrics or {}
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not write version.json: {e}")
+
+        # Also archive to checkpoints directory for auditability
+        checkpoints_dir = "models/checkpoints"
+        os.makedirs(checkpoints_dir, exist_ok=True)
+        archive_path = os.path.join(checkpoints_dir, f"{version}.pt")
+        try:
+            torch.save(model.state_dict(), archive_path)
+        except Exception as e:
+            logger.warning(f"Could not archive checkpoint: {e}")
+
+        logger.info(f"Model saved to {checkpoint_path} [Version: {version}]")

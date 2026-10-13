@@ -40,6 +40,9 @@ class RiskManager:
         self.correlated_exposure_limit_pct = (
             settings.correlated_exposure_limit_pct
         )
+        self.max_position_margin_pct = getattr(
+            settings, "max_position_margin_pct", 0.15
+        )
         
         # Macro thresholds
         self.bearish_macro_threshold = -0.8
@@ -320,6 +323,11 @@ class RiskManager:
         #
         # Therefore we use max_leverage conservatively.
         required_margin = proposed_notional / self.max_leverage
+
+        # Cap single position margin to max_position_margin_pct of equity
+        max_allowed_margin = portfolio_state.equity * self.max_position_margin_pct
+        if required_margin > max_allowed_margin and max_allowed_margin > 0:
+            return self._reject("MAX_POSITION_MARGIN_EXCEEDED")
 
         if portfolio_state.free_margin < required_margin:
             return self._reject("INSUFFICIENT_FREE_MARGIN")

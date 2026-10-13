@@ -106,6 +106,7 @@ class ProductionTradingBot:
         self.last_win_time = time.time()
         self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
         self.last_close_time = {sym: 0.0 for sym in self.symbols} # Cooldown tracking per symbol
+        self.position_entry_times = {sym: 0.0 for sym in self.symbols} # Minimum holding tracking per symbol
         
     async def listen_macro(self):
         await self.redis.connect()
@@ -574,22 +575,14 @@ class ProductionTradingBot:
                             if pnl_pct_leveraged <= -0.30: # -30% HARD STOP LOSS
                                 logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI.")
                                 hard_stop_triggered = True
-                                
                     if hard_stop_triggered:
                         # Force an immediate MARKET CLOSE
                         action_val = -1.0 if pos_check.quantity > 0 else 1.0
                         confidence = 1.0
                         target_size = 0.0
                         price_offset = 0.0 # Force immediate execution (0 offset)
-                    elif random.random() < 0.02:
-                        # Curiosity Exploration (Micro-slice to prevent account drain in Testnet)
-                        action_val = random.uniform(-1.0, 1.0)
-                        confidence = random.uniform(0.65, 0.75)
-                        target_size = random.uniform(0.01, 0.05) # Tiny 1-5% exploration slice
-                        price_offset = random.uniform(0.0, 1.0)
-                        logger.info(f"[{sym}] EXPLORING: Applying curiosity noise to discover new strategies.")
                     else:
-                        # Deterministic Policy (Learned AI Weights)
+                        # Pure Deterministic Policy (Learned AI Weights - Zero Random Exploration Noise)
                         action_val = action_logits[0]
                         confidence = (action_logits[1] + 1.0) / 2.0
                         target_size = (action_logits[2] + 1.0) / 2.0
@@ -610,15 +603,36 @@ class ProductionTradingBot:
                     
                     pos = self.portfolio_state.positions[sym]
                     is_closing = (pos.quantity > 0 and action_val < -0.2) or (pos.quantity < 0 and action_val > 0.2)
-                    
 
+                    # ANTI-CHURN GUARD: Minimum 2-Minute Holding Lock & Net Profit Hurdle
+                    if is_closing and not hard_stop_triggered:
+                        entry_t = self.position_entry_times.get(sym, 0.0)
+                        if entry_t == 0.0 and pos.quantity != 0:
+                            self.position_entry_times[sym] = time.time()
+                            entry_t = time.time()
+                            
+                        time_held = time.time() - entry_t
+                        min_hold_time = 120.0  # 2 minutes minimum holding duration (prevents churn, allows agile exits)
+
+                        current_pnl_pct = 0.0
+                        if pos.entry_price > 0:
+                            current_pnl_pct = (market.mid_price - pos.entry_price) / pos.entry_price
+                            if pos.quantity < 0:
+                                current_pnl_pct = -current_pnl_pct
+
+                        # Allow early close ONLY if profit clears round-trip fees (>= +0.35% profit)
+                        has_solid_profit = current_pnl_pct >= 0.0035
+
+                        if time_held < min_hold_time and not has_solid_profit:
+                            logger.info(f"[{sym}] HOLDING FOR TREND: Position held for {time_held:.0f}s < {min_hold_time:.0f}s (PnL: {current_pnl_pct*100:+.2f}%). Protecting against fee burn.")
+                            continue
 
                     # GUARD 3: Strict Confidence Filter
                     if not is_closing and confidence < 0.65: 
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.65)")
                         continue 
-                    elif is_closing and confidence < settings.min_close_confidence:
-                        logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < {settings.min_close_confidence:.2f})")
+                    elif is_closing and confidence < 0.70:
+                        logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < 0.70)")
                         continue
 
                     # GUARD 4: Critic Multi-Horizon Return Check (Reject trades if expected move cannot clear fees)
@@ -840,19 +854,25 @@ class ProductionTradingBot:
                                     if "OPEN_LONG" in side:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
                                             self.portfolio_state.positions[sym].entry_time = time.time()
+                                            self.position_entry_times[sym] = time.time()
                                         self.portfolio_state.positions[sym].quantity += float(qty_str)
                                         self.portfolio_state.free_margin -= margin_used
                                     elif "CLOSE_LONG" in side:
                                         self.portfolio_state.positions[sym].quantity -= float(qty_str)
                                         self.portfolio_state.free_margin += margin_used
+                                        if abs(self.portfolio_state.positions[sym].quantity) < 1e-5:
+                                            self.position_entry_times[sym] = 0.0
                                     elif "OPEN_SHORT" in side:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
                                             self.portfolio_state.positions[sym].entry_time = time.time()
+                                            self.position_entry_times[sym] = time.time()
                                         self.portfolio_state.positions[sym].quantity -= float(qty_str)
                                         self.portfolio_state.free_margin -= margin_used
                                     elif "CLOSE_SHORT" in side:
                                         self.portfolio_state.positions[sym].quantity += float(qty_str)
                                         self.portfolio_state.free_margin += margin_used
+                                        if abs(self.portfolio_state.positions[sym].quantity) < 1e-5:
+                                            self.position_entry_times[sym] = 0.0
                                     
                                     # Calculate immediate RL Reward
                                     imm_reward = 0.0

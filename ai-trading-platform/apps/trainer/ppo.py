@@ -465,6 +465,7 @@ async def run_training_loop():
                 
                 if not eval_result.get("approved", False):
                     logger.warning(f"Candidate brain REJECTED by evaluation gate: {eval_result.get('reason')}. Retaining current live brain.")
+                    registry.record_tournament_result(eval_result, version_tag=f"rejected_step_{step}")
                     # Reset trainer in-memory weights back to reigning Champion so bad weights don't compound
                     try:
                         champ_path = "models/production/model_v1.pt"
@@ -490,6 +491,11 @@ async def run_training_loop():
                             )
                             subprocess.Popen(
                                 ["scp", "models/production/version.json", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/version.json"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL
+                            )
+                            subprocess.Popen(
+                                ["scp", "models/production/tournament_history.json", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/tournament_history.json"],
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL
                             )

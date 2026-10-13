@@ -148,3 +148,42 @@ class ModelRegistry:
             logger.warning(f"Could not archive checkpoint: {e}")
 
         logger.info(f"Model saved to {checkpoint_path} [Version: {version}]")
+        self.record_tournament_result(metrics or {}, version_tag=version)
+
+    def record_tournament_result(self, eval_result: dict, version_tag: str = None):
+        """Appends a tournament showdown record to cumulative tournament_history.json."""
+        import json
+        import time
+        from datetime import datetime
+
+        history_file = os.path.join(self.model_dir, "tournament_history.json")
+        history = []
+        if os.path.exists(history_file):
+            try:
+                with open(history_file, "r") as f:
+                    history = json.load(f)
+            except Exception:
+                history = []
+
+        m = eval_result.get("metrics", eval_result)
+        entry = {
+            "version": version_tag or eval_result.get("version", "candidate"),
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": time.time(),
+            "approved": eval_result.get("approved", True if version_tag else False),
+            "reason": eval_result.get("reason", "SUPERIOR_TO_CHAMPION" if version_tag else "REJECTED"),
+            "challenger_score": m.get("challenger_score"),
+            "champion_score": m.get("champion_score"),
+            "challenger_critic_mse": m.get("challenger_critic_mse"),
+            "champion_critic_mse": m.get("champion_critic_mse"),
+            "challenger_sim_pnl": m.get("challenger_sim_pnl"),
+            "champion_sim_pnl": m.get("champion_sim_pnl"),
+            "entropy": m.get("entropy")
+        }
+        history.append(entry)
+
+        try:
+            with open(history_file, "w") as f:
+                json.dump(history, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not update tournament_history.json: {e}")

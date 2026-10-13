@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     maker_fee_pct: float = Field(default=0.0002, ge=0)                  # 0.02% maker fee
 
     max_order_size: float = Field(default=9999999.0, gt=0)
-    max_open_positions: int = Field(default=5, gt=0)
+    max_open_positions: int = Field(default=6, gt=0)
     max_daily_loss_pct: float = Field(default=1.0, gt=0, le=1)
     max_drawdown_pct: float = Field(default=1.0, gt=0, le=1)
 

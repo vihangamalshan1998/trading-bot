@@ -604,30 +604,7 @@ class ProductionTradingBot:
                     pos = self.portfolio_state.positions[sym]
                     is_closing = (pos.quantity > 0 and action_val < -0.2) or (pos.quantity < 0 and action_val > 0.2)
 
-                    # ANTI-CHURN GUARD: Minimum 2-Minute Holding Lock & Net Profit Hurdle
-                    if is_closing and not hard_stop_triggered:
-                        entry_t = self.position_entry_times.get(sym, 0.0)
-                        if entry_t == 0.0 and pos.quantity != 0:
-                            self.position_entry_times[sym] = time.time()
-                            entry_t = time.time()
-                            
-                        time_held = time.time() - entry_t
-                        min_hold_time = 120.0  # 2 minutes minimum holding duration (prevents churn, allows agile exits)
-
-                        current_pnl_pct = 0.0
-                        if pos.entry_price > 0:
-                            current_pnl_pct = (market.mid_price - pos.entry_price) / pos.entry_price
-                            if pos.quantity < 0:
-                                current_pnl_pct = -current_pnl_pct
-
-                        # Allow early close ONLY if profit clears round-trip fees (>= +0.35% profit)
-                        has_solid_profit = current_pnl_pct >= 0.0035
-
-                        if time_held < min_hold_time and not has_solid_profit:
-                            logger.info(f"[{sym}] HOLDING FOR TREND: Position held for {time_held:.0f}s < {min_hold_time:.0f}s (PnL: {current_pnl_pct*100:+.2f}%). Protecting against fee burn.")
-                            continue
-
-                    # GUARD 3: Strict Confidence Filter
+                    # GUARD 2: Strict Confidence Filter
                     if not is_closing and confidence < 0.65: 
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.65)")
                         continue 

@@ -368,15 +368,34 @@ async def run_training_loop():
     except Exception as e:
         logger.warning(f"Could not load existing model, starting fresh: {e}")
     
-    # V3 Upgrade: Limit PyTorch CPU threads to 1 or 2 to prevent 100% core starvation on VPS
+    # Thermal Management & CPU Core Restrictions
     local_mode = os.getenv("LOCAL_MODE") == "True"
     
     if local_mode:
-        logger.info("⚡ LOCAL MODE DETECTED: Running at MAXIMUM POWER (Using all CPU cores & 16GB RAM)")
-        # Do not restrict threads locally
+        import os
+        total_cores = os.cpu_count() or 4
+        # Thermal safety: Locked to 3 threads for the MSI GF63 Thin single-fan chassis & i5-9300H
+        # Uses ~38% CPU capacity, leaving >60% idle so temps stay cool (~62-68C) and quiet.
+        safe_threads = 3
+        torch.set_num_threads(safe_threads)
+        try:
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+
+        # Set Windows process priority to BELOW_NORMAL to maintain system responsiveness & cool thermals
+        try:
+            import psutil
+            p = psutil.Process()
+            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+            logger.info("❄️ Process priority set to BELOW_NORMAL to reduce thermal stress.")
+        except Exception:
+            pass
+
+        logger.info(f"❄️ THERMAL SAFETY ACTIVE: PyTorch capped at {safe_threads} CPU cores (out of {total_cores}) to prevent overheating.")
         limit = 2000
-        epochs = 4
-        sleep_time = 0.0
+        epochs = 4  # Deep PPO passes per batch
+        sleep_time = 1.0  # 1.0s cooling breather between steps to let CPU downclock and dissipate heat
     else:
         logger.info("🐢 VPS MODE DETECTED: Running in STARVATION MODE (1 CPU Core, 300 RAM limit)")
         torch.set_num_threads(1)
@@ -439,7 +458,24 @@ async def run_training_loop():
             logger.error(f"Could not start background syncer: {e}")
     
     step = 0
+    # Initialize push_count from tournament_history.json so version tags increment seamlessly
     push_count = 0
+    try:
+        if os.path.exists("models/production/tournament_history.json"):
+            with open("models/production/tournament_history.json", "r") as f:
+                hist = json.load(f)
+                for entry in hist:
+                    ver = entry.get("version", "")
+                    if "v1_push_" in ver:
+                        try:
+                            num = int(ver.replace("v1_push_", ""))
+                            if num > push_count:
+                                push_count = num
+                        except ValueError:
+                            pass
+    except Exception:
+        pass
+
     last_push_time = 0.0
     try:
         while True:
@@ -476,11 +512,11 @@ async def run_training_loop():
                         logger.warning(f"Could not reset model weights to champion: {reset_e}")
                 else:
                     try:
-                        version_tag = f"v1_push_{push_count + 1}"
+                        push_count += 1
+                        version_tag = f"v1_push_{push_count}"
                         registry.save_model(model, version_tag=version_tag, metrics=eval_result)
                         
                         if local_mode and (time.time() - last_push_time > 300):
-                            push_count += 1
                             logger.info(f"🚀 Pushing evaluated Brain ({version_tag}) to VPS in the background ({push_count}/44)...")
                             last_push_time = time.time()
                             import subprocess

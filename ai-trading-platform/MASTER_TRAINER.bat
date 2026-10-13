@@ -14,7 +14,7 @@ if exist "venv\Scripts\activate.bat" (
     echo -^> No 'venv' folder found. Using Global Python.
 )
 
-echo [3] Launching AI Trainer with Thermal Protection & CPU Core Limits...
+echo [3] Launching AI Trainer with Thermal Protection and CPU Core Limits...
 python -m apps.trainer.ppo
 
 pause

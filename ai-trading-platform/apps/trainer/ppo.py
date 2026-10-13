@@ -187,16 +187,18 @@ class PPOTrainer:
             }
         }
 
-        # Since trainer might run synchronously, we can dispatch it via the running loop or a new one
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._publish_metrics(payload))
-        except RuntimeError:
-            asyncio.run(self._publish_metrics(payload))
+        if os.getenv("LOCAL_MODE") != "True":
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._publish_metrics(payload))
+            except RuntimeError:
+                asyncio.run(self._publish_metrics(payload))
             
         return True
             
     async def _publish_metrics(self, payload: dict):
+        if os.getenv("LOCAL_MODE") == "True":
+            return  # In local mode, metrics are saved directly to logs and tournament history
         try:
             if not redis_manager.redis:
                 await redis_manager.connect()
@@ -206,6 +208,8 @@ class PPOTrainer:
             pass # Suppress background metrics errors if Redis is down
 
     async def _publish_model_update(self):
+        if os.getenv("LOCAL_MODE") == "True":
+            return
         try:
             if not redis_manager.redis:
                 await redis_manager.connect()
@@ -372,7 +376,6 @@ async def run_training_loop():
     local_mode = os.getenv("LOCAL_MODE") == "True"
     
     if local_mode:
-        import os
         total_cores = os.cpu_count() or 4
         # Thermal safety: Locked to 3 threads for the MSI GF63 Thin single-fan chassis & i5-9300H
         # Uses ~38% CPU capacity, leaving >60% idle so temps stay cool (~62-68C) and quiet.

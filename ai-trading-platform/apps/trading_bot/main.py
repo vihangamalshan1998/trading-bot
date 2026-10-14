@@ -678,12 +678,22 @@ class ProductionTradingBot:
                     pos = self.portfolio_state.positions[sym]
                     is_closing = (pos.quantity > 0 and action_val < -0.2) or (pos.quantity < 0 and action_val > 0.2)
 
-                    # GUARD 1: Anti-Churn Cooldown (Prevent rapid-fire re-entry after closing)
+                    # GUARD 1: Anti-Churn Cooldown with High-Conviction Fast-Pass (180s Baseline)
                     if not is_closing:
                         time_since_close = time.time() - self.last_close_time.get(sym, 0.0)
-                        if time_since_close < 90.0:
-                            logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / 90s).")
-                            continue
+                        cooldown_period = 180.0 # 3 minutes baseline cooldown
+                        if time_since_close < cooldown_period:
+                            # High-Conviction Fast-Pass Override: Allows immediate entry if AI is >= 90% confident + Critic confirms
+                            critic_vals = precomputed_critics.get(sym)
+                            pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
+                            min_hurdle = settings.min_open_expected_return_pct
+                            has_critic_conviction = (action_val > 0.2 and pred_ret_5m >= min_hurdle) or (action_val < -0.2 and pred_ret_5m <= -min_hurdle)
+                            
+                            if confidence >= 0.90 and has_critic_conviction:
+                                logger.info(f"[{sym}] 🎯 HIGH-CONVICTION FAST-PASS: Bypassing cooldown ({time_since_close:.1f}s/{cooldown_period:.0f}s) due to extreme confidence ({confidence:.2f} >= 0.90) & Critic return ({pred_ret_5m:+.2f}%)!")
+                            else:
+                                logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / {cooldown_period:.0f}s).")
+                                continue
 
                     # GUARD 2: Minimum Hold Duration (Hold at least 45s unless TP / SL / Trailing stop)
                     if is_closing and not exit_override:
@@ -692,9 +702,9 @@ class ProductionTradingBot:
                             logger.info(f"[{sym}] SKIPPING CLOSE: Minimum hold duration (45s) not met yet.")
                             continue
 
-                    # GUARD 3: Strict Confidence Filter
-                    if not is_closing and confidence < 0.65: 
-                        logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.65)")
+                    # GUARD 3: Strict Confidence Filter (Raised from 0.65 to 0.75 for high-quality setups)
+                    if not is_closing and confidence < 0.75: 
+                        logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.75)")
                         continue 
                     elif is_closing and not exit_override:
                         # If in profit, allow closing easily (0.35 threshold) so winning trades are NOT missed!

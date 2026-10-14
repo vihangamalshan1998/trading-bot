@@ -611,17 +611,17 @@ class ProductionTradingBot:
                                         sudden_shock_triggered = True
 
                             # 3. AI CRITIC REGIME FLIP (Early warning: AI forecasts immediate opposing shock)
-                            if not sudden_shock_triggered and pnl_pct_leveraged >= 0.05:
+                            if not sudden_shock_triggered:
                                 critic_vals = precomputed_critics.get(sym)
                                 if critic_vals is not None and len(critic_vals) > 0:
                                     pred_ret_5m = float(critic_vals[0])
-                                    # If SHORT but Critic predicts strong pump (+0.25%+)
-                                    if pos_check.quantity < 0 and pred_ret_5m >= 0.25:
-                                        logger.warning(f"[{sym}] ⚡ CRITIC REGIME FLIP: Short in profit (+{pnl_pct_leveraged*100:.2f}%), but Critic predicts strong pump ({pred_ret_5m:+.2f}%). Taking profit before shock.")
+                                    # If SHORT but Critic predicts strong pump (+0.40%+)
+                                    if pos_check.quantity < 0 and pred_ret_5m >= 0.40:
+                                        logger.warning(f"[{sym}] ⚡ CRITIC REGIME FLIP: Short position, but Critic predicts strong opposing pump ({pred_ret_5m:+.2f}% >= +0.40%). Taking emergency market exit.")
                                         sudden_shock_triggered = True
-                                    # If LONG but Critic predicts strong dump (-0.25%-)
-                                    elif pos_check.quantity > 0 and pred_ret_5m <= -0.25:
-                                        logger.warning(f"[{sym}] ⚡ CRITIC REGIME FLIP: Long in profit (+{pnl_pct_leveraged*100:.2f}%), but Critic predicts strong dump ({pred_ret_5m:+.2f}%). Taking profit before shock.")
+                                    # If LONG but Critic predicts strong dump (-0.40%-)
+                                    elif pos_check.quantity > 0 and pred_ret_5m <= -0.40:
+                                        logger.warning(f"[{sym}] ⚡ CRITIC REGIME FLIP: Long position, but Critic predicts strong opposing dump ({pred_ret_5m:+.2f}% <= -0.40%). Taking emergency market exit.")
                                         sudden_shock_triggered = True
 
                             # 4. DYNAMIC ADAPTIVE RATCHETING TRAILING STOP (Let Trend Ride with No Ceiling)
@@ -698,12 +698,16 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / {cooldown_period:.0f}s).")
                                 continue
 
-                    # GUARD 2: Minimum Hold Duration (Hold at least 90s unless TP / SL / Trailing stop)
+                    # GUARD 2: Minimum Hold Duration (Hold at least 90s unless Emergency Bailout / TP / SL / Trailing stop)
                     if is_closing and not exit_override:
-                        entry_t = self.position_entry_times.get(sym, 0.0)
-                        if entry_t > 0 and (time.time() - entry_t) < 90.0:
-                            logger.info(f"[{sym}] SKIPPING CLOSE: Minimum hold duration (90s) not met yet ({time.time() - entry_t:.1f}s).")
-                            continue
+                        # Emergency AI Bailout: If the AI detects that the trade went completely wrong with high conviction (>= 0.85), cut it immediately!
+                        if confidence >= 0.85:
+                            logger.warning(f"[{sym}] 🚨 EMERGENCY AI BAILOUT: Extreme opposing conviction ({confidence:.2f} >= 0.85). Bypassing 90s hold to cut loss immediately.")
+                        else:
+                            entry_t = self.position_entry_times.get(sym, 0.0)
+                            if entry_t > 0 and (time.time() - entry_t) < 90.0:
+                                logger.info(f"[{sym}] SKIPPING CLOSE: Minimum hold duration (90s) not met yet ({time.time() - entry_t:.1f}s).")
+                                continue
 
                     # GUARD 3: Strict Confidence Filter (Raised from 0.65 to 0.75 for high-quality setups)
                     if not is_closing and confidence < 0.75: 

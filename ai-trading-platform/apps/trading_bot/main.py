@@ -107,6 +107,8 @@ class ProductionTradingBot:
         self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
         self.last_close_time = {sym: 0.0 for sym in self.symbols} # Cooldown tracking per symbol
         self.position_entry_times = {sym: 0.0 for sym in self.symbols} # Minimum holding tracking per symbol
+        self.peak_pnl_pct = {sym: 0.0 for sym in self.symbols} # Peak leveraged PnL tracking for trailing profit locks
+        self.pnl_history = {sym: collections.deque(maxlen=30) for sym in self.symbols} # (timestamp, pnl_pct_leveraged) for velocity shock detection
         
     async def listen_macro(self):
         await self.redis.connect()
@@ -357,6 +359,10 @@ class ProductionTradingBot:
                             self.portfolio_state.positions[sym].quantity = amt
                             self.portfolio_state.positions[sym].entry_price = float(p.get("entryPrice", 0))
                             self.portfolio_state.positions[sym].leverage = int(p.get("leverage", 10))
+                            if amt == 0.0:
+                                self.peak_pnl_pct[sym] = 0.0
+                                self.pnl_history[sym].clear()
+                                self.position_entry_times[sym] = 0.0
                             
                         # CRITICAL FIX: Only send active positions to the dashboard (filter out ghost/closed records)
                         if abs(amt) > 0:
@@ -559,11 +565,16 @@ class ProductionTradingBot:
                     # Update portfolio state with current price for RiskManager correlated exposure checks
                     if sym in self.portfolio_state.positions:
                         self.portfolio_state.positions[sym].current_price = market.mid_price
-                    # Calculate Real-Time PNL Percentage for Hard Stop Loss
+                    # Calculate Real-Time PNL Percentage, Adaptive Trailing Stop, Sudden Shock Detector, and Hard Stop Loss
                     hard_stop_triggered = False
+                    sudden_shock_triggered = False
+                    trailing_stop_triggered = False
+                    pnl_pct_leveraged = 0.0
+
                     if sym in self.portfolio_state.positions:
                         pos_check = self.portfolio_state.positions[sym]
                         if pos_check.quantity != 0 and pos_check.entry_price > 0:
+                            now_t = time.time()
                             # PNL % = (Current - Entry) / Entry  (* -1 if short)
                             pnl_pct = (market.mid_price - pos_check.entry_price) / pos_check.entry_price
                             if pos_check.quantity < 0:
@@ -572,10 +583,73 @@ class ProductionTradingBot:
                             # Leverage amplifies PNL %
                             pnl_pct_leveraged = pnl_pct * pos_check.leverage
                             
-                            if pnl_pct_leveraged <= -0.30: # -30% HARD STOP LOSS
+                            # Record PnL time-series history for sudden shock / velocity reversal detection
+                            if sym not in self.pnl_history:
+                                self.pnl_history[sym] = collections.deque(maxlen=30)
+                            self.pnl_history[sym].append((now_t, pnl_pct_leveraged))
+                            
+                            # Track Peak PnL for Dynamic Trailing
+                            prev_peak = self.peak_pnl_pct.get(sym, 0.0)
+                            if pnl_pct_leveraged > prev_peak:
+                                self.peak_pnl_pct[sym] = pnl_pct_leveraged
+                                prev_peak = pnl_pct_leveraged
+                            
+                            # 1. HARD STOP LOSS (-25% leveraged)
+                            if pnl_pct_leveraged <= -0.25:
                                 logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI.")
                                 hard_stop_triggered = True
-                    if hard_stop_triggered:
+                            
+                            # 2. SUDDEN VELOCITY SHOCK DETECTOR (Catches flash spikes / wicks against winning trades)
+                            elif prev_peak >= 0.06:
+                                # Inspect PnL over the last 15 seconds
+                                recent_window = [p for t, p in self.pnl_history[sym] if (now_t - t) <= 15.0]
+                                if recent_window:
+                                    recent_peak = max(recent_window)
+                                    # If PnL dropped by >= 5.0% leveraged in <15s and lost over 30% of recent peak
+                                    if (recent_peak - pnl_pct_leveraged) >= 0.05 and pnl_pct_leveraged < (recent_peak * 0.70):
+                                        logger.warning(f"[{sym}] ⚡ SUDDEN VELOCITY SHOCK DETECTED: Rapid drop from +{recent_peak*100:.2f}% to +{pnl_pct_leveraged*100:.2f}% in <15s! Locking in profit immediately.")
+                                        sudden_shock_triggered = True
+
+                            # 3. AI CRITIC REGIME FLIP (Early warning: AI forecasts immediate opposing shock)
+                            if not sudden_shock_triggered and pnl_pct_leveraged >= 0.05:
+                                critic_vals = precomputed_critics.get(sym)
+                                if critic_vals is not None and len(critic_vals) > 0:
+                                    pred_ret_5m = float(critic_vals[0])
+                                    # If SHORT but Critic predicts strong pump (+0.25%+)
+                                    if pos_check.quantity < 0 and pred_ret_5m >= 0.25:
+                                        logger.warning(f"[{sym}] ⚡ CRITIC REGIME FLIP: Short in profit (+{pnl_pct_leveraged*100:.2f}%), but Critic predicts strong pump ({pred_ret_5m:+.2f}%). Taking profit before shock.")
+                                        sudden_shock_triggered = True
+                                    # If LONG but Critic predicts strong dump (-0.25%-)
+                                    elif pos_check.quantity > 0 and pred_ret_5m <= -0.25:
+                                        logger.warning(f"[{sym}] ⚡ CRITIC REGIME FLIP: Long in profit (+{pnl_pct_leveraged*100:.2f}%), but Critic predicts strong dump ({pred_ret_5m:+.2f}%). Taking profit before shock.")
+                                        sudden_shock_triggered = True
+
+                            # 4. DYNAMIC ADAPTIVE RATCHETING TRAILING STOP (Let Trend Ride with No Ceiling)
+                            if not (hard_stop_triggered or sudden_shock_triggered):
+                                # Tier 1: Breakeven & Fee Protection (+6% to +10% peak)
+                                if 0.06 <= prev_peak < 0.10:
+                                    if pnl_pct_leveraged < 0.015: # Cover fees (+1.5% leveraged)
+                                        logger.info(f"[{sym}] 🔒 BREAKEVEN STOP TRIGGERED: Protecting fees and capital (Peak +{prev_peak*100:.2f}%, now +{pnl_pct_leveraged*100:.2f}%).")
+                                        trailing_stop_triggered = True
+                                # Tier 2: Developing Trend (+10% to +25% peak)
+                                elif 0.10 <= prev_peak < 0.25:
+                                    trailing_floor = max(0.04, prev_peak * 0.75) # 25% breathing room, min +4% floor
+                                    if pnl_pct_leveraged < trailing_floor:
+                                        logger.info(f"[{sym}] 🔒 TRAILING STOP TRIGGERED (Developing Trend): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing gain!")
+                                        trailing_stop_triggered = True
+                                # Tier 3: Mature Deep Trend Runner (>= +25% peak, e.g. +50%, +100%+)
+                                elif prev_peak >= 0.25:
+                                    trailing_floor = prev_peak * 0.85 # Tight 15% trail to harvest 85% of peak gains
+                                    if pnl_pct_leveraged < trailing_floor:
+                                        logger.info(f"[{sym}] 🔒 TRAILING STOP TRIGGERED (Deep Runner): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing massive gain!")
+                                        trailing_stop_triggered = True
+                        else:
+                            self.peak_pnl_pct[sym] = 0.0
+                            if sym in self.pnl_history:
+                                self.pnl_history[sym].clear()
+
+                    exit_override = hard_stop_triggered or sudden_shock_triggered or trailing_stop_triggered
+                    if exit_override:
                         # Force an immediate MARKET CLOSE
                         action_val = -1.0 if pos_check.quantity > 0 else 1.0
                         confidence = 1.0
@@ -604,13 +678,31 @@ class ProductionTradingBot:
                     pos = self.portfolio_state.positions[sym]
                     is_closing = (pos.quantity > 0 and action_val < -0.2) or (pos.quantity < 0 and action_val > 0.2)
 
-                    # GUARD 2: Strict Confidence Filter
+                    # GUARD 1: Anti-Churn Cooldown (Prevent rapid-fire re-entry after closing)
+                    if not is_closing:
+                        time_since_close = time.time() - self.last_close_time.get(sym, 0.0)
+                        if time_since_close < 90.0:
+                            logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / 90s).")
+                            continue
+
+                    # GUARD 2: Minimum Hold Duration (Hold at least 45s unless TP / SL / Trailing stop)
+                    if is_closing and not exit_override:
+                        entry_t = self.position_entry_times.get(sym, 0.0)
+                        if entry_t > 0 and (time.time() - entry_t) < 45.0:
+                            logger.info(f"[{sym}] SKIPPING CLOSE: Minimum hold duration (45s) not met yet.")
+                            continue
+
+                    # GUARD 3: Strict Confidence Filter
                     if not is_closing and confidence < 0.65: 
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.65)")
                         continue 
-                    elif is_closing and confidence < 0.70:
-                        logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < 0.70)")
-                        continue
+                    elif is_closing and not exit_override:
+                        # If in profit, allow closing easily (0.35 threshold) so winning trades are NOT missed!
+                        # If in loss, require 0.50 threshold
+                        close_hurdle = 0.35 if pnl_pct_leveraged > 0.01 else 0.50
+                        if confidence < close_hurdle:
+                            logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f})")
+                            continue
 
                     # GUARD 4: Critic Multi-Horizon Return Check (Reject trades if expected move cannot clear fees)
                     critic_vals = precomputed_critics.get(sym)
@@ -751,13 +843,24 @@ class ProductionTradingBot:
                                     # Execute on Binance
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
                                     is_closing = "CLOSE" in side
+                                    is_market_exit = is_closing or exit_override
                                     
-                                    if hard_stop_triggered:
-                                        logger.info(f"[{sym}] MARKET INTENT (HARD STOP): {binance_side} {qty_str}")
-                                        order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="MARKET", reduce_only=is_closing)
+                                    if is_market_exit:
+                                        exit_reason = "HARD STOP" if hard_stop_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else "AI CLOSE"))
+                                        logger.info(f"[{sym}] MARKET INTENT ({exit_reason}): {binance_side} {qty_str}")
+                                        try:
+                                            await self.binance.cancel_all_orders(sym)
+                                        except Exception as e:
+                                            logger.warning(f"[{sym}] Failed to cancel lingering orders: {e}")
+                                        order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="MARKET", reduce_only=True)
+                                        self.active_orders.pop(sym, None)
+                                        self.last_close_time[sym] = time.time()
+                                        self.peak_pnl_pct[sym] = 0.0
+                                        if sym in self.pnl_history:
+                                            self.pnl_history[sym].clear()
                                     else:
                                         logger.info(f"[{sym}] LIMIT INTENT: {binance_side} at {limit_price_str} (Offset: {offset_amount:.4f})")
-                                        order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTC", reduce_only=is_closing)
+                                        order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTC", reduce_only=False)
                                     
                                     actual_order_id = order_res.get('orderId') or client_order_id
                                     logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")
@@ -787,13 +890,13 @@ class ProductionTradingBot:
                                         close_px = market.mid_price
                                         qty_closed = float(qty_str)
                                         if side == "CLOSE_LONG":
-                                            gross_pnl = (close_px - entry_px) * qty_closed
+                                             gross_pnl = (close_px - entry_px) * qty_closed
                                         else:
                                             gross_pnl = (entry_px - close_px) * qty_closed
                                             
                                         # Accurate trading fees: Maker for entry, Taker for market/hard stop or Maker for limit
                                         notional_cost_exit = qty_closed * close_px
-                                        exit_fee_rate = settings.taker_fee_pct if hard_stop_triggered else settings.maker_fee_pct
+                                        exit_fee_rate = settings.taker_fee_pct if is_market_exit else settings.maker_fee_pct
                                         dashboard_trade_fees = (entry_px * qty_closed * settings.maker_fee_pct) + (notional_cost_exit * exit_fee_rate)
                                         pnl = gross_pnl - dashboard_trade_fees
                                         
@@ -817,12 +920,13 @@ class ProductionTradingBot:
                                             self.last_win_time = time.time()
                                         self.session_win_rate = self.session_wins / self.session_trades
                                         
-                                    if self.redis.redis and hard_stop_triggered:
+                                    if self.redis.redis and (exit_override or is_closing):
                                         await self.redis.redis.lpush("dashboard:trade_history", json.dumps(trade_record))
                                         await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                         
-                                    # Track the limit order so we don't spam
-                                    self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time(), 'trade_record': trade_record}
+                                    # Only track pending LIMIT orders (market closes fill immediately)
+                                    if not is_market_exit:
+                                        self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time(), 'trade_record': trade_record}
                                     
                                     # Update local position state immediately to prevent over-buying before the next sync
                                     notional_cost = float(qty_str) * market.mid_price
@@ -839,6 +943,9 @@ class ProductionTradingBot:
                                         self.portfolio_state.free_margin += margin_used
                                         if abs(self.portfolio_state.positions[sym].quantity) < 1e-5:
                                             self.position_entry_times[sym] = 0.0
+                                            self.peak_pnl_pct[sym] = 0.0
+                                            if sym in self.pnl_history:
+                                                self.pnl_history[sym].clear()
                                     elif "OPEN_SHORT" in side:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
                                             self.portfolio_state.positions[sym].entry_time = time.time()
@@ -850,6 +957,9 @@ class ProductionTradingBot:
                                         self.portfolio_state.free_margin += margin_used
                                         if abs(self.portfolio_state.positions[sym].quantity) < 1e-5:
                                             self.position_entry_times[sym] = 0.0
+                                            self.peak_pnl_pct[sym] = 0.0
+                                            if sym in self.pnl_history:
+                                                self.pnl_history[sym].clear()
                                     
                                     # Calculate immediate RL Reward
                                     imm_reward = 0.0

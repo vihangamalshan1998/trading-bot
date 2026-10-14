@@ -531,7 +531,7 @@ async def run_training_loop():
                         registry.save_model(model, version_tag=version_tag, metrics=eval_result)
                         
                         if local_mode and (time.time() - last_push_time > 300):
-                            logger.info(f"🚀 Pushing evaluated Brain ({version_tag}) to VPS in the background ({push_count}/44)...")
+                            logger.info(f"🚀 Pushing evaluated Brain ({version_tag}) to VPS in the background ({push_count}/100)...")
                             last_push_time = time.time()
                             import subprocess
                             subprocess.Popen(
@@ -550,9 +550,9 @@ async def run_training_loop():
                                 stderr=subprocess.DEVNULL
                             )
                             
-                            # Auto-Shutdown after 44 successful pushes (approx 1 to 1.5 hours)
-                            if push_count >= 44:
-                                logger.info("✅ Successfully completed 44 Brain pushes. Auto-shutting down Master Trainer!")
+                            # Auto-Shutdown after 100 successful pushes (approx 1 to 1.5 hours)
+                            if push_count >= 100:
+                                logger.info("✅ Successfully completed 100 Brain pushes. Auto-shutting down Master Trainer!")
                                 import sys
                                 sys.exit(0)
                         

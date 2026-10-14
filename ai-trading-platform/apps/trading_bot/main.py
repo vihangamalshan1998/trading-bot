@@ -605,34 +605,36 @@ class ProductionTradingBot:
                                 self.peak_pnl_pct[sym] = pnl_pct_leveraged
                                 prev_peak = pnl_pct_leveraged
                             
-                            # 1. HARD STOP LOSS (-25% leveraged)
-                            if pnl_pct_leveraged <= -0.25:
-                                logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI.")
+                            # 1. HARD STOP LOSS (-15.0% leveraged = -1.50% spot move at 10x leverage)
+                            # Provides complete wick breathing room to survive liquidity sweeps and ride the swing!
+                            if pnl_pct_leveraged <= -0.15:
+                                logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI to protect capital.")
                                 hard_stop_triggered = True
                             
                             # 2. SUDDEN VELOCITY SHOCK DETECTOR (Catches flash spikes / wicks against winning trades)
-                            elif prev_peak >= 0.06:
+                            elif prev_peak >= 0.04:
                                 # Inspect PnL over the last 15 seconds
                                 recent_window = [p for t, p in self.pnl_history[sym] if (now_t - t) <= 15.0]
                                 if recent_window:
                                     recent_peak = max(recent_window)
-                                    # If PnL dropped by >= 5.0% leveraged in <15s and lost over 30% of recent peak
-                                    if (recent_peak - pnl_pct_leveraged) >= 0.05 and pnl_pct_leveraged < (recent_peak * 0.70):
+                                    # If PnL dropped by >= 3.5% leveraged in <15s and lost over 30% of recent peak
+                                    if (recent_peak - pnl_pct_leveraged) >= 0.035 and pnl_pct_leveraged < (recent_peak * 0.70):
                                         logger.warning(f"[{sym}] ⚡ SUDDEN VELOCITY SHOCK DETECTED: Rapid drop from +{recent_peak*100:.2f}% to +{pnl_pct_leveraged*100:.2f}% in <15s! Locking in profit immediately.")
                                         sudden_shock_triggered = True
 
-                            # 3. DYNAMIC ADAPTIVE RATCHETING TRAILING STOP (Let Trend Ride with No Ceiling)
+                            # 3. DYNAMIC ADAPTIVE RATCHETING TRAILING STOP (Micro-Swing 3-Tier System)
                             if not (hard_stop_triggered or sudden_shock_triggered):
-                                # Tier 1: Breakeven & Fee Protection (+6% to +10% peak)
-                                if 0.06 <= prev_peak < 0.10:
-                                    if pnl_pct_leveraged < 0.025: # Cover fees (+2.5% leveraged, guaranteeing net profit)
-                                        logger.info(f"[{sym}] 🔒 BREAKEVEN STOP TRIGGERED: Protecting fees and capital (Peak +{prev_peak*100:.2f}%, now +{pnl_pct_leveraged*100:.2f}%).")
+                                # Tier 1: Micro-Swing Impulse Protection (+4% to +10% peak)
+                                if 0.04 <= prev_peak < 0.10:
+                                    trailing_floor = max(0.02, prev_peak * 0.65) # Guarantee at least +2.0% net gain
+                                    if pnl_pct_leveraged < trailing_floor:
+                                        logger.info(f"[{sym}] 🔒 MICRO-SWING IMPULSE TRAIL: Peak +{prev_peak*100:.2f}%, now +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Banking impulse gain!")
                                         trailing_stop_triggered = True
                                 # Tier 2: Developing Trend (+10% to +25% peak)
                                 elif 0.10 <= prev_peak < 0.25:
-                                    trailing_floor = max(0.04, prev_peak * 0.75) # 25% breathing room, min +4% floor
+                                    trailing_floor = max(0.05, prev_peak * 0.75) # 25% breathing room, min +5% floor
                                     if pnl_pct_leveraged < trailing_floor:
-                                        logger.info(f"[{sym}] 🔒 TRAILING STOP TRIGGERED (Developing Trend): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing gain!")
+                                        logger.info(f"[{sym}] 🔒 TRAILING STOP TRIGGERED (Developing Swing): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing gain!")
                                         trailing_stop_triggered = True
                                 # Tier 3: Mature Deep Trend Runner (>= +25% peak, e.g. +50%, +100%+)
                                 elif prev_peak >= 0.25:
@@ -655,7 +657,11 @@ class ProductionTradingBot:
                     else:
                         # Pure Deterministic Policy (Learned AI Weights - Zero Random Exploration Noise)
                         action_val = action_logits[0]
-                        confidence = (action_logits[1] + 1.0) / 2.0
+                        # FIX: Temperature-Scaled Confidence to prevent tanh saturation
+                        # Old: (action_logits[1] + 1.0) / 2.0  → always ≈ 1.00 due to tanh saturation
+                        # New: sigmoid(raw / temperature) → spreads values across [0, 1] properly
+                        confidence_temperature = 3.0
+                        confidence = 1.0 / (1.0 + np.exp(-action_logits[1] / confidence_temperature))
                         target_size = (action_logits[2] + 1.0) / 2.0
                         price_offset = (action_logits[3] + 1.0) / 2.0
                     
@@ -695,63 +701,115 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / {cooldown_period:.0f}s).")
                                 continue
 
-                    # GUARD 2: Minimum Hold Duration (Hold at least 180s / 3 mins unless real Emergency Bailout / TP / SL / Trailing stop)
+                    # GUARD 2: Minimum Hold Duration (600s / 10 mins with Smart Trap Escape Door)
                     if is_closing and not exit_override:
-                        # Real Emergency Bailout: Only bypass 180s if in a REAL deep loss (<= -15.0% leveraged) with extreme conviction
-                        is_real_loss_emergency = (pnl_pct_leveraged <= -0.15 and confidence >= 0.90)
-                        if is_real_loss_emergency:
-                            logger.warning(f"[{sym}] 🚨 REAL EMERGENCY BAILOUT: Position in real deep loss ({pnl_pct_leveraged*100:.2f}%) with extreme conviction ({confidence:.2f} >= 0.90). Bypassing 180s hold to cut loss.")
-                        else:
-                            entry_t = self.position_entry_times.get(sym, 0.0)
-                            if entry_t > 0 and (time.time() - entry_t) < 180.0:
-                                logger.info(f"[{sym}] SKIPPING CLOSE: Minimum hold duration (180s) not met yet ({time.time() - entry_t:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%).")
-                                continue
+                        # 1. Early exit if in solid impulse profit (>= +3.0% leveraged)
+                        is_profit_impulse = pnl_pct_leveraged >= 0.03
+                        
+                        # 2. Smart Trap Escape Door: If Critic senses a confirmed fakeout / trap against us (>= 0.20% adverse move),
+                        # allow immediate exit to cut the trap early without waiting for the 10-minute timer!
+                        critic_vals = precomputed_critics.get(sym)
+                        pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
+                        is_trap_detected = (pos.quantity > 0 and pred_ret_5m <= -0.20 and confidence >= 0.70) or \
+                                           (pos.quantity < 0 and pred_ret_5m >= 0.20 and confidence >= 0.70)
+                        
+                        is_protective_loss = pnl_pct_leveraged <= -0.08
+                        
+                        entry_t = self.position_entry_times.get(sym, 0.0)
+                        time_held = (time.time() - entry_t) if entry_t > 0 else 999.0
+                        
+                        if is_trap_detected:
+                            logger.warning(f"[{sym}] 🚨 SMART TRAP DETECTED: Critic forecasts adverse reversal ({pred_ret_5m:+.2f}%) with {confidence:.2f} confidence. Bypassing 10m hold to escape trap!")
+                        elif time_held < 600.0 and not (is_profit_impulse or is_protective_loss):
+                            logger.info(f"[{sym}] ⏳ MICRO-SWING BREATHING: Minimum hold (600s) not met yet ({time_held:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%). Giving swing room to run!")
+                            continue
 
                     # GUARD 3: Strict Confidence Filter (Raised from 0.65 to 0.75 for high-quality setups)
                     if not is_closing and confidence < 0.75: 
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.75)")
                         continue 
-                    elif is_closing and not exit_override:
-                        # 1. Profit Gate: NEVER close for micro-gains (< +5.0% leveraged)! Let the trend ride to real targets.
-                        if 0.0 <= pnl_pct_leveraged < 0.05:
-                            logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: PnL is +{pnl_pct_leveraged*100:.2f}% < +5.0% leveraged fee-protection threshold. Letting trend ride!")
-                            continue
+
+                    # PILLAR 3: Macro Regime Trend-Alignment Gate (Block Counter-Trend Whipsaws)
+                    if not is_closing:
+                        btc_market = self.market_states.get("BTCUSDT")
+                        eth_market = self.market_states.get("ETHUSDT")
+                        btc_mom_15m = btc_market.features[4] if btc_market and len(btc_market.features) == 90 else 0.0
+                        eth_mom_15m = eth_market.features[4] if eth_market and len(eth_market.features) == 90 else 0.0
                         
-                        # 2. Solid Profit (>= +5.0% leveraged): Allow smooth profit taking (0.40 hurdle)
-                        if pnl_pct_leveraged >= 0.05:
+                        btc_critic_5m = float(precomputed_critics.get("BTCUSDT", [0.0])[0]) if "BTCUSDT" in precomputed_critics and len(precomputed_critics["BTCUSDT"]) > 0 else 0.0
+                        eth_critic_5m = float(precomputed_critics.get("ETHUSDT", [0.0])[0]) if "ETHUSDT" in precomputed_critics and len(precomputed_critics["ETHUSDT"]) > 0 else 0.0
+
+                        # Macro Downtrend: Clear downward momentum on both BTC & ETH (requires true drop, not flat tick)
+                        is_macro_down = (btc_mom_15m < -0.001 and eth_mom_15m < -0.001) or (btc_critic_5m < -0.15 and eth_critic_5m < -0.15)
+                        # Macro Uptrend: Clear upward momentum on both BTC & ETH
+                        is_macro_up = (btc_mom_15m > 0.001 and eth_mom_15m > 0.001) or (btc_critic_5m > 0.15 and eth_critic_5m > 0.15)
+
+                        if action_val > 0.2 and is_macro_down:
+                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC 15m ({btc_mom_15m*100:+.2f}%) & ETH 15m ({eth_mom_15m*100:+.2f}%) are trending DOWN. Blocking counter-trend OPEN_LONG!")
+                            continue
+                        elif action_val < -0.2 and is_macro_up:
+                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC 15m ({btc_mom_15m*100:+.2f}%) & ETH 15m ({eth_mom_15m*100:+.2f}%) are trending UP. Blocking counter-trend OPEN_SHORT!")
+                            continue
+
+                    elif is_closing and not exit_override:
+                        # PILLAR 2: Dynamic Profit Harvesting & Critic-Assisted Reversal Exit
+                        critic_vals = precomputed_critics.get(sym)
+                        pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
+                        has_reversal_critic = (pos.quantity > 0 and pred_ret_5m <= -0.15) or (pos.quantity < 0 and pred_ret_5m >= 0.15)
+                        
+                        # 1. Critic-Assisted Exit: If in profit (+1.5% to +4.0%) and Critic detects adverse reversal, lock in gain immediately!
+                        if 0.015 <= pnl_pct_leveraged < 0.040 and has_reversal_critic:
+                            logger.info(f"[{sym}] 🎯 CRITIC-ASSISTED PROFIT EXIT: PnL is +{pnl_pct_leveraged*100:.2f}% and Critic forecasts adverse reversal ({pred_ret_5m:+.2f}%). Securing green profit immediately!")
+                            # Bypass fee-protection gate and allow smooth exit
+                        elif 0.0 <= pnl_pct_leveraged < 0.018:
+                            # 2. Fee Protection Gate: Lowered from +5.0% to +1.8% leveraged (covers 0.40% round-trip fees with net profit buffer)
+                            logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: PnL is +{pnl_pct_leveraged*100:.2f}% < +1.80% leveraged fee-protection threshold. Letting trend ride!")
+                            continue
+                        elif pnl_pct_leveraged >= 0.018:
+                            # 3. Solid Profit (>= +1.8% leveraged): Allow smooth profit taking (0.40 hurdle)
                             close_hurdle = 0.40
                             if confidence < close_hurdle:
                                 logger.info(f"[{sym}] SKIPPING PROFIT CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f}, PnL: +{pnl_pct_leveraged*100:.2f}%)")
                                 continue
                         else:
-                            # 3. Negative PnL (< 0.0% leveraged):
-                            # Crypto trades need normal breathing room (fees = -2.0%, noise = +/-0.50% price move = +/-10% leveraged).
-                            # Do NOT close on minor negative fluctuations unless:
-                            # a) Critic forecasts an adverse move against us (>= 0.30%), OR
-                            # b) Deep loss (<= -15.0% leveraged) with extreme conviction (>= 0.90).
-                            critic_vals = precomputed_critics.get(sym)
-                            pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
-                            has_adverse_critic = (pos.quantity > 0 and pred_ret_5m <= -0.30) or (pos.quantity < 0 and pred_ret_5m >= 0.30)
+                            # 4. Negative PnL (< 0.0% leveraged):
+                            # Crypto wicks are normal (noise buffer allows breathing room up to -15% hard stop).
+                            # Cut early ONLY if Critic confirms a real trend breakdown (>= 0.20% adverse move), OR loss exceeds -12%
+                            has_adverse_critic = (pos.quantity > 0 and pred_ret_5m <= -0.20) or (pos.quantity < 0 and pred_ret_5m >= 0.20)
                             
                             if pnl_pct_leveraged > -0.15 and not has_adverse_critic:
-                                logger.info(f"[{sym}] SKIPPING NOISE EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (normal market breathing room, Critic return {pred_ret_5m:+.2f}% is not adverse). Giving trade room to run!")
+                                logger.info(f"[{sym}] SKIPPING WICK EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (surviving wick noise buffer up to -15%, Critic return {pred_ret_5m:+.2f}% is not adverse). Giving swing room to run!")
                                 continue
                             
-                            # Deep loss cut: require >= 0.90 conviction to cut before hard stop
-                            if confidence < 0.90:
-                                logger.info(f"[{sym}] SKIPPING LOSS CLOSE (Conviction {confidence:.2f} < 0.90, PnL: {pnl_pct_leveraged*100:+.2f}%)")
+                            # Deep loss cut: require >= 0.75 conviction to cut before hard stop
+                            if confidence < 0.75:
+                                logger.info(f"[{sym}] SKIPPING LOSS CLOSE (Conviction {confidence:.2f} < 0.75, PnL: {pnl_pct_leveraged*100:+.2f}%)")
                                 continue
 
-                    # GUARD 4: Critic Multi-Horizon Return Check (Requires at least 0.40% to safely beat exchange fees + spread with clear profit)
+                    # GUARD 4: Critic Multi-Horizon Swing Return Check (5m, 1h, 4h)
                     critic_vals = precomputed_critics.get(sym)
-                    if not is_closing and critic_vals is not None and len(critic_vals) > 0:
+                    if not is_closing and critic_vals is not None and len(critic_vals) >= 1:
                         pred_ret_5m = float(critic_vals[0])
+                        pred_ret_1h = float(critic_vals[1]) if len(critic_vals) > 1 else pred_ret_5m
+                        pred_ret_4h = float(critic_vals[2]) if len(critic_vals) > 2 else pred_ret_1h
+                        
                         min_hurdle = max(0.40, settings.min_open_expected_return_pct) # 0.40% min move
+                        
+                        # 1. 5-Minute Entry Hurdle (Beats fee + spread)
                         if action_val > 0.2 and pred_ret_5m < min_hurdle:
-                            logger.info(f"[{sym}] SKIPPING OPEN_LONG: Critic return {pred_ret_5m:.2f}% < {min_hurdle:.2f}% fee hurdle.")
+                            logger.info(f"[{sym}] SKIPPING OPEN_LONG: 5m Critic return {pred_ret_5m:.2f}% < {min_hurdle:.2f}% fee hurdle.")
                             continue
                         elif action_val < -0.2 and pred_ret_5m > -min_hurdle:
-                            logger.info(f"[{sym}] SKIPPING OPEN_SHORT: Critic return {pred_ret_5m:.2f}% > -{min_hurdle:.2f}% fee hurdle.")
+                            logger.info(f"[{sym}] SKIPPING OPEN_SHORT: 5m Critic return {pred_ret_5m:.2f}% > -{min_hurdle:.2f}% fee hurdle.")
+                            continue
+                            
+                        # 2. 1-Hour & 4-Hour Multi-Horizon Swing Alignment
+                        # Prevents entering if the 1h or 4h macro swing is in clear active opposition
+                        if action_val > 0.2 and (pred_ret_1h < -0.15 or pred_ret_4h < -0.20):
+                            logger.info(f"[{sym}] 🛑 SKIPPING OPEN_LONG: 1h Critic ({pred_ret_1h:+.2f}%) or 4h Critic ({pred_ret_4h:+.2f}%) opposes Long swing!")
+                            continue
+                        elif action_val < -0.2 and (pred_ret_1h > 0.15 or pred_ret_4h > 0.20):
+                            logger.info(f"[{sym}] 🛑 SKIPPING OPEN_SHORT: 1h Critic ({pred_ret_1h:+.2f}%) or 4h Critic ({pred_ret_4h:+.2f}%) opposes Short swing!")
                             continue
 
                     # GUARD 5: Safe Position Margin Budget (Max 15% equity allocated per position)
@@ -813,11 +871,23 @@ class ProductionTradingBot:
                         active_version = self.registry.get_current_version()
                         target_qty = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack
                         
-                        # Only trade the difference between target and current position
+                        # MICRO-SWING CONSOLIDATED ENTRY: If position is already established (>= 60% of target),
+                        # do NOT micro-slice tiny incremental dust (eliminates fee bleed!)
                         if "OPEN" in side:
-                            qty_raw = max(0.0, target_qty - abs(pos.quantity))
+                            if abs(pos.quantity) > 0:
+                                if abs(pos.quantity) >= (0.60 * target_qty):
+                                    logger.info(f"[{sym}] Micro-Swing position established ({abs(pos.quantity):.4f} >= 60% of target {target_qty:.4f}). Skipping micro-slice.")
+                                    continue
+                                qty_raw = max(0.0, target_qty - abs(pos.quantity))
+                            else:
+                                qty_raw = target_qty
+                                
+                            # Filter micro-dust orders under $50 notional to prevent fee bleed
+                            if (qty_raw * market.mid_price) < 50.0:
+                                logger.info(f"[{sym}] Skipping micro-order: notional ${qty_raw * market.mid_price:.2f} < $50.00 minimum.")
+                                continue
                         else:
-                            # For CLOSE actions, we close the entire existing quantity (or up to target)
+                            # For CLOSE actions, we close the entire existing quantity
                             qty_raw = abs(pos.quantity)
                             
                         if qty_raw <= 0.0001:
@@ -1049,16 +1119,27 @@ class ProductionTradingBot:
                                         # --- ACCOUNT-AGNOSTIC REWARD UPGRADE ---
                                         # Use ROI (Percentage) instead of absolute PnL so the AI 
                                         # does not get confused when moving from $100k Testnet to $500 Live.
+                                        #
+                                        # FIX: Confidence-Weighted Reward — teaches the AI that
+                                        # high confidence on a losing trade = EXTRA pain,
+                                        # high confidence on a winning trade = EXTRA reward.
+                                        # This creates a gradient signal for calibrating confidence honestly.
                                         if roi < 0:
-                                            # Drawdown Penalty: Heavy punishment for closing at a loss
-                                            imm_reward = roi * 2.5 
-                                        elif roi > 0 and roi < 5.0: # CHANGED: Increased from 1.0 to 5.0
+                                            # Confidence-Amplified Loss Penalty:
+                                            # At confidence=0.0 → 1.0x base penalty
+                                            # At confidence=0.5 → 1.75x penalty  
+                                            # At confidence=1.0 → 2.5x penalty (overconfident = extra pain)
+                                            confidence_penalty = 1.0 + (confidence * 1.5)
+                                            imm_reward = roi * confidence_penalty
+                                        elif roi > 0 and roi < 5.0:
                                             # Time Decay Proxy: Punish tiny "lazy" wins (< 5% ROI)
                                             # Forces the AI to look for real momentum instead of micro-scalping
                                             imm_reward = -abs(roi * 0.5) 
                                         else:
-                                            # Sniper Bonus: Huge reward for clean, high-momentum trades
-                                            imm_reward = roi * 1.5
+                                            # Confidence-Amplified Sniper Bonus:
+                                            # High confidence on a big win = rewarded for accurate conviction
+                                            confidence_bonus = 1.0 + (confidence * 0.5)
+                                            imm_reward = roi * confidence_bonus
                                             
                                         imm_pnl = pnl
                                     elif "OPEN" in side:

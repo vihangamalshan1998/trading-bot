@@ -364,13 +364,7 @@ class ProductionTradingBot:
                                 self.position_entry_times[sym] = 0.0
                                 self.portfolio_state.positions[sym].entry_price = 0.0
                                 
-                    # Zero out any symbols absent from Binance response
-                    for s in self.symbols:
-                        if s in self.portfolio_state.positions and s not in active_synced_symbols:
-                            self.portfolio_state.positions[s].quantity = 0.0
-                            self.portfolio_state.positions[s].entry_price = 0.0
-                            
-                        # CRITICAL FIX: Only send active positions to the dashboard (filter out ghost/closed records)
+                        # CRITICAL: Only send active positions to the dashboard (once per active position)
                         if abs(amt) > 0:
                             pnl = float(p.get("unRealizedProfit", 0))
                             formatted_positions.append({
@@ -384,6 +378,12 @@ class ProductionTradingBot:
                                 "liquidationPrice": float(p.get("liquidationPrice", 0)),
                                 "marginType": p.get("marginType", "cross")
                             })
+
+                    # Zero out any symbols absent from Binance response
+                    for s in self.symbols:
+                        if s in self.portfolio_state.positions and s not in active_synced_symbols:
+                            self.portfolio_state.positions[s].quantity = 0.0
+                            self.portfolio_state.positions[s].entry_price = 0.0
                     
                     if self.redis.redis:
                         payload = {

@@ -899,7 +899,8 @@ class ProductionTradingBot:
                                     actual_order_id = order_res.get('orderId') or client_order_id
                                     logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")
                                     
-                                    order_exec_price = float(limit_price_str) if not is_market_exit else market.mid_price
+                                    avg_fill = float(order_res.get('avgPrice', 0.0))
+                                    order_exec_price = avg_fill if avg_fill > 0 else (float(limit_price_str) if not is_market_exit else market.mid_price)
 
                                     # Capture entry price before modifying position
                                     entry_px = self.portfolio_state.positions[sym].entry_price if sym in self.portfolio_state.positions else 0.0

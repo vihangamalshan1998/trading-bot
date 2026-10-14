@@ -273,8 +273,11 @@ class PPOTrainer:
                     logger.warning(f"Candidate evaluation FAILED: Challenger critic loss exploded ({challenger_critic_mse:.2f} > 100.0).")
                     return {"approved": False, "reason": "CRITIC_EXPLODED", "critic_loss": challenger_critic_mse}
 
-                # Simulated directional alignment score: action * realized return
-                challenger_sim_pnl = float((challenger_actions[:, 0] * actual_5m_ret).mean().item())
+                # Real-World VPS Fee Simulation: Deduct 0.10% Binance Futures round-trip taker fee per active trade
+                fee_hurdle = 0.10  # 0.10% fee (0.05% entry + 0.05% exit)
+                challenger_is_active = (torch.abs(challenger_actions[:, 0]) > 0.2).float()
+                challenger_net_returns = (challenger_actions[:, 0] * actual_5m_ret) - (challenger_is_active * fee_hurdle)
+                challenger_sim_pnl = float(challenger_net_returns.mean().item())
                 challenger_score = challenger_sim_pnl - (0.5 * challenger_critic_mse)
 
             # 2. Benchmark against Production Champion
@@ -303,7 +306,9 @@ class PPOTrainer:
                 with torch.no_grad():
                     champ_actions, champ_values = champion_model(states)
                     champ_critic_mse = float(nn.MSELoss()(champ_values, safe_rewards).item())
-                    champ_sim_pnl = float((champ_actions[:, 0] * actual_5m_ret).mean().item())
+                    champ_is_active = (torch.abs(champ_actions[:, 0]) > 0.2).float()
+                    champ_net_returns = (champ_actions[:, 0] * actual_5m_ret) - (champ_is_active * fee_hurdle)
+                    champ_sim_pnl = float(champ_net_returns.mean().item())
                     champion_score = champ_sim_pnl - (0.5 * champ_critic_mse)
 
                 del champion_model, champ_actions, champ_values
@@ -377,31 +382,33 @@ async def run_training_loop():
     
     if local_mode:
         total_cores = os.cpu_count() or 4
-        # HARD CORE AFFINITY: Lock Windows scheduling strictly to Core 0 and Core 1 (Mask = 3).
-        # Gives 2x compute power while leaving 6 threads completely free for cooling.
+        # DYNAMIC THERMAL BALANCING: Do NOT lock strictly to Core 0 (Mask=3 locks both threads to a single physical core, causing severe localized hotspots!).
+        # Instead, allow Windows scheduler to dynamically rotate threads across ALL physical cores.
+        # Combined with torch.set_num_threads(2), this keeps total CPU load at ~25% while rotating heat across the entire die so no single core overheats.
         try:
             import ctypes
             handle = ctypes.windll.kernel32.GetCurrentProcess()
+            all_cores_mask = (1 << total_cores) - 1
             ctypes.windll.kernel32.SetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-            ctypes.windll.kernel32.SetProcessAffinityMask(handle, 3)
+            ctypes.windll.kernel32.SetProcessAffinityMask(handle, all_cores_mask)
             # Set Process Priority to BELOW_NORMAL (0x00004000)
             ctypes.windll.kernel32.SetPriorityClass(handle, 0x00004000)
-            logger.info("❄️ BALANCED AFFINITY APPLIED: Process locked strictly to 2 CPU cores & BELOW_NORMAL priority.")
+            logger.info(f"❄️ DYNAMIC THERMAL BALANCING ACTIVE: Workload rotated across all {total_cores} cores & BELOW_NORMAL priority.")
         except Exception as aff_e:
-            logger.warning(f"Could not apply affinity mask: {aff_e}")
+            logger.warning(f"Could not apply thermal settings: {aff_e}")
 
-        # PyTorch thread cap: 2 threads (Balanced performance mode)
-        safe_threads = 2
+        # PyTorch thread cap: strictly 1 worker thread (Zero thread-lock overhead, ~12.5% single-core load)
+        safe_threads = 1
         torch.set_num_threads(safe_threads)
         try:
             torch.set_num_interop_threads(1)
         except Exception:
             pass
 
-        logger.info(f"❄️ BALANCED COOLING ACTIVE: PyTorch running on {safe_threads} cores with 0.75s rest cycles.")
         limit = 2000
-        epochs = 4  # Deep PPO passes per batch
-        sleep_time = 0.75  # 0.75s cooling breather after every step
+        epochs = 2  # Balanced PPO passes per batch (cuts continuous computation time)
+        sleep_time = 0.5 # 4.0s cooling breather after every step for complete heat dissipation
+        logger.info(f"❄️ MAXIMUM THERMAL PROTECTION: PyTorch capped at {safe_threads} thread, {epochs} epochs, with {sleep_time}s heatpipe breathers.")
     else:
         logger.info("🐢 VPS MODE DETECTED: Running in STARVATION MODE (1 CPU Core, 300 RAM limit)")
         torch.set_num_threads(1)

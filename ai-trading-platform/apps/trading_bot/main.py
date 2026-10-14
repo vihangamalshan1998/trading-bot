@@ -715,27 +715,35 @@ class ProductionTradingBot:
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.75)")
                         continue 
                     elif is_closing and not exit_override:
-                        # 1. Profit Protection: NEVER close for micro-gains! Let the trend ride to real targets.
+                        # 1. Profit Gate: NEVER close for micro-gains (< +5.0% leveraged)! Let the trend ride to real targets.
                         if 0.0 <= pnl_pct_leveraged < 0.05:
                             logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: PnL is +{pnl_pct_leveraged*100:.2f}% < +5.0% leveraged fee-protection threshold. Letting trend ride!")
                             continue
                         
-                        # 2. Spread Noise Protection: If slightly negative (-3.0% to 0.0% leveraged, e.g. -$0.88 spread),
-                        # do NOT panic-close on minor wiggles! Giving the trade breathing room.
-                        if -0.03 < pnl_pct_leveraged < 0.0:
-                            logger.info(f"[{sym}] SKIPPING SPREAD NOISE EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (normal bid-ask spread). Giving trade room to breathe!")
-                            continue
-                        
-                        # 3. Solid Profit (>= +5.0% leveraged): Allow smooth profit taking (0.40 hurdle)
+                        # 2. Solid Profit (>= +5.0% leveraged): Allow smooth profit taking (0.40 hurdle)
                         if pnl_pct_leveraged >= 0.05:
                             close_hurdle = 0.40
+                            if confidence < close_hurdle:
+                                logger.info(f"[{sym}] SKIPPING PROFIT CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f}, PnL: +{pnl_pct_leveraged*100:.2f}%)")
+                                continue
                         else:
-                            # 4. Real Loss (<= -3.0% leveraged): Require high conviction (>= 0.85) to cut the trade
-                            close_hurdle = 0.85
-
-                        if confidence < close_hurdle:
-                            logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f}, PnL: {pnl_pct_leveraged*100:+.2f}%)")
-                            continue
+                            # 3. Negative PnL (< 0.0% leveraged):
+                            # Crypto trades need normal breathing room (fees = -2.0%, noise = +/-0.50% price move = +/-10% leveraged).
+                            # Do NOT close on minor negative fluctuations unless:
+                            # a) Critic forecasts an adverse move against us (>= 0.30%), OR
+                            # b) Deep loss (<= -15.0% leveraged) with extreme conviction (>= 0.90).
+                            critic_vals = precomputed_critics.get(sym)
+                            pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
+                            has_adverse_critic = (pos.quantity > 0 and pred_ret_5m <= -0.30) or (pos.quantity < 0 and pred_ret_5m >= 0.30)
+                            
+                            if pnl_pct_leveraged > -0.15 and not has_adverse_critic:
+                                logger.info(f"[{sym}] SKIPPING NOISE EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (normal market breathing room, Critic return {pred_ret_5m:+.2f}% is not adverse). Giving trade room to run!")
+                                continue
+                            
+                            # Deep loss cut: require >= 0.90 conviction to cut before hard stop
+                            if confidence < 0.90:
+                                logger.info(f"[{sym}] SKIPPING LOSS CLOSE (Conviction {confidence:.2f} < 0.90, PnL: {pnl_pct_leveraged*100:+.2f}%)")
+                                continue
 
                     # GUARD 4: Critic Multi-Horizon Return Check (Requires at least 0.40% to safely beat exchange fees + spread with clear profit)
                     critic_vals = precomputed_critics.get(sym)

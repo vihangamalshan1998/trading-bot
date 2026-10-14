@@ -320,11 +320,12 @@ class PPOTrainer:
 
             del states, actions, rewards, next_states, dones
 
-            # Superiority criteria:
-            # 1. Composite score must be higher than Champion, OR
-            # 2. Critic MSE improved with non-degraded directional PnL
-            is_superior = (challenger_score >= champion_score) or (
-                challenger_critic_mse < champ_critic_mse and challenger_sim_pnl >= champ_sim_pnl - 0.05
+            # Superiority criteria (Strict Elite Margin):
+            # 1. Composite score must beat Champion by at least +0.50 victory margin, OR
+            # 2. Significant Critic MSE improvement (>= 15% error reduction) with non-degraded directional PnL
+            SUPERIORITY_MARGIN = 0.50
+            is_superior = (challenger_score >= champion_score + SUPERIORITY_MARGIN) or (
+                challenger_critic_mse <= (champ_critic_mse * 0.85) and challenger_sim_pnl >= champ_sim_pnl
             )
 
             metrics = {

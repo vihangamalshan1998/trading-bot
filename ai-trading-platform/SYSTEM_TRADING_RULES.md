@@ -78,11 +78,12 @@ Position closures prioritize capital preservation and guaranteed execution over 
   * Trailing floor tightens to $\text{prev\_peak} \times 0.85$.
   * Harvests and banks $85\%$ of peak gains on massive runs (e.g., $+50\%$, $+100\%+$).
 
-### 6. Strict Net-Profit Gate Before Any Profit Exit
-* **Absolute Rule:** The bot will **NEVER close a winning trade prematurely** if leveraged PnL is between $0.0\%$ and $+5.0\%$ ($0.0 \le \text{PnL} < +5.0\%$).
-* **If in Early Profit ($< +5.0\%$ leveraged):** Closes are completely skipped (`continue`). The trade is given room to run to target or activate the Dynamic Trailing Stop.
-* **If in Solid Profit ($\ge +5.0\%$ leveraged):** AI is allowed to take profit with moderate confidence ($\text{Confidence} \ge 0.40$), guaranteeing large net gains after clearing all round-trip exchange fees.
-* **If Underwater / Loss ($< 0.0\%$):** Requires high conviction ($\text{Confidence} \ge 0.85$ Emergency Bailout) or stop-loss/shock triggers to cut the trade, preventing exits on random adverse wiggles.
+### 6. Strict Net-Profit Gate & Spread Noise Breathing Room
+* **Winning Profit Protection:** The bot will **NEVER close a winning trade prematurely** if leveraged PnL is between $0.0\%$ and $+5.0\%$ ($0.0 \le \text{PnL} < +5.0\%$). It forces the trade to ride until target or trailing stop.
+* **Spread Noise Protection:** If slightly negative between $-3.0\%$ and $0.0\%$ leveraged (e.g. $-\$0.88$ normal bid-ask spread), panic-closing is **completely blocked**. The trade is given breathing room.
+* **Emergency Bailout Condition:** Emergency bailout to bypass the 90s hold requires a **REAL loss** ($\text{PnL} \le -5.0\%$ leveraged) with extreme conviction ($\text{Confidence} \ge 0.85$). Minor wiggles are never treated as emergencies.
+* **Solid Profit ($\ge +5.0\%$ leveraged):** AI is allowed to take profit with moderate confidence ($\text{Confidence} \ge 0.40$), guaranteeing large net gains after clearing all round-trip exchange fees.
+* **Real Loss ($\le -3.0\%$ leveraged):** Allowed to cut the trade if the AI has high conviction ($\text{Confidence} \ge 0.85$).
 
 ---
 

@@ -698,15 +698,16 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / {cooldown_period:.0f}s).")
                                 continue
 
-                    # GUARD 2: Minimum Hold Duration (Hold at least 90s unless Emergency Bailout / TP / SL / Trailing stop)
+                    # GUARD 2: Minimum Hold Duration (Hold at least 90s unless real Emergency Bailout / TP / SL / Trailing stop)
                     if is_closing and not exit_override:
-                        # Emergency AI Bailout: If the AI detects that the trade went completely wrong with high conviction (>= 0.85), cut it immediately!
-                        if confidence >= 0.85:
-                            logger.warning(f"[{sym}] 🚨 EMERGENCY AI BAILOUT: Extreme opposing conviction ({confidence:.2f} >= 0.85). Bypassing 90s hold to cut loss immediately.")
+                        # Real Emergency Bailout: Only bypass 90s if in a REAL loss (<= -5.0% leveraged) with extreme conviction
+                        is_real_loss_emergency = (pnl_pct_leveraged <= -0.05 and confidence >= 0.85)
+                        if is_real_loss_emergency:
+                            logger.warning(f"[{sym}] 🚨 REAL EMERGENCY BAILOUT: Position in real loss ({pnl_pct_leveraged*100:.2f}%) with extreme conviction ({confidence:.2f} >= 0.85). Bypassing 90s hold to cut loss.")
                         else:
                             entry_t = self.position_entry_times.get(sym, 0.0)
                             if entry_t > 0 and (time.time() - entry_t) < 90.0:
-                                logger.info(f"[{sym}] SKIPPING CLOSE: Minimum hold duration (90s) not met yet ({time.time() - entry_t:.1f}s).")
+                                logger.info(f"[{sym}] SKIPPING CLOSE: Minimum hold duration (90s) not met yet ({time.time() - entry_t:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%).")
                                 continue
 
                     # GUARD 3: Strict Confidence Filter (Raised from 0.65 to 0.75 for high-quality setups)
@@ -714,17 +715,22 @@ class ProductionTradingBot:
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.75)")
                         continue 
                     elif is_closing and not exit_override:
-                        # Fee protection: NEVER close a winning trade prematurely for small gains!
-                        # If in positive PnL but hasn't reached +5.0% leveraged yet, let the trend run.
+                        # 1. Profit Protection: NEVER close for micro-gains! Let the trend ride to real targets.
                         if 0.0 <= pnl_pct_leveraged < 0.05:
                             logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: PnL is +{pnl_pct_leveraged*100:.2f}% < +5.0% leveraged fee-protection threshold. Letting trend ride!")
                             continue
                         
-                        # If position has reached >= +5.0% leveraged, allow smooth profit taking (0.40 hurdle)
+                        # 2. Spread Noise Protection: If slightly negative (-3.0% to 0.0% leveraged, e.g. -$0.88 spread),
+                        # do NOT panic-close on minor wiggles! Giving the trade breathing room.
+                        if -0.03 < pnl_pct_leveraged < 0.0:
+                            logger.info(f"[{sym}] SKIPPING SPREAD NOISE EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (normal bid-ask spread). Giving trade room to breathe!")
+                            continue
+                        
+                        # 3. Solid Profit (>= +5.0% leveraged): Allow smooth profit taking (0.40 hurdle)
                         if pnl_pct_leveraged >= 0.05:
                             close_hurdle = 0.40
                         else:
-                            # If position is underwater, require high conviction (>= 0.85 Emergency Bailout)
+                            # 4. Real Loss (<= -3.0% leveraged): Require high conviction (>= 0.85) to cut the trade
                             close_hurdle = 0.85
 
                         if confidence < close_hurdle:

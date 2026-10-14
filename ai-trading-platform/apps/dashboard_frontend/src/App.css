@@ -398,6 +398,12 @@ body {
 .progress-bar.alloc {
   background: linear-gradient(90deg, #f200fe, #ac4ffe);
 }
+.progress-bar.critic-pos {
+  background: linear-gradient(90deg, #00e676, #00c853);
+}
+.progress-bar.critic-neg {
+  background: linear-gradient(90deg, #ff5252, #d50000);
+}
 
 .table-responsive {
   width: 100%;

@@ -668,10 +668,13 @@ class ProductionTradingBot:
                     else: predicted_side = "HOLD"
                     
                     if self.redis.redis:
+                        critic_vals = precomputed_critics.get(sym)
+                        pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
                         ai_state = {
                             "predicted_side": predicted_side,
                             "confidence": float(confidence),
-                            "target_size": float(target_size)
+                            "target_size": float(target_size),
+                            "critic_return": float(pred_ret_5m)
                         }
                         await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
                     

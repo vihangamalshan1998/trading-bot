@@ -628,7 +628,7 @@ class ProductionTradingBot:
                             if not (hard_stop_triggered or sudden_shock_triggered):
                                 # Tier 1: Breakeven & Fee Protection (+6% to +10% peak)
                                 if 0.06 <= prev_peak < 0.10:
-                                    if pnl_pct_leveraged < 0.015: # Cover fees (+1.5% leveraged)
+                                    if pnl_pct_leveraged < 0.025: # Cover fees (+2.5% leveraged, guaranteeing net profit)
                                         logger.info(f"[{sym}] 🔒 BREAKEVEN STOP TRIGGERED: Protecting fees and capital (Peak +{prev_peak*100:.2f}%, now +{pnl_pct_leveraged*100:.2f}%).")
                                         trailing_stop_triggered = True
                                 # Tier 2: Developing Trend (+10% to +25% peak)
@@ -686,23 +686,23 @@ class ProductionTradingBot:
                         time_since_close = time.time() - self.last_close_time.get(sym, 0.0)
                         cooldown_period = 180.0 # 3 minutes baseline cooldown
                         if time_since_close < cooldown_period:
-                            # High-Conviction Fast-Pass Override: Allows immediate entry if AI is >= 90% confident + Critic confirms
+                            # High-Conviction Fast-Pass Override: Allows immediate entry if AI is >= 90% confident + Critic forecasts a massive breakout (>= 0.60%)
                             critic_vals = precomputed_critics.get(sym)
                             pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
-                            min_hurdle = settings.min_open_expected_return_pct
-                            has_critic_conviction = (action_val > 0.2 and pred_ret_5m >= min_hurdle) or (action_val < -0.2 and pred_ret_5m <= -min_hurdle)
+                            fast_pass_critic_hurdle = 0.75 # 0.75% massive move required to bypass 3m cooldown
+                            has_critic_conviction = (action_val > 0.2 and pred_ret_5m >= fast_pass_critic_hurdle) or (action_val < -0.2 and pred_ret_5m <= -fast_pass_critic_hurdle)
                             
                             if confidence >= 0.90 and has_critic_conviction:
-                                logger.info(f"[{sym}] 🎯 HIGH-CONVICTION FAST-PASS: Bypassing cooldown ({time_since_close:.1f}s/{cooldown_period:.0f}s) due to extreme confidence ({confidence:.2f} >= 0.90) & Critic return ({pred_ret_5m:+.2f}%)!")
+                                logger.info(f"[{sym}] 🎯 HIGH-CONVICTION FAST-PASS: Bypassing cooldown ({time_since_close:.1f}s/{cooldown_period:.0f}s) due to extreme confidence ({confidence:.2f} >= 0.90) & massive Critic return ({pred_ret_5m:+.2f}% >= {fast_pass_critic_hurdle:.2f}%)!")
                             else:
                                 logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / {cooldown_period:.0f}s).")
                                 continue
 
-                    # GUARD 2: Minimum Hold Duration (Hold at least 45s unless TP / SL / Trailing stop)
+                    # GUARD 2: Minimum Hold Duration (Hold at least 90s unless TP / SL / Trailing stop)
                     if is_closing and not exit_override:
                         entry_t = self.position_entry_times.get(sym, 0.0)
-                        if entry_t > 0 and (time.time() - entry_t) < 45.0:
-                            logger.info(f"[{sym}] SKIPPING CLOSE: Minimum hold duration (45s) not met yet.")
+                        if entry_t > 0 and (time.time() - entry_t) < 90.0:
+                            logger.info(f"[{sym}] SKIPPING CLOSE: Minimum hold duration (90s) not met yet ({time.time() - entry_t:.1f}s).")
                             continue
 
                     # GUARD 3: Strict Confidence Filter (Raised from 0.65 to 0.75 for high-quality setups)
@@ -710,18 +710,21 @@ class ProductionTradingBot:
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.75)")
                         continue 
                     elif is_closing and not exit_override:
-                        # If in profit, allow closing easily (0.35 threshold) so winning trades are NOT missed!
-                        # If in loss, require 0.50 threshold
-                        close_hurdle = 0.35 if pnl_pct_leveraged > 0.01 else 0.50
+                        # Fee protection: round-trip fee is ~1.8% to 2.0% leveraged.
+                        # Only consider net profitable if leveraged PnL >= +3.0% (+0.15% price move).
+                        # If net profitable, allow smooth profit taking (0.40 hurdle).
+                        # If near-breakeven or underwater, require high conviction (0.65) so we don't churn out on noise!
+                        is_net_profitable = pnl_pct_leveraged >= 0.03
+                        close_hurdle = 0.40 if is_net_profitable else 0.65
                         if confidence < close_hurdle:
-                            logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f})")
+                            logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f}, Net Profitable: {is_net_profitable})")
                             continue
 
-                    # GUARD 4: Critic Multi-Horizon Return Check (Reject trades if expected move cannot clear fees)
+                    # GUARD 4: Critic Multi-Horizon Return Check (Requires at least 0.40% to safely beat exchange fees + spread with clear profit)
                     critic_vals = precomputed_critics.get(sym)
                     if not is_closing and critic_vals is not None and len(critic_vals) > 0:
                         pred_ret_5m = float(critic_vals[0])
-                        min_hurdle = settings.min_open_expected_return_pct
+                        min_hurdle = max(0.40, settings.min_open_expected_return_pct) # 0.40% min move
                         if action_val > 0.2 and pred_ret_5m < min_hurdle:
                             logger.info(f"[{sym}] SKIPPING OPEN_LONG: Critic return {pred_ret_5m:.2f}% < {min_hurdle:.2f}% fee hurdle.")
                             continue

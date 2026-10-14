@@ -345,10 +345,11 @@ class ProductionTradingBot:
                     # Update live positions
                     live_positions = await self.binance.get_positions()
                     formatted_positions = []
-                    # Reset local quantities before parsing
+                    # Reset local quantities and entry prices before parsing
                     for s in self.symbols:
                         if s in self.portfolio_state.positions:
                             self.portfolio_state.positions[s].quantity = 0.0
+                            self.portfolio_state.positions[s].entry_price = 0.0
                             
                     for p in live_positions:
                         sym = p.get("symbol")
@@ -357,12 +358,13 @@ class ProductionTradingBot:
                         # Sync back to internal portfolio state
                         if sym in self.portfolio_state.positions:
                             self.portfolio_state.positions[sym].quantity = amt
-                            self.portfolio_state.positions[sym].entry_price = float(p.get("entryPrice", 0))
+                            self.portfolio_state.positions[sym].entry_price = float(p.get("entryPrice", 0)) if amt != 0 else 0.0
                             self.portfolio_state.positions[sym].leverage = int(p.get("leverage", 10))
                             if amt == 0.0:
                                 self.peak_pnl_pct[sym] = 0.0
                                 self.pnl_history[sym].clear()
                                 self.position_entry_times[sym] = 0.0
+                                self.portfolio_state.positions[sym].entry_price = 0.0
                             
                         # CRITICAL FIX: Only send active positions to the dashboard (filter out ghost/closed records)
                         if abs(amt) > 0:
@@ -494,6 +496,11 @@ class ProductionTradingBot:
                                     self.portfolio_state.positions[sym].quantity -= qty
                                 elif "CLOSE_LONG" in side or "OPEN_SHORT" in side:
                                     self.portfolio_state.positions[sym].quantity += qty
+                                    
+                                if abs(self.portfolio_state.positions[sym].quantity) < 1e-5:
+                                    self.portfolio_state.positions[sym].quantity = 0.0
+                                    self.portfolio_state.positions[sym].entry_price = 0.0
+                                    self.position_entry_times[sym] = 0.0
                                     
                                 if "OPEN" in side:
                                     self.portfolio_state.free_margin += margin_used
@@ -892,20 +899,33 @@ class ProductionTradingBot:
                                     actual_order_id = order_res.get('orderId') or client_order_id
                                     logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")
                                     
+                                    order_exec_price = float(limit_price_str) if not is_market_exit else market.mid_price
+
                                     # Capture entry price before modifying position
                                     entry_px = self.portfolio_state.positions[sym].entry_price if sym in self.portfolio_state.positions else 0.0
                                     pos_leverage = self.portfolio_state.positions[sym].leverage if sym in self.portfolio_state.positions else 10
                                     
+                                    # Fallback to Binance live position entry price if local entry_px was zero on a close
+                                    if "CLOSE" in side and entry_px <= 0 and self.trading_enabled and not self.dry_run:
+                                        try:
+                                            live_pos_check = await self.binance.get_positions()
+                                            for lp in live_pos_check:
+                                                if lp.get("symbol") == sym and float(lp.get("positionAmt", 0)) != 0:
+                                                    entry_px = float(lp.get("entryPrice", 0.0))
+                                                    break
+                                        except Exception:
+                                            pass
+
                                     # Prepare Trade History Record
                                     trade_record = {
                                         "timestamp": time.time(),
                                         "symbol": sym,
                                         "side": side,
                                         "quantity": float(qty_str),
-                                        "price": market.mid_price,
+                                        "price": order_exec_price,
                                         "confidence": float(confidence),
                                         "order_id": actual_order_id,
-                                        "entry_price": entry_px if entry_px > 0 else market.mid_price,
+                                        "entry_price": entry_px if ("CLOSE" in side and entry_px > 0) else order_exec_price,
                                         "gross_pnl": 0.0,
                                         "fees_paid": 0.0,
                                         "realized_pnl": 0.0,
@@ -914,7 +934,7 @@ class ProductionTradingBot:
                                     
                                     # Add Analytics for Closures
                                     if "CLOSE" in side and entry_px > 0:
-                                        close_px = market.mid_price
+                                        close_px = order_exec_price
                                         qty_closed = float(qty_str)
                                         if side == "CLOSE_LONG":
                                              gross_pnl = (close_px - entry_px) * qty_closed
@@ -956,19 +976,27 @@ class ProductionTradingBot:
                                         self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time(), 'trade_record': trade_record}
                                     
                                     # Update local position state immediately to prevent over-buying before the next sync
-                                    notional_cost = float(qty_str) * market.mid_price
+                                    notional_cost = float(qty_str) * order_exec_price
                                     margin_used = notional_cost / settings.max_leverage
 
                                     if "OPEN_LONG" in side:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
                                             self.portfolio_state.positions[sym].entry_time = time.time()
                                             self.position_entry_times[sym] = time.time()
+                                            self.portfolio_state.positions[sym].entry_price = order_exec_price
+                                        else:
+                                            old_q = abs(self.portfolio_state.positions[sym].quantity)
+                                            new_q = float(qty_str)
+                                            old_ep = self.portfolio_state.positions[sym].entry_price
+                                            self.portfolio_state.positions[sym].entry_price = ((old_ep * old_q) + (order_exec_price * new_q)) / (old_q + new_q)
                                         self.portfolio_state.positions[sym].quantity += float(qty_str)
                                         self.portfolio_state.free_margin -= margin_used
                                     elif "CLOSE_LONG" in side:
                                         self.portfolio_state.positions[sym].quantity -= float(qty_str)
                                         self.portfolio_state.free_margin += margin_used
                                         if abs(self.portfolio_state.positions[sym].quantity) < 1e-5:
+                                            self.portfolio_state.positions[sym].quantity = 0.0
+                                            self.portfolio_state.positions[sym].entry_price = 0.0
                                             self.position_entry_times[sym] = 0.0
                                             self.peak_pnl_pct[sym] = 0.0
                                             if sym in self.pnl_history:
@@ -977,12 +1005,20 @@ class ProductionTradingBot:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
                                             self.portfolio_state.positions[sym].entry_time = time.time()
                                             self.position_entry_times[sym] = time.time()
+                                            self.portfolio_state.positions[sym].entry_price = order_exec_price
+                                        else:
+                                            old_q = abs(self.portfolio_state.positions[sym].quantity)
+                                            new_q = float(qty_str)
+                                            old_ep = self.portfolio_state.positions[sym].entry_price
+                                            self.portfolio_state.positions[sym].entry_price = ((old_ep * old_q) + (order_exec_price * new_q)) / (old_q + new_q)
                                         self.portfolio_state.positions[sym].quantity -= float(qty_str)
                                         self.portfolio_state.free_margin -= margin_used
                                     elif "CLOSE_SHORT" in side:
                                         self.portfolio_state.positions[sym].quantity += float(qty_str)
                                         self.portfolio_state.free_margin += margin_used
                                         if abs(self.portfolio_state.positions[sym].quantity) < 1e-5:
+                                            self.portfolio_state.positions[sym].quantity = 0.0
+                                            self.portfolio_state.positions[sym].entry_price = 0.0
                                             self.position_entry_times[sym] = 0.0
                                             self.peak_pnl_pct[sym] = 0.0
                                             if sym in self.pnl_history:

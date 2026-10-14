@@ -714,14 +714,21 @@ class ProductionTradingBot:
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.75)")
                         continue 
                     elif is_closing and not exit_override:
-                        # Fee protection: round-trip fee is ~1.8% to 2.0% leveraged.
-                        # Only consider net profitable if leveraged PnL >= +3.0% (+0.15% price move).
-                        # If net profitable, allow smooth profit taking (0.40 hurdle).
-                        # If near-breakeven or underwater, require high conviction (0.65) so we don't churn out on noise!
-                        is_net_profitable = pnl_pct_leveraged >= 0.03
-                        close_hurdle = 0.40 if is_net_profitable else 0.65
+                        # Fee protection: NEVER close a winning trade prematurely for small gains!
+                        # If in positive PnL but hasn't reached +5.0% leveraged yet, let the trend run.
+                        if 0.0 <= pnl_pct_leveraged < 0.05:
+                            logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: PnL is +{pnl_pct_leveraged*100:.2f}% < +5.0% leveraged fee-protection threshold. Letting trend ride!")
+                            continue
+                        
+                        # If position has reached >= +5.0% leveraged, allow smooth profit taking (0.40 hurdle)
+                        if pnl_pct_leveraged >= 0.05:
+                            close_hurdle = 0.40
+                        else:
+                            # If position is underwater, require high conviction (>= 0.85 Emergency Bailout)
+                            close_hurdle = 0.85
+
                         if confidence < close_hurdle:
-                            logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f}, Net Profitable: {is_net_profitable})")
+                            logger.info(f"[{sym}] SKIPPING CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f}, PnL: {pnl_pct_leveraged*100:+.2f}%)")
                             continue
 
                     # GUARD 4: Critic Multi-Horizon Return Check (Requires at least 0.40% to safely beat exchange fees + spread with clear profit)

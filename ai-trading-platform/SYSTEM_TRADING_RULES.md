@@ -78,10 +78,11 @@ Position closures prioritize capital preservation and guaranteed execution over 
   * Trailing floor tightens to $\text{prev\_peak} \times 0.85$.
   * Harvests and banks $85\%$ of peak gains on massive runs (e.g., $+50\%$, $+100\%+$).
 
-### 6. Normal AI Close Net-Profit Gate
-* **True Net Profit Threshold:** Leveraged $\text{PnL} \ge +3.0\%$ ($+0.15\%$ price move).
-* **If Net Profitable ($\ge +3.0\%$):** AI can close smoothly with moderate confidence ($\text{Confidence} \ge 0.40$).
-* **If Near Breakeven or Underwater ($< +3.0\%$):** Requires high conviction ($\text{Confidence} \ge 0.65$) to close, preventing the bot from dumping winners prematurely on minor noise.
+### 6. Strict Net-Profit Gate Before Any Profit Exit
+* **Absolute Rule:** The bot will **NEVER close a winning trade prematurely** if leveraged PnL is between $0.0\%$ and $+5.0\%$ ($0.0 \le \text{PnL} < +5.0\%$).
+* **If in Early Profit ($< +5.0\%$ leveraged):** Closes are completely skipped (`continue`). The trade is given room to run to target or activate the Dynamic Trailing Stop.
+* **If in Solid Profit ($\ge +5.0\%$ leveraged):** AI is allowed to take profit with moderate confidence ($\text{Confidence} \ge 0.40$), guaranteeing large net gains after clearing all round-trip exchange fees.
+* **If Underwater / Loss ($< 0.0\%$):** Requires high conviction ($\text{Confidence} \ge 0.85$ Emergency Bailout) or stop-loss/shock triggers to cut the trade, preventing exits on random adverse wiggles.
 
 ---
 

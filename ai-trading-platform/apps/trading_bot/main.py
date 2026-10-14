@@ -345,26 +345,30 @@ class ProductionTradingBot:
                     # Update live positions
                     live_positions = await self.binance.get_positions()
                     formatted_positions = []
-                    # Reset local quantities and entry prices before parsing
-                    for s in self.symbols:
-                        if s in self.portfolio_state.positions:
-                            self.portfolio_state.positions[s].quantity = 0.0
-                            self.portfolio_state.positions[s].entry_price = 0.0
-                            
+                    # Update live positions without zeroing race conditions
+                    active_synced_symbols = set()
                     for p in live_positions:
                         sym = p.get("symbol")
                         amt = float(p.get("positionAmt", 0))
                         
                         # Sync back to internal portfolio state
                         if sym in self.portfolio_state.positions:
+                            active_synced_symbols.add(sym)
                             self.portfolio_state.positions[sym].quantity = amt
-                            self.portfolio_state.positions[sym].entry_price = float(p.get("entryPrice", 0)) if amt != 0 else 0.0
                             self.portfolio_state.positions[sym].leverage = int(p.get("leverage", 10))
-                            if amt == 0.0:
+                            if amt != 0:
+                                self.portfolio_state.positions[sym].entry_price = float(p.get("entryPrice", 0))
+                            else:
                                 self.peak_pnl_pct[sym] = 0.0
                                 self.pnl_history[sym].clear()
                                 self.position_entry_times[sym] = 0.0
                                 self.portfolio_state.positions[sym].entry_price = 0.0
+                                
+                    # Zero out any symbols absent from Binance response
+                    for s in self.symbols:
+                        if s in self.portfolio_state.positions and s not in active_synced_symbols:
+                            self.portfolio_state.positions[s].quantity = 0.0
+                            self.portfolio_state.positions[s].entry_price = 0.0
                             
                         # CRITICAL FIX: Only send active positions to the dashboard (filter out ghost/closed records)
                         if abs(amt) > 0:
@@ -874,6 +878,22 @@ class ProductionTradingBot:
                                         
                                     limit_price_str = sym_config.format_price(limit_price)
                                     
+                                    # Pre-capture entry price BEFORE sending the order to avoid race conditions with market fill
+                                    entry_px = self.portfolio_state.positions[sym].entry_price if sym in self.portfolio_state.positions else 0.0
+                                    pos_leverage = self.portfolio_state.positions[sym].leverage if sym in self.portfolio_state.positions else 10
+                                    
+                                    # Fallback to Binance live position entry price if local entry_px was zero on a close (must check before close order fills)
+                                    if "CLOSE" in side and entry_px <= 0 and self.trading_enabled and not self.dry_run:
+                                        try:
+                                            live_pos_check = await self.binance.get_positions()
+                                            for lp in live_pos_check:
+                                                if lp.get("symbol") == sym and float(lp.get("positionAmt", 0)) != 0:
+                                                    entry_px = float(lp.get("entryPrice", 0.0))
+                                                    self.portfolio_state.positions[sym].entry_price = entry_px
+                                                    break
+                                        except Exception as e:
+                                            logger.warning(f"[{sym}] Could not pre-fetch entry price from Binance: {e}")
+
                                     # Execute on Binance
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
                                     is_closing = "CLOSE" in side
@@ -883,7 +903,7 @@ class ProductionTradingBot:
                                         exit_reason = "HARD STOP" if hard_stop_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else "AI CLOSE"))
                                         logger.info(f"[{sym}] MARKET INTENT ({exit_reason}): {binance_side} {qty_str}")
                                         try:
-                                            await self.binance.cancel_all_orders(sym)
+                                             await self.binance.cancel_all_orders(sym)
                                         except Exception as e:
                                             logger.warning(f"[{sym}] Failed to cancel lingering orders: {e}")
                                         order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="MARKET", reduce_only=True)
@@ -901,21 +921,6 @@ class ProductionTradingBot:
                                     
                                     avg_fill = float(order_res.get('avgPrice', 0.0))
                                     order_exec_price = avg_fill if avg_fill > 0 else (float(limit_price_str) if not is_market_exit else market.mid_price)
-
-                                    # Capture entry price before modifying position
-                                    entry_px = self.portfolio_state.positions[sym].entry_price if sym in self.portfolio_state.positions else 0.0
-                                    pos_leverage = self.portfolio_state.positions[sym].leverage if sym in self.portfolio_state.positions else 10
-                                    
-                                    # Fallback to Binance live position entry price if local entry_px was zero on a close
-                                    if "CLOSE" in side and entry_px <= 0 and self.trading_enabled and not self.dry_run:
-                                        try:
-                                            live_pos_check = await self.binance.get_positions()
-                                            for lp in live_pos_check:
-                                                if lp.get("symbol") == sym and float(lp.get("positionAmt", 0)) != 0:
-                                                    entry_px = float(lp.get("entryPrice", 0.0))
-                                                    break
-                                        except Exception:
-                                            pass
 
                                     # Prepare Trade History Record
                                     trade_record = {
@@ -1033,7 +1038,7 @@ class ProductionTradingBot:
                                     hold_dur = None
                                     
                                     if "CLOSE" in side and entry_px > 0:
-                                        exit_px = float(market.mid_price)
+                                        exit_px = float(order_exec_price)
                                         trade_fees = dashboard_trade_fees
                                         # pnl is already net of fees from above calculation
                                         
@@ -1079,7 +1084,7 @@ class ProductionTradingBot:
                                         },
                                         "position_before": float(pos.quantity),
                                         "position_after": pos_after,
-                                        "entry_price": float(pos.entry_price),
+                                        "entry_price": float(entry_px if ("CLOSE" in side and entry_px > 0) else order_exec_price),
                                         "exit_price": exit_px,
                                         "leverage": int(pos_leverage),
                                         "margin": float(margin_used),

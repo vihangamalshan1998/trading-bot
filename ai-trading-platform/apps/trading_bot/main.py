@@ -113,6 +113,9 @@ class ProductionTradingBot:
         self.smoothed_action_history = {sym: collections.deque(maxlen=3) for sym in self.symbols} # Institutional signal smoothing (3-tick window)
         self.smoothed_confidence_history = {sym: collections.deque(maxlen=3) for sym in self.symbols}
         
+        # Institutional Scale-Out & Free-Roll Runner Tracking
+        self.partial_tp_triggered = {sym: False for sym in self.symbols}
+        
         # Institutional Circuit Breaker (5% Daily Loss Kill Switch)
         self.daily_start_equity = 0.0
         self.daily_equity_reset_time = time.time()
@@ -382,6 +385,7 @@ class ProductionTradingBot:
                                 self.pnl_history[sym].clear()
                                 self.position_entry_times[sym] = 0.0
                                 self.portfolio_state.positions[sym].entry_price = 0.0
+                                self.partial_tp_triggered[sym] = False
                                 
                         # CRITICAL: Only send active positions to the dashboard (once per active position)
                         if abs(amt) > 0:
@@ -403,6 +407,7 @@ class ProductionTradingBot:
                         if s in self.portfolio_state.positions and s not in active_synced_symbols:
                             self.portfolio_state.positions[s].quantity = 0.0
                             self.portfolio_state.positions[s].entry_price = 0.0
+                            self.partial_tp_triggered[s] = False
                     
                     if self.redis.redis:
                         payload = {
@@ -642,6 +647,8 @@ class ProductionTradingBot:
                     sudden_shock_triggered = False
                     trailing_stop_triggered = False
                     stale_trade_triggered = False
+                    partial_tp_triggered = False
+                    freeroll_stop_triggered = False
                     pnl_pct_leveraged = 0.0
 
                     if sym in self.portfolio_state.positions:
@@ -666,10 +673,18 @@ class ProductionTradingBot:
                             if pnl_pct_leveraged > prev_peak:
                                 self.peak_pnl_pct[sym] = pnl_pct_leveraged
                                 prev_peak = pnl_pct_leveraged
+
+                            is_in_freeroll = self.partial_tp_triggered.get(sym, False)
+                            
+                            # 0. FREE-ROLL BREAKEVEN STOP LOSS (Active ONLY after 50% Partial TP has been secured)
+                            # Protects the remaining 50% free-roll runner at Breakeven +0.25% (covering all round-trip fees)
+                            if is_in_freeroll and pnl_pct_leveraged <= 0.0025:
+                                logger.info(f"[{sym}] 🔒 FREE-ROLL BREAKEVEN HIT: Price retraced to +{pnl_pct_leveraged*100:.2f}% (<= +0.25% fee floor). Closing remaining 50% with zero loss!")
+                                freeroll_stop_triggered = True
                             
                             # 1. HARD STOP LOSS (-15.0% leveraged = -0.75% spot move at 20x leverage)
                             # Provides complete wick breathing room to survive liquidity sweeps and ride the swing!
-                            if pnl_pct_leveraged <= -0.15:
+                            elif pnl_pct_leveraged <= -0.15:
                                 logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI to protect capital.")
                                 hard_stop_triggered = True
                                 
@@ -678,6 +693,12 @@ class ProductionTradingBot:
                             elif pnl_pct_leveraged >= 0.35:
                                 logger.info(f"[{sym}] 🎯 HARD TAKE-PROFIT TRIGGERED: Massive surge to +{pnl_pct_leveraged*100:.2f}% leveraged! Snatching windfall profit immediately at wick peak.")
                                 hard_take_profit_triggered = True
+
+                            # 1.8. INSTITUTIONAL DYNAMIC 50% SCALE-OUT (TP1 at +12.0% leveraged gain)
+                            # Takes profit on 50% of the position, banking guaranteed cash and arming the Free-Roll!
+                            elif not is_in_freeroll and pnl_pct_leveraged >= 0.120:
+                                logger.info(f"[{sym}] 💰 DYNAMIC 50% SCALE-OUT (TP1): Surged to +{pnl_pct_leveraged*100:.2f}% leveraged! Banking 50% profit and arming Free-Roll runner.")
+                                partial_tp_triggered = True
                             
                             # 2. SUDDEN VELOCITY SHOCK DETECTOR (Catches flash spikes / wicks against winning trades)
                             elif prev_peak >= 0.04:
@@ -691,7 +712,7 @@ class ProductionTradingBot:
                                         sudden_shock_triggered = True
 
                             # 3. DYNAMIC ADAPTIVE RATCHETING TRAILING STOP (True Micro-Swing Protection)
-                            if not (hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered):
+                            if not (hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or partial_tp_triggered or freeroll_stop_triggered):
                                 # Tier 1: Micro-Swing Impulse Protection (Requires >= +8.0% peak to ensure fees & slippage are cleanly beaten)
                                 if 0.08 <= prev_peak < 0.15:
                                     trailing_floor = max(0.04, prev_peak * 0.70) # Guarantee at least +4.0% net gain above fees
@@ -725,7 +746,7 @@ class ProductionTradingBot:
                             if sym in self.pnl_history:
                                 self.pnl_history[sym].clear()
 
-                    exit_override = hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or trailing_stop_triggered or stale_trade_triggered
+                    exit_override = hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or trailing_stop_triggered or stale_trade_triggered or freeroll_stop_triggered or partial_tp_triggered
                     if exit_override:
                         # Force an immediate MARKET CLOSE
                         action_val = -1.0 if pos_check.quantity > 0 else 1.0
@@ -812,6 +833,37 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🎯 HIGH-CONVICTION FAST-PASS: Bypassing remaining cooldown ({time_since_close:.1f}s/{cooldown_period:.0f}s) due to extreme confidence ({confidence:.2f} >= 0.78) & massive Critic return ({pred_ret_5m:+.2f}% >= {fast_pass_critic_hurdle:.2f}%)!")
                             else:
                                 logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / {cooldown_period:.0f}s).")
+                                continue
+
+                    # GUARD 1.2: Net Portfolio Beta & Correlation Exposure Governor
+                    # Caps simultaneous unidirectional open positions to max 3 Longs or 3 Shorts,
+                    # and restricts net directional margin exposure to <= 30% of account equity
+                    if not is_closing and pos.quantity == 0:
+                        open_longs = [s for s, p in self.portfolio_state.positions.items() if p.quantity > 1e-5]
+                        open_shorts = [s for s, p in self.portfolio_state.positions.items() if p.quantity < -1e-5]
+                        
+                        long_margin = sum((p.quantity * self.market_states[s].mid_price / p.leverage)
+                                          for s, p in self.portfolio_state.positions.items()
+                                          if p.quantity > 1e-5 and s in self.market_states and self.market_states[s].mid_price > 0)
+                        short_margin = sum((abs(p.quantity) * self.market_states[s].mid_price / p.leverage)
+                                           for s, p in self.portfolio_state.positions.items()
+                                           if p.quantity < -1e-5 and s in self.market_states and self.market_states[s].mid_price > 0)
+                        
+                        net_exposure_ceiling = max(500.0, self.portfolio_state.equity * 0.30) # 30% of equity (min $500 safety buffer)
+                        
+                        if action_val > 0.20:
+                            if len(open_longs) >= 3:
+                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Longs reached ({len(open_longs)}/3: {open_longs}). Blocking new Long to prevent correlated drawdown!")
+                                continue
+                            if (long_margin - short_margin) >= net_exposure_ceiling:
+                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Net Long margin exposure (${long_margin - short_margin:.2f} >= ${net_exposure_ceiling:.2f} limit). Blocking Long!")
+                                continue
+                        elif action_val < -0.20:
+                            if len(open_shorts) >= 3:
+                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Shorts reached ({len(open_shorts)}/3: {open_shorts}). Blocking new Short to prevent correlated drawdown!")
+                                continue
+                            if (short_margin - long_margin) >= net_exposure_ceiling:
+                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Net Short margin exposure (${short_margin - long_margin:.2f} >= ${net_exposure_ceiling:.2f} limit). Blocking Short!")
                                 continue
 
                     # GUARD 1.5: Spread Firewall (Protect against illiquid book slippage bleed)
@@ -1186,8 +1238,18 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] Skipping micro-order: notional ${qty_raw * market.mid_price:.2f} < $50.00 minimum.")
                                 continue
                         else:
-                            # For CLOSE actions, we close the entire existing quantity
-                            qty_raw = abs(pos.quantity)
+                            # For CLOSE actions, we close the entire existing quantity, UNLESS it's a 50% partial TP!
+                            if partial_tp_triggered:
+                                sym_config = registry.get_symbol(sym)
+                                partial_qty = abs(pos.quantity) * 0.50
+                                if (partial_qty * market.mid_price) >= sym_config.min_notional:
+                                    qty_raw = partial_qty
+                                else:
+                                    logger.info(f"[{sym}] 50% partial quantity notional (${partial_qty * market.mid_price:.2f}) < Min Notional (${sym_config.min_notional:.2f}). Letting full position ride!")
+                                    partial_tp_triggered = False
+                                    qty_raw = 0.0
+                            else:
+                                qty_raw = abs(pos.quantity)
                             
                         if qty_raw <= 0.0001:
                             logger.info(f"[{sym}] Target quantity reached. No additional {side} needed.")
@@ -1274,18 +1336,19 @@ class ProductionTradingBot:
                                     is_market_exit = is_closing or exit_override
                                     
                                     if is_market_exit:
-                                        exit_reason = "HARD STOP" if hard_stop_triggered else ("HARD TAKE-PROFIT" if hard_take_profit_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else ("STALE PRUNE" if stale_trade_triggered else "AI CLOSE"))))
+                                        exit_reason = "HARD STOP" if hard_stop_triggered else ("HARD TAKE-PROFIT" if hard_take_profit_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else ("STALE PRUNE" if stale_trade_triggered else ("FREE-ROLL BREAKEVEN" if freeroll_stop_triggered else ("PARTIAL TP 50%" if partial_tp_triggered else "AI CLOSE"))))))
                                         logger.info(f"[{sym}] MARKET INTENT ({exit_reason}): {binance_side} {qty_str}")
                                         try:
                                              await self.binance.cancel_all_orders(sym)
                                         except Exception as e:
-                                            logger.warning(f"[{sym}] Failed to cancel lingering orders: {e}")
+                                             logger.warning(f"[{sym}] Failed to cancel lingering orders: {e}")
                                         order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="MARKET", reduce_only=True)
                                         self.active_orders.pop(sym, None)
                                         self.last_close_time[sym] = time.time()
-                                        self.peak_pnl_pct[sym] = 0.0
-                                        if sym in self.pnl_history:
-                                            self.pnl_history[sym].clear()
+                                        if not partial_tp_triggered:
+                                            self.peak_pnl_pct[sym] = 0.0
+                                            if sym in self.pnl_history:
+                                                self.pnl_history[sym].clear()
                                     else:
                                         # Institutional Post-Only Maker Execution (GTX)
                                         # Forces Maker fill (0.02% fee) and strictly forbids taker fill (0.05% fee)
@@ -1316,10 +1379,11 @@ class ProductionTradingBot:
                                     order_exec_price = avg_fill if avg_fill > 0 else (float(limit_price_str) if not is_market_exit else market.mid_price)
 
                                     # Prepare Trade History Record
+                                    record_side = f"PARTIAL_{side}" if partial_tp_triggered else side
                                     trade_record = {
                                         "timestamp": time.time(),
                                         "symbol": sym,
-                                        "side": side,
+                                        "side": record_side,
                                         "quantity": float(qty_str),
                                         "price": order_exec_price,
                                         "confidence": float(confidence),
@@ -1431,6 +1495,7 @@ class ProductionTradingBot:
                                             self.portfolio_state.positions[sym].entry_price = 0.0
                                             self.position_entry_times[sym] = 0.0
                                             self.peak_pnl_pct[sym] = 0.0
+                                            self.partial_tp_triggered[sym] = False
                                             if sym in self.pnl_history:
                                                 self.pnl_history[sym].clear()
                                     elif "OPEN_SHORT" in side:
@@ -1453,8 +1518,13 @@ class ProductionTradingBot:
                                             self.portfolio_state.positions[sym].entry_price = 0.0
                                             self.position_entry_times[sym] = 0.0
                                             self.peak_pnl_pct[sym] = 0.0
+                                            self.partial_tp_triggered[sym] = False
                                             if sym in self.pnl_history:
                                                 self.pnl_history[sym].clear()
+                                                
+                                    if partial_tp_triggered:
+                                        self.partial_tp_triggered[sym] = True
+                                        logger.info(f"[{sym}] 🚀 FREE-ROLL RUNNER ARMED: 50% banked at market. Remaining {abs(self.portfolio_state.positions[sym].quantity):.4f} is now a 100% Risk-Free Free-Roll!")
                                     
                                     # Calculate immediate RL Reward
                                     imm_reward = 0.0

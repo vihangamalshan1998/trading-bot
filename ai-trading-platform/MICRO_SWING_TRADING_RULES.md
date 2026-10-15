@@ -11,6 +11,7 @@ For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `X
 ```
 [Market Ticks] ──► 0. Circuit Breaker (5% Daily Loss) ──► 0.5. Liquidity Clock (Session Regimes)
               ──► 1. AI Decision (Smoothed) ──► 2. Cooldown Gate (120s Rest)
+              ──► 2.5. Portfolio Beta Governor (Max 3 Longs/Shorts, 30% Delta Cap)
               ──► 3. Spread Firewall (Session Scaled) ──► 4. Confidence Filter (Session Scaled)
               ──► 5. Multi-Horizon Critic (Session Hurdle) ──► 6. Macro Regime Alignment
               ──► 7. OFI Wall Defense ──► 8. StatArb Lead-Lag ──► 9. Whale Order Flow
@@ -58,6 +59,13 @@ For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `X
 
 - **120-Second Mandatory Rest:** Absolutely zero new trades are permitted within 120 seconds of closing a position on that symbol. This physically eliminates 5-second flip-flop churn traps.
 - **Breakout Fast-Pass (120s to 180s):** If and only if 120s have elapsed, the bot can bypass the remaining 60s of cooldown if confidence is extreme ($\ge 78\%$) and the Critic forecasts a breakout ($\ge |0.85\%|$).
+
+### 2.5. Net Portfolio Beta & Correlation Exposure Governor
+
+- **Multi-Asset Factor Risk Defense:** In crypto, altcoins hold an $85\%–95\%$ correlation to Bitcoin. Without a portfolio governor, opening 5 Longs simultaneously exposes the account to catastrophic correlated drawdowns if BTC suddenly flushes.
+- **Max Unidirectional Positions:** Limits simultaneous open trades in the same direction to a strict ceiling of **3 Longs** or **3 Shorts**.
+- **Net Delta Exposure Cap:** Restricts net directional margin exposure ($\sum \text{Long Margin} - \sum \text{Short Margin}$) to **$\le \mathbf{30\%}$ of total account equity** (~$\$1,350$ on a $\$4,500$ account).
+- **Market-Neutral Hedge Exemption:** If 3 Longs are open and a high-conviction Short signal appears, the Short is **approved** because it functions as an uncorrelated hedge that *reduces* net directional market exposure.
 
 ### 3. Spread Firewall ($\le 0.060\%$)
 
@@ -131,17 +139,19 @@ For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `X
 
 ---
 
-## 🔴 Part 2: Rules to CLOSE a Trade (The 6 Scenarios)
+## 🔴 Part 2: Rules to CLOSE a Trade (The 7 Scenarios)
 
-Once in a trade, the bot continuously monitors the position every 5 seconds. It will exit **ONLY** under one of these 6 explicit scenarios:
+Once in a trade, the bot continuously monitors the position every 5 seconds. It will exit **ONLY** under one of these 7 explicit scenarios:
 
 ```
                                       ┌──► Scenario 1: Hard Take-Profit Ceiling (+35.0% Leveraged) ──► Lock Peak Windfall!
-                                      ├──► Scenario 2: Sudden Velocity Shock (Drops >= 3.5% in <15s) ──► Immediate Exit!
-Active Position (PnL & Time Tracked) ─┼──► Scenario 3: Ratcheting Trailing Stop (Peak >= +8.0%) ──► Bank Net Green Cash!
-                                      ├──► Scenario 4: Dynamic Critic Reversal Exit (Profit >= +3.5%) ──► Secure Gains!
-                                      ├──► Scenario 5: Protective Stop Loss (-15.0% Hard Stop / -12.0% Trap) ──► Cut Loss!
-                                      └──► Scenario 6: Stale Position Pruner (Held >= 90m, |PnL| < 2.0%) ──► Recycle Capital!
+                                      ├──► Scenario 2: Dynamic 50% Scale-Out (TP1 at +12.0%) ──► Bank Cash & Arm Free-Roll!
+                                      ├──► Scenario 3: Free-Roll Breakeven Stop (+0.25% Floor) ──► Zero-Risk Guaranteed Win!
+Active Position (PnL & Time Tracked) ─┼──► Scenario 4: Sudden Velocity Shock (Drops >= 3.5% in <15s) ──► Immediate Exit!
+                                      ├──► Scenario 5: Ratcheting Trailing Stop (Peak >= +8.0%) ──► Bank Net Green Cash!
+                                      ├──► Scenario 6: Dynamic Critic Reversal Exit (Profit >= +3.5%) ──► Secure Gains!
+                                      ├──► Scenario 7: Protective Stop Loss (-15.0% Hard Stop / -12.0% Trap) ──► Cut Loss!
+                                      └──► Scenario 8: Stale Position Pruner (Held >= 90m, |PnL| < 2.0%) ──► Recycle Capital!
 ```
 
 ---
@@ -151,12 +161,28 @@ Active Position (PnL & Time Tracked) ─┼──► Scenario 3: Ratcheting Trai
 - **Condition:** Position reaches $\ge \mathbf{+35.0\%}$ leveraged gain ($+1.75\%$ spot price move at 20x).
 - **Action:** **Instant Market Close.** Snatches windfall profits immediately at the candle wick peak without waiting for any pullback!
 
-### Scenario 2: The Sudden Velocity Shock Detector
+### Scenario 2: Dynamic 50% Scale-Out (TP1 at +12.0% Leveraged Gain)
+
+- **Condition:** Position surges to $\ge \mathbf{+12.0\%}$ leveraged gain ($+0.60\%$ spot price move at 20x).
+- **Action:** **50% Partial Market Close (`reduce_only=True`).**
+  - Banks realized cash directly into your account wallet, cleanly paying all exchange fees with net profit.
+  - Immediately arms **Free-Roll Mode** on the remaining 50% quantity.
+  - Dashboard logs `PARTIAL_CLOSE_LONG` / `PARTIAL_CLOSE_SHORT` with green realized PnL.
+
+### Scenario 3: Free-Roll Breakeven Stop Loss (+0.25% Leveraged Floor)
+
+- **Condition:** Active **ONLY** after Scenario 2 has already banked the 50% partial take-profit.
+- If the market retraces and leveraged PnL pulls back to $\le \mathbf{+0.25\%}$ (the exchange round-trip fee floor):
+- **Action:** **Instant Market Close on Remaining 50%.**
+  - Exits the remaining half at breakeven with zero loss.
+  - Guarantees the overall trade ends with net green profit in the wallet.
+
+### Scenario 4: The Sudden Velocity Shock Detector
 
 - **Condition:** The trade was up $\ge +4.0\%$ leveraged, and suddenly drops by $\ge 3.5\%$ in less than 15 seconds, losing over 30% of its peak.
 - **Action:** **Instant Market Close.** Catches flash dumps/pumps and locks in remaining profit before it turns negative.
 
-### Scenario 3: The 3-Tier Ratcheting Trailing Stop
+### Scenario 5: The 3-Tier Ratcheting Trailing Stop
 
 - **Tier 1 (Impulse Wave):**
   - Arms when peak profit reaches **$+8.0\%$ to $+15.0\%$ leveraged**.
@@ -169,20 +195,20 @@ Active Position (PnL & Time Tracked) ─┼──► Scenario 3: Ratcheting Trai
   - Arms when peak profit reaches **$\ge +30.0\%$ leveraged**.
   - Trailing floor: tight 15% trail (keeps $85\%$ of the highest peak reached).
 
-### Scenario 4: Critic-Assisted Early Reversal Exit
+### Scenario 6: Critic-Assisted Early Reversal Exit
 
 - **Condition:** Position is in solid profit ($\ge +3.5\%$ leveraged), and the Critic network detects a confirmed adverse reversal (5m $\le -0.15\%$ or 1h $\le -0.25\%$).
 - **Action:** Exits cleanly to protect green profits before the market pulls back.
 - **Fee Protection Gate:** If profit is between $0.0\%$ and $+4.0\%$, the bot **skips closing** to prevent fee bleed, letting the swing ride unless a confirmed reversal hits.
 
-### Scenario 5: Loss Protection & Hard Stop Loss
+### Scenario 7: Loss Protection & Hard Stop Loss
 
 - **10-Minute Breathing Room:** If PnL is between $0.0\%$ and $-12.0\%$, the position **MUST hold for at least 600 seconds (10 minutes)** to survive normal crypto wicks.
 - **Binance `updateTime` Memory Recovery:** Position entry timestamps are retrieved from Binance on service reboot, ensuring the 10-minute hold is never wiped by a restart.
 - **Confirmed Trap Escape Door:** Cuts before 10 minutes **ONLY** if Critic forecasts a severe adverse trend breakdown ($\ge 0.60\%$ adverse move) with $\ge 70\%$ confidence.
 - **Hard Stop Loss:** If PnL touches **$-15.0\%$ leveraged** (-0.75% spot move at 20x) $\to$ **Immediate Emergency Market Close** to protect total capital.
 
-### Scenario 6: Institutional Stale Position Pruner & Capital Recycling
+### Scenario 8: Institutional Stale Position Pruner & Capital Recycling
 
 - **Condition:** Position has been open for $\ge \mathbf{90\text{ minutes}}$ ($5,400\text{ seconds}$) and remains completely flat / stagnant ($|PnL| < \mathbf{2.0\%}$ leveraged).
 - **Rationale:** Capital stuck in rangebound chop generates zero alpha while paying funding fees and blocking other high-conviction breakout setups.

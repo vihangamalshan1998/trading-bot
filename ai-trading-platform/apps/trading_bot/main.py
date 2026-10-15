@@ -358,6 +358,17 @@ class ProductionTradingBot:
                             self.portfolio_state.positions[sym].leverage = int(p.get("leverage", 10))
                             if amt != 0:
                                 self.portfolio_state.positions[sym].entry_price = float(p.get("entryPrice", 0))
+                                # MEMORY RESILIENCE: If position is open but entry time was not tracked (e.g. after PM2 restart),
+                                # recover the exact entry timestamp from Binance updateTime so the 600s breathing room stays active!
+                                if self.position_entry_times.get(sym, 0.0) == 0.0:
+                                    pos_update_ms = float(p.get("updateTime", 0.0))
+                                    if pos_update_ms > 0:
+                                        self.position_entry_times[sym] = pos_update_ms / 1000.0
+                                        self.portfolio_state.positions[sym].entry_time = pos_update_ms / 1000.0
+                                        logger.info(f"[{sym}] 🔄 RECOVERED ENTRY TIME from Binance: {time.time() - (pos_update_ms / 1000.0):.1f}s ago")
+                                    else:
+                                        self.position_entry_times[sym] = time.time()
+                                        self.portfolio_state.positions[sym].entry_time = time.time()
                             else:
                                 self.peak_pnl_pct[sym] = 0.0
                                 self.pnl_history[sym].clear()
@@ -578,6 +589,7 @@ class ProductionTradingBot:
                         self.portfolio_state.positions[sym].current_price = market.mid_price
                     # Calculate Real-Time PNL Percentage, Adaptive Trailing Stop, Sudden Shock Detector, and Hard Stop Loss
                     hard_stop_triggered = False
+                    hard_take_profit_triggered = False
                     sudden_shock_triggered = False
                     trailing_stop_triggered = False
                     pnl_pct_leveraged = 0.0
@@ -605,11 +617,17 @@ class ProductionTradingBot:
                                 self.peak_pnl_pct[sym] = pnl_pct_leveraged
                                 prev_peak = pnl_pct_leveraged
                             
-                            # 1. HARD STOP LOSS (-15.0% leveraged = -1.50% spot move at 10x leverage)
+                            # 1. HARD STOP LOSS (-15.0% leveraged = -0.75% spot move at 20x leverage)
                             # Provides complete wick breathing room to survive liquidity sweeps and ride the swing!
                             if pnl_pct_leveraged <= -0.15:
                                 logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI to protect capital.")
                                 hard_stop_triggered = True
+                                
+                            # 1.5. HARD TAKE-PROFIT CEILING (+35.0% leveraged = +1.75% price surge at 20x leverage)
+                            # Instantly locks in windfall gains at the candle peak before any pullback!
+                            elif pnl_pct_leveraged >= 0.35:
+                                logger.info(f"[{sym}] 🎯 HARD TAKE-PROFIT TRIGGERED: Massive surge to +{pnl_pct_leveraged*100:.2f}% leveraged! Snatching windfall profit immediately at wick peak.")
+                                hard_take_profit_triggered = True
                             
                             # 2. SUDDEN VELOCITY SHOCK DETECTOR (Catches flash spikes / wicks against winning trades)
                             elif prev_peak >= 0.04:
@@ -623,7 +641,7 @@ class ProductionTradingBot:
                                         sudden_shock_triggered = True
 
                             # 3. DYNAMIC ADAPTIVE RATCHETING TRAILING STOP (True Micro-Swing Protection)
-                            if not (hard_stop_triggered or sudden_shock_triggered):
+                            if not (hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered):
                                 # Tier 1: Micro-Swing Impulse Protection (Requires >= +8.0% peak to ensure fees & slippage are cleanly beaten)
                                 if 0.08 <= prev_peak < 0.15:
                                     trailing_floor = max(0.04, prev_peak * 0.70) # Guarantee at least +4.0% net gain above fees
@@ -647,7 +665,7 @@ class ProductionTradingBot:
                             if sym in self.pnl_history:
                                 self.pnl_history[sym].clear()
 
-                    exit_override = hard_stop_triggered or sudden_shock_triggered or trailing_stop_triggered
+                    exit_override = hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or trailing_stop_triggered
                     if exit_override:
                         # Force an immediate MARKET CLOSE
                         action_val = -1.0 if pos_check.quantity > 0 else 1.0
@@ -1038,7 +1056,7 @@ class ProductionTradingBot:
                                     is_market_exit = is_closing or exit_override
                                     
                                     if is_market_exit:
-                                        exit_reason = "HARD STOP" if hard_stop_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else "AI CLOSE"))
+                                        exit_reason = "HARD STOP" if hard_stop_triggered else ("HARD TAKE-PROFIT" if hard_take_profit_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else "AI CLOSE")))
                                         logger.info(f"[{sym}] MARKET INTENT ({exit_reason}): {binance_side} {qty_str}")
                                         try:
                                              await self.binance.cancel_all_orders(sym)

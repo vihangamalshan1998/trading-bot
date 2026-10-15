@@ -7,6 +7,7 @@ import time
 import os
 import random
 import collections
+import datetime
 import msgpack  # Phase 1: Binary compression for experience messages
 from typing import Dict, Any
 
@@ -440,6 +441,32 @@ class ProductionTradingBot:
                         self.circuit_breaker_active_until = now_t + (6 * 3600.0) # 6 hours standby
                         logger.critical(f"🚨 5% DAILY LOSS CIRCUIT BREAKER TRIPPED! Daily drawdown is {daily_dd*100:.2f}% >= 5.00%. Pausing new entries for 6 hours!")
 
+                # Institutional Liquidity Clock & Session Volatility Regimes
+                utc_now = datetime.datetime.now(datetime.timezone.utc)
+                is_weekend = (utc_now.weekday() >= 5) # Saturday (5) or Sunday (6)
+                utc_hour = utc_now.hour + (utc_now.minute / 60.0)
+                
+                if is_weekend:
+                    session_name = "WEEKEND_LOW_LIQUIDITY"
+                    session_conf_hurdle = 0.72
+                    session_max_spread = 0.00045 # Tight 0.045% limit in low liquidity
+                    session_critic_hurdle = 0.50
+                elif 13.5 <= utc_hour < 21.0: # US New York Peak Trend & Volatility (13:30 - 21:00 UTC)
+                    session_name = "US_NEW_YORK_PEAK"
+                    session_conf_hurdle = 0.65
+                    session_max_spread = 0.00060 # Standard 0.060%
+                    session_critic_hurdle = 0.40
+                elif 8.0 <= utc_hour < 13.5: # London Morning & Pre-NY (08:00 - 13:30 UTC)
+                    session_name = "LONDON_TREND"
+                    session_conf_hurdle = 0.65
+                    session_max_spread = 0.00060
+                    session_critic_hurdle = 0.40
+                else: # Asia Off-Peak (00:00 - 08:00 UTC) Mean-Reversion Chop
+                    session_name = "ASIA_OFF_PEAK_CHOP"
+                    session_conf_hurdle = 0.68
+                    session_max_spread = 0.00050 # 0.050%
+                    session_critic_hurdle = 0.45
+
                 # Phase 2: Batched Inference Pre-Pass
                 # Collect ALL valid symbol state vectors and run ONE model call instead of 6.
                 # SAFETY SHIELD: Symbols with wrong shape are silently skipped (fall back to individual inference).
@@ -614,6 +641,7 @@ class ProductionTradingBot:
                     hard_take_profit_triggered = False
                     sudden_shock_triggered = False
                     trailing_stop_triggered = False
+                    stale_trade_triggered = False
                     pnl_pct_leveraged = 0.0
 
                     if sym in self.portfolio_state.positions:
@@ -682,12 +710,22 @@ class ProductionTradingBot:
                                     if pnl_pct_leveraged < trailing_floor:
                                         logger.info(f"[{sym}] 🔒 TRAILING STOP TRIGGERED (Deep Runner): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing massive gain!")
                                         trailing_stop_triggered = True
+
+                            # 4. INSTITUTIONAL STALE POSITION PRUNER (Capital Recycling)
+                            # If a position has stagnated for >= 90 mins (5,400s) and hovering within ±2.0% leveraged PnL,
+                            # prune it to liberate used margin for active high-conviction breakout setups!
+                            entry_time = self.position_entry_times.get(sym, 0.0)
+                            if entry_time > 0:
+                                holding_time = now_t - entry_time
+                                if holding_time >= 5400.0 and abs(pnl_pct_leveraged) < 0.020:
+                                    logger.info(f"[{sym}] ♻️ STALE TRADE PRUNER: Stagnant trade held {holding_time/60.0:.1f}m with flat PnL ({pnl_pct_leveraged*100:+.2f}%). Pruning to recycle capital!")
+                                    stale_trade_triggered = True
                         else:
                             self.peak_pnl_pct[sym] = 0.0
                             if sym in self.pnl_history:
                                 self.pnl_history[sym].clear()
 
-                    exit_override = hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or trailing_stop_triggered
+                    exit_override = hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or trailing_stop_triggered or stale_trade_triggered
                     if exit_override:
                         # Force an immediate MARKET CLOSE
                         action_val = -1.0 if pos_check.quantity > 0 else 1.0
@@ -779,8 +817,8 @@ class ProductionTradingBot:
                     # GUARD 1.5: Spread Firewall (Protect against illiquid book slippage bleed)
                     if not is_closing and market and market.mid_price > 0:
                         spread_pct = market.spread / market.mid_price
-                        if spread_pct > 0.0006:
-                            logger.warning(f"[{sym}] 🛑 SPREAD FIREWALL: Spread {spread_pct*100:.3f}% > 0.060% limit. Skipping entry to protect from slippage fee bleed!")
+                        if spread_pct > session_max_spread:
+                            logger.warning(f"[{sym}] 🛑 SPREAD FIREWALL ({session_name}): Spread {spread_pct*100:.3f}% > {session_max_spread*100:.3f}% limit. Skipping entry to protect from slippage fee bleed!")
                             continue
 
                     # GUARD 2: Minimum Hold Duration (600s / 10 mins with Smart Trap Escape Door)
@@ -807,9 +845,9 @@ class ProductionTradingBot:
                             logger.info(f"[{sym}] ⏳ MICRO-SWING BREATHING: Minimum hold (600s) not met yet ({time_held:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%). Giving swing room to run!")
                             continue
 
-                    # GUARD 3: Confidence Filter (0.65 = requires tanh output > 0.62, realistic with T=1.0 sigmoid)
-                    if not is_closing and confidence < 0.65: 
-                        logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.65)")
+                    # GUARD 3: Confidence Filter (Session Adaptive: {session_conf_hurdle:.2f} in {session_name})
+                    if not is_closing and confidence < session_conf_hurdle: 
+                        logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < {session_conf_hurdle:.2f} in {session_name})")
                         
                         # Emit authentic live HOLD experience into DB when flat (15% sample rate)
                         # Populates LINK, ADA, AVAX, NEAR, LTC with genuine 200-dim market state sequences
@@ -992,7 +1030,7 @@ class ProductionTradingBot:
                         pred_ret_1h = float(critic_vals[1]) if len(critic_vals) > 1 else pred_ret_5m
                         pred_ret_4h = float(critic_vals[2]) if len(critic_vals) > 2 else pred_ret_1h
                         
-                        min_hurdle = max(0.40, settings.min_open_expected_return_pct) # 0.40% min move
+                        min_hurdle = max(session_critic_hurdle, settings.min_open_expected_return_pct) # Dynamic session fee hurdle
                         
                         # 1. 5-Minute Entry Hurdle (Beats fee + spread)
                         if action_val > 0.2 and pred_ret_5m < min_hurdle:
@@ -1015,8 +1053,8 @@ class ProductionTradingBot:
                     # Dynamically scales between 6.0% and 15.0% based on conviction, horizon alignment, and coin volatility.
                     base_margin_pct = 0.10 # 10.0% baseline
                     
-                    # 1. Conviction Multiplier (0.80x to 1.30x)
-                    conviction_mult = float(np.clip(0.80 + (confidence - 0.65) * 1.5, 0.80, 1.30))
+                    # 1. Conviction Multiplier (0.80x to 1.30x scaled to session hurdle)
+                    conviction_mult = float(np.clip(0.80 + (confidence - session_conf_hurdle) * 1.5, 0.80, 1.30))
                     
                     # 2. Multi-Horizon Critic Alignment Multiplier (0.85x to 1.15x)
                     critic_vals = precomputed_critics.get(sym)
@@ -1236,7 +1274,7 @@ class ProductionTradingBot:
                                     is_market_exit = is_closing or exit_override
                                     
                                     if is_market_exit:
-                                        exit_reason = "HARD STOP" if hard_stop_triggered else ("HARD TAKE-PROFIT" if hard_take_profit_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else "AI CLOSE")))
+                                        exit_reason = "HARD STOP" if hard_stop_triggered else ("HARD TAKE-PROFIT" if hard_take_profit_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else ("STALE PRUNE" if stale_trade_triggered else "AI CLOSE"))))
                                         logger.info(f"[{sym}] MARKET INTENT ({exit_reason}): {binance_side} {qty_str}")
                                         try:
                                              await self.binance.cancel_all_orders(sym)

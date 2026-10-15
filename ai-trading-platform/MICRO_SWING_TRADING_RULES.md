@@ -9,10 +9,12 @@ This document defines the exact, end-to-end mathematical and systematic rules us
 For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `LINK`, `ADA`, `AVAX`, `NEAR`, `LTC`), it must pass **12 strict institutional safety checkpoints in sequence**. If even a single condition fails, the trade is rejected:
 
 ```
-[Market Ticks] ──► 0. Circuit Breaker (5% Daily Loss) ──► 1. AI Decision (Smoothed) ──► 2. Cooldown Gate (120s Rest)
-              ──► 3. Spread Firewall (0.06%) ──► 4. Confidence Filter (65%) ──► 5. Multi-Horizon Critic
-              ──► 6. Macro Regime Alignment ──► 7. OFI Wall Defense ──► 8. StatArb Lead-Lag
-              ──► 9. Whale Order Flow ──► 10. Funding Rate Squeeze Sniper ──► 11. Dynamic Margin ──► 12. POST-ONLY MAKER (GTX)
+[Market Ticks] ──► 0. Circuit Breaker (5% Daily Loss) ──► 0.5. Liquidity Clock (Session Regimes)
+              ──► 1. AI Decision (Smoothed) ──► 2. Cooldown Gate (120s Rest)
+              ──► 3. Spread Firewall (Session Scaled) ──► 4. Confidence Filter (Session Scaled)
+              ──► 5. Multi-Horizon Critic (Session Hurdle) ──► 6. Macro Regime Alignment
+              ──► 7. OFI Wall Defense ──► 8. StatArb Lead-Lag ──► 9. Whale Order Flow
+              ──► 10. Funding Rate Squeeze Sniper ──► 11. Dynamic Margin ──► 12. POST-ONLY MAKER (GTX)
 ```
 
 ### 0. Portfolio 24-Hour 5% Drawdown Circuit Breaker ("The 5% Kill Switch")
@@ -23,6 +25,26 @@ For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `X
   - Pauses all new trade entries for **6 hours**.
   - All existing open positions continue to be safely managed (take-profit, trailing stop, stop-loss still execute cleanly).
   - Guarantees that even in a freak Black Swan event, **your account physically cannot lose more than 5% in a day**.
+
+### 0.5. Institutional Liquidity Clock & Session Volatility Regimes
+
+- Global crypto markets exhibit distinct liquidity and spread regimes based on the time of day:
+  - **Weekend Low Liquidity (Saturday & Sunday UTC):** Institutional desks are offline, market depth drops by up to 50%, and spreads widen.
+    - **Confidence Hurdle:** Raised to **$\mathbf{\ge 72\%}$**.
+    - **Spread Firewall:** Tightened to **$\mathbf{\le 0.045\%}$** (skips wider books).
+    - **Critic Fee Hurdle:** Raised to **$\mathbf{\ge 0.50\%}$** expected move.
+  - **Asia Off-Peak Chop (00:00 - 08:00 UTC):** High mean-reversion, lower directional follow-through.
+    - **Confidence Hurdle:** Raised to **$\mathbf{\ge 68\%}$**.
+    - **Spread Firewall:** **$\mathbf{\le 0.050\%}$**.
+    - **Critic Fee Hurdle:** **$\mathbf{\ge 0.45\%}$**.
+  - **London Trend (08:00 - 13:30 UTC):** Morning trend establishment and European volume.
+    - **Confidence Hurdle:** Standard **$\mathbf{\ge 65\%}$**.
+    - **Spread Firewall:** Standard **$\mathbf{\le 0.060\%}$**.
+    - **Critic Fee Hurdle:** Standard **$\mathbf{\ge 0.40\%}$**.
+  - **US New York Peak (13:30 - 21:00 UTC):** Highest global volume, tightest bid/ask spreads, deepest breakout trends.
+    - **Confidence Hurdle:** Standard **$\mathbf{\ge 65\%}$**.
+    - **Spread Firewall:** Standard **$\mathbf{\le 0.060\%}$**.
+    - **Critic Fee Hurdle:** Standard **$\mathbf{\ge 0.40\%}$**.
 
 ### 1. Deterministic AI Direction Proposal & Institutional Signal Smoothing
 
@@ -109,16 +131,17 @@ For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `X
 
 ---
 
-## 🔴 Part 2: Rules to CLOSE a Trade (The 5 Scenarios)
+## 🔴 Part 2: Rules to CLOSE a Trade (The 6 Scenarios)
 
-Once in a trade, the bot continuously monitors the position every 5 seconds. It will exit **ONLY** under one of these 5 explicit scenarios:
+Once in a trade, the bot continuously monitors the position every 5 seconds. It will exit **ONLY** under one of these 6 explicit scenarios:
 
 ```
                                       ┌──► Scenario 1: Hard Take-Profit Ceiling (+35.0% Leveraged) ──► Lock Peak Windfall!
                                       ├──► Scenario 2: Sudden Velocity Shock (Drops >= 3.5% in <15s) ──► Immediate Exit!
 Active Position (PnL & Time Tracked) ─┼──► Scenario 3: Ratcheting Trailing Stop (Peak >= +8.0%) ──► Bank Net Green Cash!
                                       ├──► Scenario 4: Dynamic Critic Reversal Exit (Profit >= +3.5%) ──► Secure Gains!
-                                      └──► Scenario 5: Protective Stop Loss (-15.0% Hard Stop / -12.0% Trap) ──► Cut Loss!
+                                      ├──► Scenario 5: Protective Stop Loss (-15.0% Hard Stop / -12.0% Trap) ──► Cut Loss!
+                                      └──► Scenario 6: Stale Position Pruner (Held >= 90m, |PnL| < 2.0%) ──► Recycle Capital!
 ```
 
 ---
@@ -158,6 +181,12 @@ Active Position (PnL & Time Tracked) ─┼──► Scenario 3: Ratcheting Trai
 - **Binance `updateTime` Memory Recovery:** Position entry timestamps are retrieved from Binance on service reboot, ensuring the 10-minute hold is never wiped by a restart.
 - **Confirmed Trap Escape Door:** Cuts before 10 minutes **ONLY** if Critic forecasts a severe adverse trend breakdown ($\ge 0.60\%$ adverse move) with $\ge 70\%$ confidence.
 - **Hard Stop Loss:** If PnL touches **$-15.0\%$ leveraged** (-0.75% spot move at 20x) $\to$ **Immediate Emergency Market Close** to protect total capital.
+
+### Scenario 6: Institutional Stale Position Pruner & Capital Recycling
+
+- **Condition:** Position has been open for $\ge \mathbf{90\text{ minutes}}$ ($5,400\text{ seconds}$) and remains completely flat / stagnant ($|PnL| < \mathbf{2.0\%}$ leveraged).
+- **Rationale:** Capital stuck in rangebound chop generates zero alpha while paying funding fees and blocking other high-conviction breakout setups.
+- **Action:** **Market Close (`reduce_only=True`).** Prunes the dormant trade, clears orderbook locks, and recycles margin back to `free_margin` for explosive breakout runners!
 
 ---
 

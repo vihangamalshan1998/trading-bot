@@ -708,8 +708,8 @@ class ProductionTradingBot:
 
                     # GUARD 2: Minimum Hold Duration (600s / 10 mins with Smart Trap Escape Door)
                     if is_closing and not exit_override:
-                        # 1. Early exit if in solid impulse profit (>= +3.0% leveraged)
-                        is_profit_impulse = pnl_pct_leveraged >= 0.03
+                        # 1. Early exit if in solid impulse profit (>= +4.0% leveraged to cover fees)
+                        is_profit_impulse = pnl_pct_leveraged >= 0.04
                         
                         # 2. Smart Trap Escape Door: If Critic senses a confirmed fakeout / trap against us (5m >= 0.20% or 1h >= 0.30% adverse move),
                         # allow immediate exit to cut the trap early without waiting for the 10-minute timer!
@@ -778,16 +778,16 @@ class ProductionTradingBot:
                         has_reversal_critic = (pos.quantity > 0 and (pred_ret_5m <= -0.15 or pred_ret_1h <= -0.25)) or \
                                               (pos.quantity < 0 and (pred_ret_5m >= 0.15 or pred_ret_1h >= 0.25))
                         
-                        # 1. Critic-Assisted Exit: If in profit (+1.5% to +4.0%) and Critic detects adverse reversal, lock in gain immediately!
-                        if 0.015 <= pnl_pct_leveraged < 0.040 and has_reversal_critic:
+                        # 1. Critic-Assisted Exit: If in solid profit (>= +3.5% leveraged) and Critic detects adverse reversal, lock in gain immediately!
+                        if 0.035 <= pnl_pct_leveraged < 0.060 and has_reversal_critic:
                             logger.info(f"[{sym}] 🎯 CRITIC-ASSISTED PROFIT EXIT: PnL is +{pnl_pct_leveraged*100:.2f}% and Critic forecasts adverse reversal (5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}%). Securing green profit immediately!")
                             # Bypass fee-protection gate and allow smooth exit
-                        elif 0.0 <= pnl_pct_leveraged < 0.018:
-                            # 2. Fee Protection Gate: Lowered from +5.0% to +1.8% leveraged (covers 0.40% round-trip fees with net profit buffer)
-                            logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: PnL is +{pnl_pct_leveraged*100:.2f}% < +1.80% leveraged fee-protection threshold. Letting trend ride!")
+                        elif 0.0 <= pnl_pct_leveraged < 0.040:
+                            # 2. Fee Protection Gate: Widened from +1.8% to +4.0% leveraged (+0.20% price move at 20x) to ensure exchange fees (~$10) are cleanly paid with positive net USDT
+                            logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: PnL is +{pnl_pct_leveraged*100:.2f}% < +4.00% leveraged fee-protection threshold. Letting trend ride!")
                             continue
-                        elif pnl_pct_leveraged >= 0.018:
-                            # 3. Solid Profit (>= +1.8% leveraged): Allow smooth profit taking (0.40 hurdle)
+                        elif pnl_pct_leveraged >= 0.040:
+                            # 3. Solid Profit (>= +4.0% leveraged): Allow smooth profit taking (0.40 hurdle)
                             close_hurdle = 0.40
                             if confidence < close_hurdle:
                                 logger.info(f"[{sym}] SKIPPING PROFIT CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f}, PnL: +{pnl_pct_leveraged*100:.2f}%)")
@@ -974,14 +974,16 @@ class ProductionTradingBot:
                                     entry_px = self.portfolio_state.positions[sym].entry_price if sym in self.portfolio_state.positions else 0.0
                                     pos_leverage = self.portfolio_state.positions[sym].leverage if sym in self.portfolio_state.positions else 10
                                     
-                                    # Fallback to Binance live position entry price if local entry_px was zero on a close (must check before close order fills)
-                                    if "CLOSE" in side and entry_px <= 0 and self.trading_enabled and not self.dry_run:
+                                    # Always fetch authoritative Binance live position entry price before sending close order
+                                    if "CLOSE" in side and self.trading_enabled and not self.dry_run:
                                         try:
                                             live_pos_check = await self.binance.get_positions()
                                             for lp in live_pos_check:
                                                 if lp.get("symbol") == sym and float(lp.get("positionAmt", 0)) != 0:
-                                                    entry_px = float(lp.get("entryPrice", 0.0))
-                                                    self.portfolio_state.positions[sym].entry_price = entry_px
+                                                    binance_ep = float(lp.get("entryPrice", 0.0))
+                                                    if binance_ep > 0:
+                                                        entry_px = binance_ep
+                                                        self.portfolio_state.positions[sym].entry_price = binance_ep
                                                     break
                                         except Exception as e:
                                             logger.warning(f"[{sym}] Could not pre-fetch entry price from Binance: {e}")
@@ -1012,6 +1014,10 @@ class ProductionTradingBot:
                                     logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")
                                     
                                     avg_fill = float(order_res.get('avgPrice', 0.0))
+                                    exec_qty = float(order_res.get('executedQty', 0.0))
+                                    cum_quote = float(order_res.get('cumQuote', 0.0))
+                                    if avg_fill <= 0.0 and exec_qty > 0.0 and cum_quote > 0.0:
+                                        avg_fill = cum_quote / exec_qty
                                     order_exec_price = avg_fill if avg_fill > 0 else (float(limit_price_str) if not is_market_exit else market.mid_price)
 
                                     # Prepare Trade History Record
@@ -1064,6 +1070,39 @@ class ProductionTradingBot:
                                             self.session_wins += 1
                                             self.last_win_time = time.time()
                                         self.session_win_rate = self.session_wins / self.session_trades
+                                        
+                                        # Exact Binance Income Ledger Audit (Matches exchange to the penny)
+                                        if self.trading_enabled and not self.dry_run:
+                                            try:
+                                                await asyncio.sleep(0.5)
+                                                recent_income = await self.binance._request(
+                                                    "GET", "/fapi/v1/income", signed=True,
+                                                    params={"symbol": sym, "limit": 10}
+                                                )
+                                                now_ms = time.time() * 1000
+                                                real_pnl = 0.0
+                                                real_comm = 0.0
+                                                matched = False
+                                                for inc in (recent_income or []):
+                                                    if (now_ms - float(inc.get("time", 0))) < 15000:
+                                                        if inc.get("incomeType") == "REALIZED_PNL":
+                                                            real_pnl += float(inc.get("income", 0.0))
+                                                            matched = True
+                                                        elif inc.get("incomeType") == "COMMISSION":
+                                                            real_comm += abs(float(inc.get("income", 0.0)))
+                                                if matched:
+                                                    gross_pnl = real_pnl
+                                                    dashboard_trade_fees = real_comm
+                                                    pnl = gross_pnl - dashboard_trade_fees
+                                                    trade_record["gross_pnl"] = gross_pnl
+                                                    trade_record["fees_paid"] = dashboard_trade_fees
+                                                    trade_record["realized_pnl"] = pnl
+                                                    margin_used_for_trade = (entry_px * qty_closed) / pos_leverage if pos_leverage else (entry_px * qty_closed / 10)
+                                                    roi = (pnl / margin_used_for_trade) * 100 if margin_used_for_trade > 0 else 0.0
+                                                    trade_record["roi_pct"] = roi
+                                                    logger.info(f"[{sym}] 📜 BINANCE OFFICIAL AUDIT: Gross: ${gross_pnl:+.4f}, Fees: ${dashboard_trade_fees:.4f}, Net: ${pnl:+.4f} (ROI: {roi:+.2f}%)")
+                                            except Exception as audit_err:
+                                                logger.warning(f"[{sym}] Income audit skipped: {audit_err}")
                                         
                                     if self.redis.redis and (exit_override or is_closing):
                                         await self.redis.redis.lpush("dashboard:trade_history", json.dumps(trade_record))

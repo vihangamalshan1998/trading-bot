@@ -15,6 +15,7 @@ class WhaleTracker:
     def __init__(self):
         self.symbols = settings.symbol_universe
         self.whale_trades = {sym: deque(maxlen=1000) for sym in self.symbols}
+        self.last_published = {sym: 0.0 for sym in self.symbols}
         self.running = False
         
     def _clean_old_trades(self, sym: str, current_time: float):
@@ -22,18 +23,23 @@ class WhaleTracker:
         while self.whale_trades[sym] and current_time - self.whale_trades[sym][0]['time'] > 60:
             self.whale_trades[sym].popleft()
 
-    async def _publish_state(self, sym: str, buy_wall_dist: float, sell_wall_dist: float):
+    async def _publish_state(self, sym: str, buy_wall_dist: float, sell_wall_dist: float, force: bool = False):
         current_time = time.time()
+        # VPS CPU & REDIS THROTTLE: Only publish depth state once per second per symbol unless forced by a whale trade
+        if not force and (current_time - self.last_published.get(sym, 0.0)) < 1.0:
+            return
+            
+        self.last_published[sym] = current_time
         self._clean_old_trades(sym, current_time)
         
-        # Calculate Rolling 60s Pressure
-        whale_buy_pressure = sum(t['amount'] for t in self.whale_trades[sym] if t['side'] == 'BUY')
-        whale_sell_pressure = sum(t['amount'] for t in self.whale_trades[sym] if t['side'] == 'SELL')
+        # Calculate Rolling 60s Pressure with institutional sanity caps ($10M max window to prevent synthetic testnet distortion)
+        whale_buy_pressure = min(10_000_000.0, float(sum(t['amount'] for t in self.whale_trades[sym] if t['side'] == 'BUY')))
+        whale_sell_pressure = min(10_000_000.0, float(sum(t['amount'] for t in self.whale_trades[sym] if t['side'] == 'SELL')))
         
         state = {
             "timestamp": current_time,
-            "buy_wall_distance": buy_wall_dist,
-            "sell_wall_distance": sell_wall_dist,
+            "buy_wall_distance": float(buy_wall_dist),
+            "sell_wall_distance": float(sell_wall_dist),
             "whale_buy_pressure": whale_buy_pressure,
             "whale_sell_pressure": whale_sell_pressure
         }
@@ -58,7 +64,8 @@ class WhaleTracker:
             logger.info("Whale Tracker Connected to Binance!")
             while self.running:
                 try:
-                    msg = await ws.recv()
+                    # Timeout after 30s to detect and recover from silent TCP/WS freezes
+                    msg = await asyncio.wait_for(ws.recv(), timeout=30.0)
                     data = json.loads(msg)
                     stream = data['stream']
                     payload = data['data']
@@ -70,7 +77,9 @@ class WhaleTracker:
                     if '@aggTrade' in stream:
                         price = float(payload['p'])
                         qty = float(payload['q'])
-                        usd_val = price * qty
+                        # Cap single trade USD value to $2,000,000 to prevent single-order testnet distortions
+                        raw_usd = price * qty
+                        usd_val = min(raw_usd, 2_000_000.0)
                         
                         if usd_val >= WHALE_TRADE_THRESHOLD_USD:
                             is_buyer_maker = payload['m']
@@ -80,10 +89,10 @@ class WhaleTracker:
                                 'side': side,
                                 'amount': usd_val
                             })
-                            logger.debug(f"🚨 WHALE MARKET {side}: {usd_val:,.2f} USD on {sym}")
+                            logger.debug(f"🚨 WHALE MARKET {side}: {usd_val:,.2f} USD on {sym} (raw: {raw_usd:,.2f})")
                             
                             # Publish immediately on a whale trade
-                            await self._publish_state(sym, latest_walls[sym]['buy'], latest_walls[sym]['sell'])
+                            await self._publish_state(sym, latest_walls[sym]['buy'], latest_walls[sym]['sell'], force=True)
 
                     elif '@depth' in stream:
                         bids = payload.get('b', [])
@@ -115,20 +124,53 @@ class WhaleTracker:
                         # Periodically publish (e.g. on depth update)
                         await self._publish_state(sym, buy_wall_dist, sell_wall_dist)
                         
+                except asyncio.TimeoutError:
+                    logger.warning("Whale Tracker: No websocket message received in 30s (silent freeze). Reconnecting...")
+                    break
+                except (websockets.ConnectionClosed, websockets.ConnectionClosedError, websockets.ConnectionClosedOK) as e:
+                    logger.warning(f"Whale Tracker: Websocket closed ({e}). Reconnecting cleanly...")
+                    break
                 except Exception as e:
-                    logger.error(f"Error processing whale ws msg: {e}")
+                    logger.error(f"Error processing whale ws msg: {e}. Breaking to reconnect cleanly...")
+                    await asyncio.sleep(1.0)
+                    break
+
+    async def _heartbeat_loop(self):
+        """Publishes a heartbeat to Redis every 10s for the health watchdog."""
+        while self.running:
+            try:
+                if redis_manager.redis:
+                    await redis_manager.redis.set("whale:heartbeat", str(time.time()), ex=60)
+            except Exception:
+                pass
+            await asyncio.sleep(10.0)
 
     async def start(self):
         self.running = True
         await redis_manager.connect()
+        asyncio.create_task(self._heartbeat_loop())
+        
+        consecutive_failures = 0
         while self.running:
             try:
                 await self.connect_binance_ws()
+                consecutive_failures = 0 # reset on successful connection
             except Exception as e:
-                logger.error(f"Whale stream disconnected: {e}. Reconnecting in 5s...")
-                await asyncio.sleep(5)
+                consecutive_failures += 1
+                backoff = min(60, 5 * consecutive_failures)
+                logger.error(f"Whale stream disconnected: {e}. Consecutive failures: {consecutive_failures}. Reconnecting in {backoff}s...")
+                
+                # If network is persistently unreachable (6 consecutive failures ~ 2 mins),
+                # exit process with code 1 so PM2 automatically reboots the bot cleanly!
+                if consecutive_failures >= 6:
+                    import sys
+                    logger.critical("🚨 Whale Tracker exceeded 6 consecutive connection failures. Exiting with code 1 for PM2 auto-restart...")
+                    sys.exit(1)
+                    
+                await asyncio.sleep(backoff)
 
 if __name__ == "__main__":
+    import sys
     set_log_file("logs/whale_tracker.log")
     tracker = WhaleTracker()
     asyncio.run(tracker.start())

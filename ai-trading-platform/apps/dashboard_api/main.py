@@ -253,14 +253,27 @@ async def stop_pm2():
 async def restart_pm2():
     """Restart all pm2 processes except dashboard"""
     try:
-        bots_to_restart = "market-collector macro-collector ai-trainer trading-bot reward-calculator"
+        bots_to_restart = "market-collector macro-collector ai-trainer trading-bot reward-calculator whale-tracker statarb-collector"
         result = subprocess.run(f"pm2 restart {bots_to_restart}", shell=True, capture_output=True, text=True)
         if result.returncode == 0:
-            return {"status": "success", "message": "All bots restarted successfully."}
+            return {"status": "success", "message": "All bots (including Whale Tracker & StatArb) restarted successfully."}
         else:
             return {"status": "error", "message": f"PM2 Error: {result.stderr}"}
     except Exception as e:
         return {"status": "error", "message": f"Failed to restart bots: {str(e)}"}
+
+@app.post("/api/system/logs/clean")
+async def clean_system_logs():
+    """Prunes and cleans oversized logs across logs/ and PM2 logs directory."""
+    try:
+        from core.logging.logger import clean_old_logs
+        clean_old_logs("logs", max_size_mb=10, max_age_days=1)
+        if os.path.exists("/root/.pm2/logs"):
+            clean_old_logs("/root/.pm2/logs", max_size_mb=10, max_age_days=1)
+            subprocess.run("pm2 flush", shell=True, capture_output=True, text=True)
+        return {"status": "success", "message": "All logs pruned and PM2 logs flushed successfully."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to clean logs: {str(e)}"}
 
 if __name__ == "__main__":
     uvicorn.run("apps.dashboard_api.main:app", host="0.0.0.0", port=8000)

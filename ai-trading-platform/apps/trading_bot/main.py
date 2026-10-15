@@ -321,12 +321,20 @@ class ProductionTradingBot:
         whale = self.whale_states.get(symbol, {})
         statarb = self.statarb_states.get(symbol, {})
         
+        # Institutional Whale Order Flow Normalization:
+        # Prevent injecting raw 8-figure dollar values (e.g. $124M) into the LSTM neural network!
+        w_buy_raw = float(whale.get("whale_buy_pressure", 0.0))
+        w_sell_raw = float(whale.get("whale_sell_pressure", 0.0))
+        total_whale_vol = w_buy_raw + w_sell_raw
+        whale_imbalance = (w_buy_raw - w_sell_raw) / (total_whale_vol + 1e-5) if total_whale_vol > 0 else 0.0
+        whale_vol_norm = float(np.clip(np.log1p(total_whale_vol) / 16.0, 0.0, 1.0))
+        
         obs.extend([
             # Whale Tracking (Slots 130 - 139)
             float(whale.get("buy_wall_distance", 0.0)),
             float(whale.get("sell_wall_distance", 0.0)),
-            float(whale.get("whale_buy_pressure", 0.0)),
-            float(whale.get("whale_sell_pressure", 0.0)),
+            float(whale_imbalance), # Normalized [-1.0, 1.0] Order Flow Imbalance
+            float(whale_vol_norm),  # Normalized [0.0, 1.0] Log Volume
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             
             # StatArb Tracking (Slots 140 - 149)
@@ -1071,20 +1079,31 @@ class ProductionTradingBot:
                                 continue
 
                         # GUARD 3.7: Whale Market Order Flow Momentum (Whale Tracker Integration)
-                        # Prevents taking adverse trades when institutional whales are heavily dumping or sweeping the book
+                        # Prevents taking adverse trades when institutional whales are heavily dumping or sweeping the book.
+                        # Cross-validates with real price momentum to avoid synthetic testnet lockouts!
                         whale_data = self.whale_states.get(sym)
                         if whale_data and (time.time() - float(whale_data.get("timestamp", 0.0))) < 60.0:
                             w_buy = float(whale_data.get("whale_buy_pressure", 0.0))
                             w_sell = float(whale_data.get("whale_sell_pressure", 0.0))
                             
-                            # Extreme whale selling ($300k+ and 2x buy volume): Never buy into whale dumps
-                            if action_val > 0.20 and w_sell >= 300_000.0 and w_sell > (2.0 * w_buy):
-                                logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale selling (${w_sell:,.0f} vs ${w_buy:,.0f}). Blocking Long entry!")
-                                continue
-                            # Extreme whale buying ($300k+ and 2x sell volume): Never short into whale sweeps
-                            elif action_val < -0.20 and w_buy >= 300_000.0 and w_buy > (2.0 * w_sell):
-                                logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale buying (${w_buy:,.0f} vs ${w_sell:,.0f}). Blocking Short entry!")
-                                continue
+                            sym_mom_15m = market.features[4] if market and len(market.features) == 90 else 0.0
+                            critic_vals = precomputed_critics.get(sym)
+                            c1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else 0.0
+                            
+                            # Extreme whale selling ($500k+ and 2.5x buy volume): Never buy into whale dumps UNLESS price/critic is surging
+                            if action_val > 0.20 and w_sell >= 500_000.0 and w_sell > (2.5 * w_buy):
+                                if sym_mom_15m > 0.002 or c1h > 0.10:
+                                    logger.info(f"[{sym}] ⚠️ BYPASSING WHALE SELL DEFENSE: Real price momentum (+{sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bullish. Overriding synthetic sell pressure (${w_sell:,.0f}).")
+                                else:
+                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale selling (${w_sell:,.0f} vs ${w_buy:,.0f}). Blocking Long entry!")
+                                    continue
+                            # Extreme whale buying ($500k+ and 2.5x sell volume): Never short into whale sweeps UNLESS price/critic is dumping
+                            elif action_val < -0.20 and w_buy >= 500_000.0 and w_buy > (2.5 * w_sell):
+                                if sym_mom_15m < -0.002 or c1h < -0.10:
+                                    logger.info(f"[{sym}] ⚠️ BYPASSING WHALE BUY DEFENSE: Real price momentum ({sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bearish. Overriding synthetic buy pressure (${w_buy:,.0f}).")
+                                else:
+                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale buying (${w_buy:,.0f} vs ${w_sell:,.0f}). Blocking Short entry!")
+                                    continue
 
                         # GUARD 3.8: Funding Rate Asymmetry & Squeeze Sniping
                         # Protects against paying high funding fees; exploits deep negative funding short squeezes
@@ -1160,12 +1179,12 @@ class ProductionTradingBot:
                             logger.info(f"[{sym}] SKIPPING OPEN_SHORT: 5m Critic return {pred_ret_5m:.2f}% > -{min_hurdle:.2f}% fee hurdle.")
                             continue
                             
-                        # 2. 1-Hour & 4-Hour Multi-Horizon Swing Alignment
-                        # Prevents entering if the 1h or 4h macro swing is in clear active opposition
-                        if action_val > 0.2 and (pred_ret_1h < -0.15 or pred_ret_4h < -0.20):
+                        # 2. 1-Hour & 4-Hour Multi-Horizon Swing Alignment (Strict Anti-Suicide Rule)
+                        # Strictly forbids entering counter-trend positions into strong macro swing momentum
+                        if action_val > 0.2 and (pred_ret_1h < -0.05 or pred_ret_4h < -0.10):
                             logger.info(f"[{sym}] 🛑 SKIPPING OPEN_LONG: 1h Critic ({pred_ret_1h:+.2f}%) or 4h Critic ({pred_ret_4h:+.2f}%) opposes Long swing!")
                             continue
-                        elif action_val < -0.2 and (pred_ret_1h > 0.15 or pred_ret_4h > 0.20):
+                        elif action_val < -0.2 and (pred_ret_1h > 0.05 or pred_ret_4h > 0.10):
                             logger.info(f"[{sym}] 🛑 SKIPPING OPEN_SHORT: 1h Critic ({pred_ret_1h:+.2f}%) or 4h Critic ({pred_ret_4h:+.2f}%) opposes Short swing!")
                             continue
 
@@ -1212,10 +1231,10 @@ class ProductionTradingBot:
                     if whale_data and (time.time() - float(whale_data.get("timestamp", 0.0))) < 60.0:
                         w_b = float(whale_data.get("whale_buy_pressure", 0.0))
                         w_s = float(whale_data.get("whale_sell_pressure", 0.0))
-                        if action_val > 0.20 and w_b >= 200_000.0 and w_b > w_s:
-                            whale_mult = 1.10
-                        elif action_val < -0.20 and w_s >= 200_000.0 and w_s > w_b:
-                            whale_mult = 1.10
+                        if action_val > 0.20 and w_b >= 300_000.0 and w_b > (1.5 * w_s):
+                            whale_mult = 1.05
+                        elif action_val < -0.20 and w_s >= 300_000.0 and w_s > (1.5 * w_b):
+                            whale_mult = 1.05
 
                     min_margin_bound = 0.03 if self.profit_ratchet_active else 0.06
                     max_margin_bound = 0.08 if self.profit_ratchet_active else 0.15

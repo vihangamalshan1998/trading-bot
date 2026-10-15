@@ -406,14 +406,14 @@ async def run_training_loop():
         except Exception:
             pass
 
-        limit = 2000
+        limit = 5000
         epochs = 2  # Balanced PPO passes per batch (cuts continuous computation time)
         sleep_time = 0.5 # 4.0s cooling breather after every step for complete heat dissipation
         logger.info(f"❄️ MAXIMUM THERMAL PROTECTION: PyTorch capped at {safe_threads} thread, {epochs} epochs, with {sleep_time}s heatpipe breathers.")
     else:
         logger.info("🐢 VPS MODE DETECTED: Running in STARVATION MODE (1 CPU Core, 300 RAM limit)")
         torch.set_num_threads(1)
-        limit = 300
+        limit = 500
         epochs = 2
         sleep_time = 30.0
     

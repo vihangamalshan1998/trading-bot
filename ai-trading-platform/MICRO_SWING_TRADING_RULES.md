@@ -6,26 +6,37 @@ This document defines the exact, end-to-end mathematical and systematic rules us
 
 ## 🟢 Part 1: Rules to OPEN a Trade
 
-For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `LINK`, `ADA`, `AVAX`, `NEAR`, `LTC`), it must pass **12 strict institutional safety checkpoints in sequence**. If even a single condition fails, the trade is rejected:
+For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `LINK`, `ADA`, `AVAX`, `NEAR`, `LTC`), it must pass **13 strict institutional safety checkpoints in sequence**. If even a single condition fails, the trade is rejected:
 
 ```
-[Market Ticks] ──► 0. Circuit Breaker (5% Daily Loss) ──► 0.5. Liquidity Clock (Session Regimes)
+[Market Ticks] ──► 0. Circuit Breaker & Profit Ratchet ──► 0.5. Liquidity Clock (Session Regimes)
               ──► 1. AI Decision (Smoothed) ──► 2. Cooldown Gate (120s Rest)
               ──► 2.5. Portfolio Beta Governor (Max 3 Longs/Shorts, 30% Delta Cap)
-              ──► 3. Spread Firewall (Session Scaled) ──► 4. Confidence Filter (Session Scaled)
+              ──► 3. Spread Firewall (Session Scaled) ──► 4. Confidence Filter (Profit Ratchet Scaled)
               ──► 5. Multi-Horizon Critic (Session Hurdle) ──► 6. Macro Regime Alignment
-              ──► 7. OFI Wall Defense ──► 8. StatArb Lead-Lag ──► 9. Whale Order Flow
-              ──► 10. Funding Rate Squeeze Sniper ──► 11. Dynamic Margin ──► 12. POST-ONLY MAKER (GTX)
+              ──► 7. Lead-Lag Sniping (Crypto Echo) ──► 8. OFI Wall Defense ──► 9. StatArb Lead-Lag
+              ──► 10. Whale Order Flow ──► 11. Funding Rate Squeeze Sniper ──► 12. Dynamic Margin ──► 13. POST-ONLY MAKER (GTX)
 ```
 
-### 0. Portfolio 24-Hour 5% Drawdown Circuit Breaker ("The 5% Kill Switch")
+### 0. Portfolio 24-Hour 5% Drawdown Circuit Breaker & Daily High-Water Profit Ratchet
 
+#### A. 5% Daily Loss Kill Switch ("The Circuit Breaker")
 - **Ironclad Capital Preservation:** Tracks rolling 24-hour starting equity.
 - If total account equity drops $\ge \mathbf{5.0\%}$ from the daily starting equity:
   - **Trips the emergency circuit breaker immediately.**
   - Pauses all new trade entries for **6 hours**.
   - All existing open positions continue to be safely managed (take-profit, trailing stop, stop-loss still execute cleanly).
   - Guarantees that even in a freak Black Swan event, **your account physically cannot lose more than 5% in a day**.
+
+#### B. Daily High-Water Profit Ratchet ("Session Profit Lock")
+- **The Hedge Fund Principle:** Eliminates giving back morning profits during choppy afternoon sessions.
+- **Trigger Condition:** Once total daily profit reaches $\ge \mathbf{+4.0\%}$ ($+\$180$ on a $\$4,500$ account):
+  - If current profit retraces by $\ge \mathbf{50\%}$ from the day's high-water peak (e.g. peak profit was $+\$220$ and drops to $+\$105$):
+  - **Arms Capital Preservation Mode:**
+    1. **Margin Defense:** Halves base margin allocation from $10.0\%$ to **$5.0\%$** (dynamic bounds clamped to $3.0\% - 8.0\%$).
+    2. **Hurdle Elevation:** Raises the confidence hurdle to **$\mathbf{\ge 74\%}$**, allowing only highest-conviction "A+" setups.
+  - Automatically disarms if equity recovers to $\ge 75\%$ of the peak, or resets cleanly every 24 hours.
+  - **Result:** Permanently locks winning days into cash!
 
 ### 0.5. Institutional Liquidity Clock & Session Volatility Regimes
 
@@ -73,10 +84,12 @@ For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `X
   - If $(ask - bid) / mid\_price > 0.0006$ (0.06% / 6 bps), it **blocks opening immediately**.
   - Prevents opening into thin books or news spikes where slippage drains capital.
 
-### 4. Confidence Filter ($\ge 65\%$)
+### 4. Confidence Filter (Session Adaptive & Profit Ratchet Modulated)
 
-- The AI’s sigmoid probability must be at least **$0.65$ (65%)**.
-- If confidence is $< 65\%$, it skips the trade and logs an authentic **HOLD experience (+0.05 patience reward)** into MySQL so the database learns flat-market discipline.
+- The AI’s sigmoid probability must meet the dynamic hurdle:
+  - **Standard Session Hurdle:** $\ge 65\%$ (London / US NY), $\ge 68\%$ (Asia Chop), $\ge 72\%$ (Weekend).
+  - **Profit Ratchet Mode Hurdle:** Elevated to **$\mathbf{\ge 74\%}$** to safeguard winning days.
+- If confidence is below the hurdle, it skips the trade and logs an authentic **HOLD experience (+0.05 patience reward)** into MySQL so the database learns flat-market discipline.
 
 ### 5. Multi-Horizon Critic Return Hurdle (Fee Protection)
 
@@ -90,52 +103,63 @@ For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `X
   - If both BTC and ETH are surging ($\ge +0.80\%$), it **blocks counter-trend SHORTS**.
   - _High-Conviction Fast Pass:_ If the coin has $\ge 70\%$ confidence and $\ge |0.40\%|$ forecasted move, it can enter independently of minor BTC consolidation noise.
 
-### 7. Level-2 Order Flow Imbalance (OFI / Book Depth Wall Defense)
+### 7. Cross-Asset Lead-Lag Sniping ("The Crypto Echo" Momentum Front-Running)
+
+- **The Institutional Lead-Lag Dynamic:** In crypto, Bitcoin acts as the liquidity mothership. Altcoins follow BTC breakout impulses with a 30 to 180-second transmission lag ("the echo").
+- **Flash Dump / Pump Firewall:**
+  - **For Longs:** If BTC experiences a 1-minute flash dump ($\le \mathbf{-0.35\%}$), all altcoin Longs are **blocked immediately**, regardless of individual chart strength, preventing buying into an imminent correlated cascade.
+  - **For Shorts:** If BTC experiences a 1-minute flash pump ($\ge \mathbf{+0.35\%}$), all altcoin Shorts are **blocked immediately**.
+- **Echo Pulse Front-Running:**
+  - If BTC is surging ($\ge +0.20\%$ in 1m) and the altcoin is lagging behind BTC, the bot **boosts conviction by $1.15\times$** to front-run the altcoin's catch-up explosion!
+  - If BTC is dumping ($\le -0.20\%$ in 1m) and the altcoin is lagging, boosts Short conviction by $1.15\times$.
+
+### 8. Level-2 Order Flow Imbalance (OFI / Book Depth Wall Defense)
 
 - Checks the live top-5 orderbook depth ratio: $\text{Imbalance} = \frac{\text{Bid Depth} - \text{Ask Depth}}{\text{Total Depth}}$
   - **For Longs:** If Ask depth heavily outweighs Bid depth ($\text{Imbalance} < -0.30$), it **blocks Long entries** to avoid buying into massive institutional sell walls.
   - **For Shorts:** If Bid depth heavily outweighs Ask depth ($\text{Imbalance} > +0.30$), it **blocks Short entries** to avoid shorting into buy walls.
 
-### 8. Cross-Exchange StatArb Confirmation (OKX & Bybit Lead-Lag Filter)
+### 9. Cross-Exchange StatArb Confirmation (OKX & Bybit Lead-Lag Filter)
 
 - Cross-references live price premiums from OKX and Bybit via CCXT (`apps/statarb_collector`):
   - **For Longs:** If OKX or Bybit are trading at a discount ($< -0.15\%$), it **blocks the Long** because Binance is experiencing a local fakeout wick that will crash back to global prices.
   - **For Shorts:** If OKX or Bybit are trading at a premium ($> +0.15\%$), it **blocks the Short**.
   - _Fail-Open Resilience:_ If external exchange feeds lag (> 15s), it falls back to Binance data so execution is never stalled.
 
-### 9. Whale Market Order Flow Momentum (Whale Tracker Integration)
+### 10. Whale Market Order Flow Momentum (Whale Tracker Integration)
 
 - Streams live institutional $>\$100,000$ market order sweeps via `apps/whale_tracker`:
   - **For Longs:** If whales executed $\ge \$300,000$ in market sells and selling is $2\times$ greater than buying in the last 60 seconds, **blocks Long entries** (never buy into an institutional dump).
   - **For Shorts:** If whales executed $\ge \$300,000$ in market buys and buying is $2\times$ greater than selling, **blocks Short entries**.
   - **Whale Conviction Boost:** If whales are buying heavily ($\ge \$200,000$) in alignment with a Long signal, boosts margin conviction multiplier by $+10\%$.
 
-### 10. Funding Rate Asymmetry & Short-Squeeze Sniping
+### 11. Funding Rate Asymmetry & Short-Squeeze Sniping
 
 - Reads live 8-hour perpetual funding rates:
   - **Short Squeeze Sniping:** When funding is deep negative ($\le -0.03\%$), retail shorts are trapped paying longs. **Blocks Short trades** (prevents paying funding drain and getting short-squeezed) and flags Long setups for explosive short-squeeze upside!
   - **Overheated Long Defense:** When funding is frothy positive ($\ge +0.05\%$), **blocks Long trades** to avoid paying heavy funding fees to short sellers.
 
-### 11. Institutional Dynamic Volatility & Conviction Margin Sizing
+### 12. Institutional Dynamic Volatility & Conviction Margin Sizing
 
-- Dynamically scales margin allocation between **6.0% and 15.0%** of account equity based on signal strength:
-  - **Base Margin:** $10.0\%$ of account equity (~$450 margin on a $4,500 account).
-  - **Conviction Multiplier:** $0.80\times$ to $1.30\times$ based on neural confidence.
+- Dynamically scales margin allocation based on conviction, market volatility, and risk regime:
+  - **Base Margin:** $10.0\%$ standard (~$450 on a $4,500 account); automatically halved to **$5.0\%$** when Profit Ratchet is active.
+  - **Conviction Multiplier:** $0.80\times$ to $1.30\times$ based on neural confidence relative to effective hurdle.
   - **Critic Multi-Horizon Alignment:** $1.15\times$ if 5m and 1h agree, $0.85\times$ if divergent.
+  - **Lead-Lag Echo Multiplier:** $1.15\times$ when front-running BTC breakout impulses.
   - **Whale Flow Boost:** $1.10\times$ if institutional whale flow is actively buying with the trade.
   - **Asset Beta Dampener:** $1.10\times$ for BTC/ETH; $1.00\times$ for SOL/BNB/LTC; $0.75\times$ for wild altcoins (ADA, XRP, NEAR, AVAX, LINK).
   - **Market Volatility Scaling:** Automatically trims position size by up to $30\%$ when market volatility $> 1.5\%$.
-  - **Safe Clamping:** Dynamic margin is strictly bounded between **$6.0\%$ and $15.0\%$ of equity** (~$270 to ~$675 margin on a $4,500 account).
+  - **Safe Clamping:** Dynamic margin is strictly bounded between **$6.0\%$ and $15.0\%$ of equity** ($3.0\% - 8.0\%$ in Profit Ratchet Mode).
   - Minimum order size must be at least **$50 notional**.
 
-### 12. Post-Only Maker Execution (`GTX`) & Active Pegging
+### 13. Post-Only Maker Execution (`GTX`) & Active Pegging
 
 - **Zero Taker Fees:** All entry orders are sent with `time_in_force="GTX"` (Good-Till-Crossing / Post-Only).
 - **Top-of-Book Pegging:** Longs peg to `best_bid`; Shorts peg to `best_ask`.
 - **Binance `-5022` Protection:** If an order would cross the spread, it automatically re-pegs 1 tick deeper to guarantee Maker status (0.02% fee instead of 0.05% taker fee).
 - **30-Second Pegging Timeout:** If unfilled after 30 seconds, it cancels cleanly to release margin.
 
-👉 **If all 12 checkpoints pass:** The bot places an authentic **POST-ONLY MAKER ORDER (GTX)** on the book!
+👉 **If all 13 checkpoints pass:** The bot places an authentic **POST-ONLY MAKER ORDER (GTX)** on the book!
 
 ---
 
@@ -182,18 +206,21 @@ Active Position (PnL & Time Tracked) ─┼──► Scenario 4: Sudden Velocity
 - **Condition:** The trade was up $\ge +4.0\%$ leveraged, and suddenly drops by $\ge 3.5\%$ in less than 15 seconds, losing over 30% of its peak.
 - **Action:** **Instant Market Close.** Catches flash dumps/pumps and locks in remaining profit before it turns negative.
 
-### Scenario 5: The 3-Tier Ratcheting Trailing Stop
+### Scenario 5: ATR-Adaptive Volatility Trailing Stops (Coin Beta & Volatility Scaled)
 
-- **Tier 1 (Impulse Wave):**
-  - Arms when peak profit reaches **$+8.0\%$ to $+15.0\%$ leveraged**.
-  - Guarantees a minimum floor of **$+4.0\%$ leveraged** (+0.20% spot move).
-  - _Math:_ Covers the 0.10% Binance fee and guarantees **positive net cash in your account**.
-- **Tier 2 (Developing Trend):**
-  - Arms when peak profit reaches **$+15.0\%$ to $+30.0\%$ leveraged**.
-  - Trailing floor: locks in at least **$+8.0\%$** or $75\%$ of the peak.
-- **Tier 3 (Deep Runner):**
-  - Arms when peak profit reaches **$\ge +30.0\%$ leveraged**.
-  - Trailing floor: tight 15% trail (keeps $85\%$ of the highest peak reached).
+- **The Problem with Rigid Percentage Trails:** Rigid percentage trailing stops treat low-volatility majors (`BTC`, `ETH`) identically to explosive high-beta altcoins (`NEAR`, `SOL`, `ADA`). This causes BTC to give back too much profit on pullbacks, while premature stop-outs constantly shake out alts on normal wicks before a $+30\%$ to $+50\%$ runner develops.
+- **The Institutional Solution:** Trailing stop floors dynamically calibrate to each symbol's live ATR / volatility (`vol_factor`):
+  - **Low-Volatility Assets (BTC, ETH ~0.8% vol):**
+    - `vol_factor` = $-0.028$.
+    - **Tier 1 (Impulse Wave, Peak $+8\%$ to $+15\%$):** Locks in **$73.0\%$** of peak (min $+4.0\%$ floor) to bank cash fast without unnecessary giveback.
+    - **Tier 2 (Developing Swing, Peak $+15\%$ to $+30\%$):** Locks in **$78.0\%$** of peak (min $+8.0\%$ floor).
+    - **Tier 3 (Deep Runner, Peak $\ge +30\%$):** Locks in **$86.5\%$** of peak.
+  - **High-Volatility Assets (NEAR, SOL, ADA, AVAX ~3.0% vol):**
+    - `vol_factor` = $+0.060$.
+    - **Tier 1 (Impulse Wave, Peak $+8\%$ to $+15\%$):** Locks in **$64.0\%$** of peak (min $+4.0\%$ floor), providing the wider breathing room necessary to survive alts wicks.
+    - **Tier 2 (Developing Swing, Peak $+15\%$ to $+30\%$):** Locks in **$69.0\%$** of peak (min $+8.0\%$ floor).
+    - **Tier 3 (Deep Runner, Peak $\ge +30\%$):** Locks in **$82.0\%$** of peak to let runners reach $+50\%$ or $+100\%$.
+- **Safety Floors:** Always guarantees at least $+4.0\%$ leveraged gain (Tier 1) and $+8.0\%$ leveraged gain (Tier 2), ensuring all round-trip exchange fees and slippage are completely covered with positive net cash added to your wallet!
 
 ### Scenario 6: Critic-Assisted Early Reversal Exit
 

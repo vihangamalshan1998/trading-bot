@@ -116,10 +116,12 @@ class ProductionTradingBot:
         # Institutional Scale-Out & Free-Roll Runner Tracking
         self.partial_tp_triggered = {sym: False for sym in self.symbols}
         
-        # Institutional Circuit Breaker (5% Daily Loss Kill Switch)
+        # Institutional Circuit Breaker (5% Daily Loss Kill Switch) & Profit Ratchet
         self.daily_start_equity = 0.0
+        self.daily_peak_equity = 0.0
         self.daily_equity_reset_time = time.time()
         self.circuit_breaker_active_until = 0.0
+        self.profit_ratchet_active = False
         
     async def listen_macro(self):
         await self.redis.connect()
@@ -431,20 +433,44 @@ class ProductionTradingBot:
                     self.model.eval()
                     logger.info("Hot reload complete.")
 
-                # 24-Hour Rolling Circuit Breaker Tracking (5% Daily Loss Kill Switch)
+                # 24-Hour Rolling Circuit Breaker Tracking (5% Daily Loss Kill Switch) & Profit Ratchet
                 now_t = time.time()
                 current_eq = float(self.portfolio_state.equity)
                 if (now_t - self.daily_equity_reset_time) >= 86400.0 or self.daily_start_equity <= 0.0:
                     if current_eq > 0:
                         self.daily_start_equity = current_eq
+                        self.daily_peak_equity = current_eq
                         self.daily_equity_reset_time = now_t
+                        self.profit_ratchet_active = False
                         logger.info(f"📅 24-Hour Equity Benchmark Reset: Starting Equity = ${self.daily_start_equity:.2f}")
 
                 if self.daily_start_equity > 0 and current_eq > 0:
+                    # Update rolling daily high-water peak equity
+                    if current_eq > self.daily_peak_equity:
+                        self.daily_peak_equity = current_eq
+
+                    # 1. 5% Daily Loss Circuit Breaker Kill Switch
                     daily_dd = (self.daily_start_equity - current_eq) / self.daily_start_equity
                     if daily_dd >= 0.05 and now_t > self.circuit_breaker_active_until:
                         self.circuit_breaker_active_until = now_t + (6 * 3600.0) # 6 hours standby
                         logger.critical(f"🚨 5% DAILY LOSS CIRCUIT BREAKER TRIPPED! Daily drawdown is {daily_dd*100:.2f}% >= 5.00%. Pausing new entries for 6 hours!")
+
+                    # 2. Daily High-Water Profit Ratchet (Session Profit Lock)
+                    # If daily peak profit reached >= +4.0% (e.g. +$180 on $4,500), protect accumulated daily profits!
+                    # If current profit retraces by >= 50% from daily peak profit, arm Capital Preservation Mode.
+                    peak_profit = self.daily_peak_equity - self.daily_start_equity
+                    current_profit = current_eq - self.daily_start_equity
+                    if peak_profit >= (0.040 * self.daily_start_equity):
+                        if current_profit < (0.50 * peak_profit) and not self.profit_ratchet_active:
+                            self.profit_ratchet_active = True
+                            logger.warning(
+                                f"🛡️ DAILY PROFIT RATCHET ARMED (Capital Preservation Mode): Daily peak profit was +${peak_profit:.2f} "
+                                f"({(peak_profit/self.daily_start_equity)*100:.2f}%), but current profit retraced to +${current_profit:.2f}. "
+                                f"Halving base margin to 5.0% and elevating confidence hurdle to 74% to permanently preserve winning day!"
+                            )
+                        elif current_profit >= (0.75 * peak_profit) and self.profit_ratchet_active:
+                            self.profit_ratchet_active = False
+                            logger.info(f"🛡️ Daily Profit Ratchet disarmed: Equity recovered to +${current_profit:.2f} (>= 75% of peak). Normal sizing restored.")
 
                 # Institutional Liquidity Clock & Session Volatility Regimes
                 utc_now = datetime.datetime.now(datetime.timezone.utc)
@@ -711,25 +737,34 @@ class ProductionTradingBot:
                                         logger.warning(f"[{sym}] ⚡ SUDDEN VELOCITY SHOCK DETECTED: Rapid drop from +{recent_peak*100:.2f}% to +{pnl_pct_leveraged*100:.2f}% in <15s! Locking in profit immediately.")
                                         sudden_shock_triggered = True
 
-                            # 3. DYNAMIC ADAPTIVE RATCHETING TRAILING STOP (True Micro-Swing Protection)
+                            # 3. ATR-ADAPTIVE VOLATILITY RATCHETING TRAILING STOP (True Micro-Swing Protection)
                             if not (hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or partial_tp_triggered or freeroll_stop_triggered):
+                                coin_vol = float(market.volatility) if market and hasattr(market, 'volatility') and market.volatility > 0 else 0.015
+                                # vol_factor: baseline 0.015 (1.5% volatility)
+                                # Low vol (BTC/ETH ~0.8%) -> tighter retention (+3% to +5% retention) to bank cash fast
+                                # High vol (NEAR/SOL/ADA ~3.0%) -> wider breathing room (-5% to -7% retention) to ride runners
+                                vol_factor = float(np.clip((coin_vol - 0.015) * 4.0, -0.07, +0.07))
+                                t1_retention = float(np.clip(0.70 - vol_factor, 0.60, 0.78))
+                                t2_retention = float(np.clip(0.75 - vol_factor, 0.65, 0.82))
+                                t3_retention = float(np.clip(0.85 - (vol_factor * 0.5), 0.80, 0.90))
+
                                 # Tier 1: Micro-Swing Impulse Protection (Requires >= +8.0% peak to ensure fees & slippage are cleanly beaten)
                                 if 0.08 <= prev_peak < 0.15:
-                                    trailing_floor = max(0.04, prev_peak * 0.70) # Guarantee at least +4.0% net gain above fees
+                                    trailing_floor = max(0.04, prev_peak * t1_retention) # Guarantee at least +4.0% net gain above fees
                                     if pnl_pct_leveraged < trailing_floor:
-                                        logger.info(f"[{sym}] 🔒 MICRO-SWING IMPULSE TRAIL: Peak +{prev_peak*100:.2f}%, now +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Banking solid swing gain!")
+                                        logger.info(f"[{sym}] 🔒 ATR-ADAPTIVE IMPULSE TRAIL (Vol: {coin_vol*100:.2f}%, Ret: {t1_retention*100:.1f}%): Peak +{prev_peak*100:.2f}%, now +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Banking solid swing gain!")
                                         trailing_stop_triggered = True
                                 # Tier 2: Developing Trend (+15% to +30% peak)
                                 elif 0.15 <= prev_peak < 0.30:
-                                    trailing_floor = max(0.08, prev_peak * 0.75) # 25% breathing room, min +8% floor
+                                    trailing_floor = max(0.08, prev_peak * t2_retention) # Dynamic breathing room, min +8% floor
                                     if pnl_pct_leveraged < trailing_floor:
-                                        logger.info(f"[{sym}] 🔒 TRAILING STOP TRIGGERED (Developing Swing): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing gain!")
+                                        logger.info(f"[{sym}] 🔒 ATR-ADAPTIVE TRAIL TRIGGERED (Developing Swing, Vol: {coin_vol*100:.2f}%, Ret: {t2_retention*100:.1f}%): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing gain!")
                                         trailing_stop_triggered = True
                                 # Tier 3: Mature Deep Trend Runner (>= +30% peak, e.g. +50%, +100%+)
                                 elif prev_peak >= 0.30:
-                                    trailing_floor = prev_peak * 0.85 # Tight 15% trail to harvest 85% of peak gains
+                                    trailing_floor = prev_peak * t3_retention # Harvest 80-90% of peak gains
                                     if pnl_pct_leveraged < trailing_floor:
-                                        logger.info(f"[{sym}] 🔒 TRAILING STOP TRIGGERED (Deep Runner): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing massive gain!")
+                                        logger.info(f"[{sym}] 🔒 ATR-ADAPTIVE TRAIL TRIGGERED (Deep Runner, Vol: {coin_vol*100:.2f}%, Ret: {t3_retention*100:.1f}%): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing massive gain!")
                                         trailing_stop_triggered = True
 
                             # 4. INSTITUTIONAL STALE POSITION PRUNER (Capital Recycling)
@@ -773,6 +808,7 @@ class ProductionTradingBot:
                         price_offset = (action_logits[3] + 1.0) / 2.0
                     
                     pos = self.portfolio_state.positions[sym]
+                    lead_lag_mult = 1.00
                     
                     # 2. Institutional Hysteresis Deadband
                     # Entries from flat require |action_val| > 0.20
@@ -897,9 +933,11 @@ class ProductionTradingBot:
                             logger.info(f"[{sym}] ⏳ MICRO-SWING BREATHING: Minimum hold (600s) not met yet ({time_held:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%). Giving swing room to run!")
                             continue
 
-                    # GUARD 3: Confidence Filter (Session Adaptive: {session_conf_hurdle:.2f} in {session_name})
-                    if not is_closing and confidence < session_conf_hurdle: 
-                        logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < {session_conf_hurdle:.2f} in {session_name})")
+                    # GUARD 3: Confidence Filter (Session Adaptive & Profit Ratchet Modulated)
+                    effective_conf_hurdle = max(0.74 if self.profit_ratchet_active else session_conf_hurdle, session_conf_hurdle)
+                    if not is_closing and confidence < effective_conf_hurdle: 
+                        reason = "Profit Ratchet Preservation" if self.profit_ratchet_active and effective_conf_hurdle > session_conf_hurdle else session_name
+                        logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < {effective_conf_hurdle:.2f} in {reason})")
                         
                         # Emit authentic live HOLD experience into DB when flat (15% sample rate)
                         # Populates LINK, ADA, AVAX, NEAR, LTC with genuine 200-dim market state sequences
@@ -976,6 +1014,36 @@ class ProductionTradingBot:
                                 continue
                         elif has_high_conviction and ((action_val > 0.2 and is_macro_down) or (action_val < -0.2 and is_macro_up)):
                             logger.info(f"[{sym}] 🚀 HIGH-CONVICTION BYPASS: Proceeding with trade (Confidence: {confidence:.2f}, 5m Critic: {sym_c5m:+.2f}%) despite macro divergence.")
+
+                        # GUARD 3.4: Cross-Asset Lead-Lag Sniping ("The Crypto Echo" Momentum Front-Running)
+                        # Altcoins lag Bitcoin impulse moves by 30-180 seconds.
+                        # 1. Flash Dump Defense: Block Altcoin Longs if BTC is dumping (<= -0.35% in 1m)
+                        # 2. Flash Pump Defense: Block Altcoin Shorts if BTC is pumping (>= +0.35% in 1m)
+                        # 3. Echo Breakout Front-Running: Boost conviction 1.15x if BTC is breaking out and altcoin is lagging
+                        if sym != "BTCUSDT":
+                            btc_market = self.market_states.get("BTCUSDT")
+                            if btc_market and len(btc_market.features) == 90 and market and len(market.features) == 90:
+                                btc_1m_mom = float(btc_market.features[2])
+                                sym_1m_mom = float(market.features[2])
+                                
+                                # Defense 1: Flash BTC Dump blocks Alt Longs
+                                if action_val > 0.20 and btc_1m_mom <= -0.0035:
+                                    logger.info(f"[{sym}] 🛑 LEAD-LAG DEFENSE: BTC 1m Flash Dump ({btc_1m_mom*100:+.2f}%). Blocking Altcoin Long to prevent correlated crash!")
+                                    continue
+                                # Defense 2: Flash BTC Pump blocks Alt Shorts
+                                elif action_val < -0.20 and btc_1m_mom >= 0.0035:
+                                    logger.info(f"[{sym}] 🛑 LEAD-LAG DEFENSE: BTC 1m Flash Pump ({btc_1m_mom*100:+.2f}%). Blocking Altcoin Short to prevent short-squeeze!")
+                                    continue
+                                    
+                                # Offensive Echo Front-Running:
+                                # If BTC has broken out (>= +0.20% in 1m) and this altcoin is lagging behind BTC (sym_1m_mom < btc_1m_mom):
+                                if action_val > 0.20 and btc_1m_mom >= 0.0020 and sym_1m_mom < btc_1m_mom:
+                                    lead_lag_mult = 1.15
+                                    logger.info(f"[{sym}] ⚡ ECHO FRONT-RUNNER: BTC surging (+{btc_1m_mom*100:.2f}%) while {sym} lags (+{sym_1m_mom*100:.2f}%). Boosting conviction 1.15x to front-run the echo wave!")
+                                # If BTC has broken down (<= -0.20% in 1m) and this altcoin is lagging behind BTC (sym_1m_mom > btc_1m_mom):
+                                elif action_val < -0.20 and btc_1m_mom <= -0.0020 and sym_1m_mom > btc_1m_mom:
+                                    lead_lag_mult = 1.15
+                                    logger.info(f"[{sym}] ⚡ ECHO FRONT-RUNNER: BTC dumping ({btc_1m_mom*100:.2f}%) while {sym} lags ({sym_1m_mom*100:+.2f}%). Boosting Short conviction 1.15x to front-run the echo breakdown!")
 
                         # GUARD 3.5: Level-2 Order Flow Imbalance (OFI / Book Depth Wall Defense)
                         # Prevents buying directly into massive institutional sell walls or shorting into buy walls
@@ -1103,10 +1171,11 @@ class ProductionTradingBot:
 
                     # GUARD 5: Institutional Dynamic Volatility & Conviction Margin Sizing (Kelly / ATR Scaling)
                     # Dynamically scales between 6.0% and 15.0% based on conviction, horizon alignment, and coin volatility.
-                    base_margin_pct = 0.10 # 10.0% baseline
+                    # Halved to 5.0% base margin (3.0% to 8.0% dynamic) in Profit Ratchet Capital Preservation Mode.
+                    base_margin_pct = 0.05 if self.profit_ratchet_active else 0.10
                     
                     # 1. Conviction Multiplier (0.80x to 1.30x scaled to session hurdle)
-                    conviction_mult = float(np.clip(0.80 + (confidence - session_conf_hurdle) * 1.5, 0.80, 1.30))
+                    conviction_mult = float(np.clip(0.80 + (confidence - effective_conf_hurdle) * 1.5, 0.80, 1.30))
                     
                     # 2. Multi-Horizon Critic Alignment Multiplier (0.85x to 1.15x)
                     critic_vals = precomputed_critics.get(sym)
@@ -1148,7 +1217,9 @@ class ProductionTradingBot:
                         elif action_val < -0.20 and w_s >= 200_000.0 and w_s > w_b:
                             whale_mult = 1.10
 
-                    dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.06, 0.15))
+                    min_margin_bound = 0.03 if self.profit_ratchet_active else 0.06
+                    max_margin_bound = 0.08 if self.profit_ratchet_active else 0.15
+                    dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult, min_margin_bound, max_margin_bound))
                     
                     max_margin_budget = max(0.0, self.portfolio_state.equity * dynamic_margin_pct)
                     margin_allocated = min(max_margin_budget, max(0.0, self.portfolio_state.free_margin) * target_size)

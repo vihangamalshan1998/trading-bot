@@ -109,6 +109,8 @@ class ProductionTradingBot:
         self.position_entry_times = {sym: 0.0 for sym in self.symbols} # Minimum holding tracking per symbol
         self.peak_pnl_pct = {sym: 0.0 for sym in self.symbols} # Peak leveraged PnL tracking for trailing profit locks
         self.pnl_history = {sym: collections.deque(maxlen=30) for sym in self.symbols} # (timestamp, pnl_pct_leveraged) for velocity shock detection
+        self.smoothed_action_history = {sym: collections.deque(maxlen=3) for sym in self.symbols} # Institutional signal smoothing (3-tick window)
+        self.smoothed_confidence_history = {sym: collections.deque(maxlen=3) for sym in self.symbols}
         
     async def listen_macro(self):
         await self.redis.connect()
@@ -672,21 +674,39 @@ class ProductionTradingBot:
                         confidence = 1.0
                         target_size = 0.0
                         price_offset = 0.0 # Force immediate execution (0 offset)
+                        self.smoothed_action_history[sym].clear()
+                        self.smoothed_confidence_history[sym].clear()
                     else:
                         # Pure Deterministic Policy (Learned AI Weights - Zero Random Exploration Noise)
-                        action_val = action_logits[0]
-                        # FIX: Temperature-Scaled Confidence to prevent tanh saturation
-                        # Old: (action_logits[1] + 1.0) / 2.0  → always ≈ 1.00 due to tanh saturation
-                        # New: sigmoid(raw / temperature) → spreads values across [0, 1] properly
-                        # T=3.0 was too aggressive (capped 41.7%–58.3%), T=1.0 gives usable 27%–73% range
+                        raw_action = float(action_logits[0])
                         confidence_temperature = 1.0
-                        confidence = 1.0 / (1.0 + np.exp(-action_logits[1] / confidence_temperature))
-                        # FIX: Prevent target_size tanh saturation (which was clamping size to 0.0000000)
+                        raw_conf = float(1.0 / (1.0 + np.exp(-action_logits[1] / confidence_temperature)))
+                        
+                        # 1. Institutional Temporal Window Smoothing (3-tick moving average)
+                        # Eliminates high-frequency neural jitter and noisy 1-tick oscillations
+                        self.smoothed_action_history[sym].append(raw_action)
+                        self.smoothed_confidence_history[sym].append(raw_conf)
+                        action_val = float(np.mean(self.smoothed_action_history[sym]))
+                        confidence = float(np.mean(self.smoothed_confidence_history[sym]))
+                        
                         raw_size = 1.0 / (1.0 + np.exp(-action_logits[2]))
                         target_size = max(0.25, min(1.0, raw_size))
                         price_offset = (action_logits[3] + 1.0) / 2.0
                     
-                    # 1. Determine Predicted Side (Even if confidence is low, we want to know what it *leans* towards)
+                    pos = self.portfolio_state.positions[sym]
+                    
+                    # 2. Institutional Hysteresis Deadband
+                    # Entries from flat require |action_val| > 0.20
+                    # Reversals/Exits against an established position require passing a wider barrier (|action_val| > 0.35)
+                    # This prevents 1-tick micro-wobbles from closing positions early into chop!
+                    if pos.quantity > 0:
+                        is_closing = (action_val < -0.35) or exit_override
+                    elif pos.quantity < 0:
+                        is_closing = (action_val > 0.35) or exit_override
+                    else:
+                        is_closing = False
+
+                    # Predicted side tracking for telemetry
                     if action_val < -0.2: predicted_side = "SHORT"
                     elif action_val > 0.2: predicted_side = "LONG"
                     else: predicted_side = "HOLD"
@@ -705,26 +725,37 @@ class ProductionTradingBot:
                             "critic_4h": float(pred_ret_4h)
                         }
                         await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
-                    
-                    pos = self.portfolio_state.positions[sym]
-                    is_closing = (pos.quantity > 0 and action_val < -0.2) or (pos.quantity < 0 and action_val > 0.2)
 
-                    # GUARD 1: Anti-Churn Cooldown with High-Conviction Fast-Pass (180s Baseline)
+                    # GUARD 1: Anti-Churn Cooldown with High-Conviction Fast-Pass (180s Baseline, 120s Ironclad Rest)
                     if not is_closing:
                         time_since_close = time.time() - self.last_close_time.get(sym, 0.0)
                         cooldown_period = 180.0 # 3 minutes baseline cooldown
+                        mandatory_rest_period = 120.0 # 2 minutes ironclad minimum rest
+                        
                         if time_since_close < cooldown_period:
-                            # High-Conviction Fast-Pass Override: Allows immediate entry if AI is >= 90% confident + Critic forecasts a massive breakout (>= 0.60%)
+                            # 1. Ironclad Mandatory Rest: Zero trades permitted within 120s of close (kills 5-second flip-flop trap)
+                            if time_since_close < mandatory_rest_period:
+                                logger.info(f"[{sym}] SKIPPING OPEN: In mandatory post-trade rest ({time_since_close:.1f}s / {mandatory_rest_period:.0f}s). Cooling down book.")
+                                continue
+                                
+                            # 2. High-Conviction Fast-Pass Override (only eligible between 120s and 180s)
                             critic_vals = precomputed_critics.get(sym)
                             pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
-                            fast_pass_critic_hurdle = 0.75 # 0.75% massive move required to bypass 3m cooldown
+                            fast_pass_critic_hurdle = 0.85 # Raised to 0.85% move required to bypass remaining 60s
                             has_critic_conviction = (action_val > 0.2 and pred_ret_5m >= fast_pass_critic_hurdle) or (action_val < -0.2 and pred_ret_5m <= -fast_pass_critic_hurdle)
                             
-                            if confidence >= 0.72 and has_critic_conviction:
-                                logger.info(f"[{sym}] 🎯 HIGH-CONVICTION FAST-PASS: Bypassing cooldown ({time_since_close:.1f}s/{cooldown_period:.0f}s) due to extreme confidence ({confidence:.2f} >= 0.72) & massive Critic return ({pred_ret_5m:+.2f}% >= {fast_pass_critic_hurdle:.2f}%)!")
+                            if confidence >= 0.78 and has_critic_conviction:
+                                logger.info(f"[{sym}] 🎯 HIGH-CONVICTION FAST-PASS: Bypassing remaining cooldown ({time_since_close:.1f}s/{cooldown_period:.0f}s) due to extreme confidence ({confidence:.2f} >= 0.78) & massive Critic return ({pred_ret_5m:+.2f}% >= {fast_pass_critic_hurdle:.2f}%)!")
                             else:
                                 logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / {cooldown_period:.0f}s).")
                                 continue
+
+                    # GUARD 1.5: Spread Firewall (Protect against illiquid book slippage bleed)
+                    if not is_closing and market and market.mid_price > 0:
+                        spread_pct = market.spread / market.mid_price
+                        if spread_pct > 0.0006:
+                            logger.warning(f"[{sym}] 🛑 SPREAD FIREWALL: Spread {spread_pct*100:.3f}% > 0.060% limit. Skipping entry to protect from slippage fee bleed!")
+                            continue
 
                     # GUARD 2: Minimum Hold Duration (600s / 10 mins with Smart Trap Escape Door)
                     if is_closing and not exit_override:
@@ -896,14 +927,65 @@ class ProductionTradingBot:
                             logger.info(f"[{sym}] 🛑 SKIPPING OPEN_SHORT: 1h Critic ({pred_ret_1h:+.2f}%) or 4h Critic ({pred_ret_4h:+.2f}%) opposes Short swing!")
                             continue
 
-                    # GUARD 5: Safe Position Margin Budget (Max 15% equity allocated per position)
-                    max_margin_budget = max(0.0, self.portfolio_state.equity * settings.max_position_margin_pct)
+                    # GUARD 5: Institutional Dynamic Volatility & Conviction Margin Sizing (Kelly / ATR Scaling)
+                    # Dynamically scales between 6.0% and 15.0% based on conviction, horizon alignment, and coin volatility.
+                    base_margin_pct = 0.10 # 10.0% baseline
+                    
+                    # 1. Conviction Multiplier (0.80x to 1.30x)
+                    conviction_mult = float(np.clip(0.80 + (confidence - 0.65) * 1.5, 0.80, 1.30))
+                    
+                    # 2. Multi-Horizon Critic Alignment Multiplier (0.85x to 1.15x)
+                    critic_vals = precomputed_critics.get(sym)
+                    if critic_vals is not None and len(critic_vals) >= 2:
+                        c5m = float(critic_vals[0])
+                        c1h = float(critic_vals[1])
+                        # If 5m and 1h agree with trade direction, scale up; if divergent, scale down
+                        if (action_val > 0.2 and c5m > 0 and c1h > 0) or (action_val < -0.2 and c5m < 0 and c1h < 0):
+                            critic_mult = 1.15
+                        elif (action_val > 0.2 and c1h < 0) or (action_val < -0.2 and c1h > 0):
+                            critic_mult = 0.85
+                        else:
+                            critic_mult = 1.00
+                    else:
+                        critic_mult = 1.00
+                        
+                    # 3. Asset Beta / Volatility Dampener
+                    # Large caps (BTC, ETH) can handle higher margin; high-beta altcoins get dampener to prevent big fee bleed
+                    if sym in ["BTCUSDT", "ETHUSDT"]:
+                        beta_dampener = 1.10
+                    elif sym in ["SOLUSDT", "BNBUSDT", "LTCUSDT"]:
+                        beta_dampener = 1.00
+                    else: # ADA, XRP, NEAR, AVAX, LINK (wild altcoins)
+                        beta_dampener = 0.75
+                        
+                    # 4. Volatility Scaling from Market Observation
+                    vol_scale = 1.0
+                    if market and hasattr(market, 'volatility') and market.volatility > 0.015:
+                        vol_scale = float(np.clip(0.015 / market.volatility, 0.70, 1.00))
+                        
+                    dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale, 0.06, 0.15))
+                    
+                    max_margin_budget = max(0.0, self.portfolio_state.equity * dynamic_margin_pct)
                     margin_allocated = min(max_margin_budget, max(0.0, self.portfolio_state.free_margin) * target_size)
                     notional_requested = margin_allocated * pos.leverage
                     
+                    # Side determination respecting Hysteresis Deadband
                     side = "HOLD"
-                    if action_val < -0.2: side = "CLOSE_LONG" if pos.quantity > 0 else "OPEN_SHORT"
-                    elif action_val > 0.2: side = "CLOSE_SHORT" if pos.quantity < 0 else "OPEN_LONG"
+                    if pos.quantity > 0:
+                        if is_closing:
+                            side = "CLOSE_LONG"
+                        elif action_val > 0.20:
+                            side = "OPEN_LONG"
+                    elif pos.quantity < 0:
+                        if is_closing:
+                            side = "CLOSE_SHORT"
+                        elif action_val < -0.20:
+                            side = "OPEN_SHORT"
+                    else:
+                        if action_val < -0.20:
+                            side = "OPEN_SHORT"
+                        elif action_val > 0.20:
+                            side = "OPEN_LONG"
                     
                     if side == "HOLD":
                         logger.info(f"[{sym}] HOLDING (Action Val: {action_val:.2f})")

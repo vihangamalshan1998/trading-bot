@@ -716,8 +716,8 @@ class ProductionTradingBot:
                         critic_vals = precomputed_critics.get(sym)
                         pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
                         pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
-                        is_trap_detected = (pos.quantity > 0 and (pred_ret_5m <= -0.20 or pred_ret_1h <= -0.30) and confidence >= 0.70) or \
-                                           (pos.quantity < 0 and (pred_ret_5m >= 0.20 or pred_ret_1h >= 0.30) and confidence >= 0.70)
+                        is_trap_detected = (pos.quantity > 0 and (pred_ret_5m <= -0.20 or pred_ret_1h <= -0.30) and confidence >= 0.65) or \
+                                           (pos.quantity < 0 and (pred_ret_5m >= 0.20 or pred_ret_1h >= 0.30) and confidence >= 0.65)
                         
                         is_protective_loss = pnl_pct_leveraged <= -0.08
                         

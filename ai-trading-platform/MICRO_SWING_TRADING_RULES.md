@@ -6,10 +6,12 @@ This document defines the exact, end-to-end mathematical and systematic rules us
 
 ## 🟢 Part 1: Rules to OPEN a Trade
 
-For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `LINK`, `ADA`, `AVAX`, `NEAR`, `LTC`), it must pass **6 strict safety checkpoints in sequence**. If even a single condition fails, the trade is rejected:
+For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `LINK`, `ADA`, `AVAX`, `NEAR`, `LTC`), it must pass **10 strict safety checkpoints in sequence**. If even a single condition fails, the trade is rejected:
 
 ```
-[Market Ticks] ──► 1. AI Decision ──► 2. Cooldown Gate ──► 3. Confidence Gate ──► 4. Multi-Horizon Critic ──► 5. Macro Gate ──► 6. Risk Firewall ──► EXECUTE LIMIT ORDER
+[Market Ticks] ──► 1. AI Decision (Smoothed) ──► 2. Cooldown Gate (120s Rest) ──► 3. Spread Firewall (0.06%) 
+              ──► 4. Confidence Filter (65%) ──► 5. Multi-Horizon Critic ──► 6. Macro Regime Alignment 
+              ──► 7. OFI Wall Defense ──► 8. StatArb Lead-Lag ──► 9. Dynamic Margin ──► 10. POST-ONLY MAKER (GTX)
 ```
 
 ### 1. Deterministic AI Direction Proposal & Institutional Signal Smoothing
@@ -42,7 +44,18 @@ For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `X
   - If both BTC and ETH are surging ($\ge +0.80\%$), it **blocks counter-trend SHORTS**.
   - *High-Conviction Fast Pass:* If the coin has $\ge 70\%$ confidence and $\ge |0.40\%|$ forecasted move, it can enter independently of minor BTC consolidation noise.
 
-### 7. Institutional Dynamic Volatility & Conviction Margin Sizing
+### 7. Level-2 Order Flow Imbalance (OFI / Book Depth Wall Defense)
+* Checks the live top-5 orderbook depth ratio: $\text{Imbalance} = \frac{\text{Bid Depth} - \text{Ask Depth}}{\text{Total Depth}}$
+  - **For Longs:** If Ask depth heavily outweighs Bid depth ($\text{Imbalance} < -0.30$), it **blocks Long entries** to avoid buying into massive institutional sell walls.
+  - **For Shorts:** If Bid depth heavily outweighs Ask depth ($\text{Imbalance} > +0.30$), it **blocks Short entries** to avoid shorting into buy walls.
+
+### 8. Cross-Exchange StatArb Confirmation (OKX & Bybit Lead-Lag Filter)
+* Cross-references live price premiums from OKX and Bybit via CCXT (`apps/statarb_collector`):
+  - **For Longs:** If OKX or Bybit are trading at a discount ($< -0.15\%$), it **blocks the Long** because Binance is experiencing a local fakeout wick that will crash back to global prices.
+  - **For Shorts:** If OKX or Bybit are trading at a premium ($> +0.15\%$), it **blocks the Short**.
+  - *Fail-Open Resilience:* If external exchange feeds lag (> 15s), it falls back to Binance data so execution is never stalled.
+
+### 9. Institutional Dynamic Volatility & Conviction Margin Sizing
 * Dynamically scales margin allocation between **6.0% and 15.0%** of account equity based on signal strength:
   - **Base Margin:** $10.0\%$ of account equity (~$450 margin on a $4,500 account).
   - **Conviction Multiplier:** $0.80\times$ to $1.30\times$ based on neural confidence.
@@ -52,7 +65,13 @@ For the bot to open a new position on any symbol (`BTC`, `ETH`, `SOL`, `BNB`, `X
   - **Safe Clamping:** Dynamic margin is strictly bounded between **$6.0\%$ and $15.0\%$ of equity** (~$270 to ~$675 margin on a $4,500 account).
   - Minimum order size must be at least **$50 notional**.
 
-👉 **If all 7 pass:** The bot places a **LIMIT ORDER** with price offset to minimize slippage.
+### 10. Post-Only Maker Execution (`GTX`) & Active Pegging
+* **Zero Taker Fees:** All entry orders are sent with `time_in_force="GTX"` (Good-Till-Crossing / Post-Only).
+* **Top-of-Book Pegging:** Longs peg to `best_bid`; Shorts peg to `best_ask`.
+* **Binance `-5022` Protection:** If an order would cross the spread, it automatically re-pegs 1 tick deeper to guarantee Maker status (0.02% fee instead of 0.05% taker fee).
+* **30-Second Pegging Timeout:** If unfilled after 30 seconds, it cancels cleanly to release margin.
+
+👉 **If all 10 checkpoints pass:** The bot places an authentic **POST-ONLY MAKER ORDER (GTX)** on the book!
 
 ---
 

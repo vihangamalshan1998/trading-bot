@@ -496,8 +496,8 @@ class ProductionTradingBot:
                     # Check for pending Limit Order
                     if sym in self.active_orders:
                         time_elapsed = time.time() - self.active_orders[sym]['timestamp']
-                        if time_elapsed > 60:
-                            logger.info(f"[{sym}] LIMIT ORDER TIMEOUT (> 60s). Cancelling...")
+                        if time_elapsed > 30:
+                            logger.info(f"[{sym}] POST-ONLY MAKER TIMEOUT (> 30s). Cancelling unfilled order...")
                             try:
                                 await self.binance.cancel_order(sym, self.active_orders[sym]['order_id'])
                             except Exception as e:
@@ -861,6 +861,31 @@ class ProductionTradingBot:
                         elif has_high_conviction and ((action_val > 0.2 and is_macro_down) or (action_val < -0.2 and is_macro_up)):
                             logger.info(f"[{sym}] 🚀 HIGH-CONVICTION BYPASS: Proceeding with trade (Confidence: {confidence:.2f}, 5m Critic: {sym_c5m:+.2f}%) despite macro divergence.")
 
+                        # GUARD 3.5: Level-2 Order Flow Imbalance (OFI / Book Depth Wall Defense)
+                        # Prevents buying directly into massive institutional sell walls or shorting into buy walls
+                        if market and hasattr(market, 'order_book_imbalance') and market.order_book_imbalance is not None:
+                            ob_imbalance = float(market.order_book_imbalance)
+                            if action_val > 0.20 and ob_imbalance < -0.30:
+                                logger.info(f"[{sym}] 🛑 OFI WALL DEFENSE: Orderbook skewed to sellers (Imbalance: {ob_imbalance:.2f} < -0.30). Skipping buy into sell wall!")
+                                continue
+                            elif action_val < -0.20 and ob_imbalance > 0.30:
+                                logger.info(f"[{sym}] 🛑 OFI WALL DEFENSE: Orderbook skewed to buyers (Imbalance: {ob_imbalance:.2f} > +0.30). Skipping short into buy wall!")
+                                continue
+
+                        # GUARD 3.6: Cross-Exchange StatArb Confirmation (OKX & Bybit Lead-Lag Filter)
+                        # Prevents buying into Binance-only local fakeout wicks; requires global market consensus
+                        statarb_data = self.statarb_states.get(sym)
+                        if statarb_data and (time.time() - float(statarb_data.get("timestamp", 0.0))) < 15.0:
+                            okx_prem = float(statarb_data.get("okx_premium", 0.0))
+                            bybit_prem = float(statarb_data.get("bybit_premium", 0.0))
+                            
+                            if action_val > 0.20 and (okx_prem < -0.0015 or bybit_prem < -0.0015):
+                                logger.info(f"[{sym}] 🛑 STATARB DIVERGENCE: Global exchanges at discount (OKX: {okx_prem*100:+.2f}%, Bybit: {bybit_prem*100:+.2f}%). Blocking Binance fakeout LONG!")
+                                continue
+                            elif action_val < -0.20 and (okx_prem > 0.0015 or bybit_prem > 0.0015):
+                                logger.info(f"[{sym}] 🛑 STATARB DIVERGENCE: Global exchanges at premium (OKX: {okx_prem*100:+.2f}%, Bybit: {bybit_prem*100:+.2f}%). Blocking Binance fakeout SHORT!")
+                                continue
+
                     elif is_closing and not exit_override:
                         # PILLAR 2: Dynamic Profit Harvesting & Multi-Horizon Critic-Assisted Reversal Exit
                         critic_vals = precomputed_critics.get(sym)
@@ -1107,10 +1132,13 @@ class ProductionTradingBot:
                                     
                                     binance_side = "BUY" if side in ["OPEN_LONG", "CLOSE_SHORT"] else "SELL"
                                     
+                                    # Institutional Top-of-Book Maker Pegging:
+                                    # If BUY: peg to best bid (or 1 tick below mid) to guarantee Maker status
+                                    # If SELL: peg to best ask (or 1 tick above mid) to guarantee Maker status
                                     if binance_side == "BUY":
-                                        limit_price = market.mid_price - offset_amount
+                                        limit_price = market.bid if market.bid > 0 else (market.mid_price - tick_size)
                                     else:
-                                        limit_price = market.mid_price + offset_amount
+                                        limit_price = market.ask if market.ask > 0 else (market.mid_price + tick_size)
                                         
                                     limit_price_str = sym_config.format_price(limit_price)
                                     
@@ -1151,8 +1179,23 @@ class ProductionTradingBot:
                                         if sym in self.pnl_history:
                                             self.pnl_history[sym].clear()
                                     else:
-                                        logger.info(f"[{sym}] LIMIT INTENT: {binance_side} at {limit_price_str} (Offset: {offset_amount:.4f})")
-                                        order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTC", reduce_only=False)
+                                        # Institutional Post-Only Maker Execution (GTX)
+                                        # Forces Maker fill (0.02% fee) and strictly forbids taker fill (0.05% fee)
+                                        logger.info(f"[{sym}] 🏛️ POST-ONLY MAKER INTENT (GTX): {binance_side} at {limit_price_str}")
+                                        try:
+                                            order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTX", reduce_only=False)
+                                        except Exception as e:
+                                            # If post-only was rejected (-5022: would match and take liquidity), re-peg 1 tick deeper
+                                            if "-5022" in str(e) or "Post Only" in str(e):
+                                                logger.info(f"[{sym}] Post-Only GTX would cross book. Re-pegging 1 tick deeper...")
+                                                if binance_side == "BUY":
+                                                    limit_price -= tick_size
+                                                else:
+                                                    limit_price += tick_size
+                                                limit_price_str = sym_config.format_price(limit_price)
+                                                order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTX", reduce_only=False)
+                                            else:
+                                                raise e
                                     
                                     actual_order_id = order_res.get('orderId') or client_order_id
                                     logger.info(f"[{sym}] ORDER SUCCESS: {actual_order_id}")

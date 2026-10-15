@@ -135,6 +135,8 @@ async def get_system_state():
                 parsed_state["ai_target_size"] = sanitize_float(ai_data.get("target_size", 0.0))
                 parsed_state["ai_predicted_side"] = ai_data.get("predicted_side", "WAITING")
                 parsed_state["ai_critic_return"] = sanitize_float(ai_data.get("critic_return", 0.0))
+                parsed_state["ai_critic_1h"] = sanitize_float(ai_data.get("critic_1h", 0.0))
+                parsed_state["ai_critic_4h"] = sanitize_float(ai_data.get("critic_4h", 0.0))
                 
                 # We also need to sanitize the state_vector array if it exists
                 raw_vector = ai_data.get("state_vector", [])
@@ -144,6 +146,8 @@ async def get_system_state():
                 parsed_state["ai_target_size"] = 0.0
                 parsed_state["ai_predicted_side"] = "WAITING"
                 parsed_state["ai_critic_return"] = 0.0
+                parsed_state["ai_critic_1h"] = 0.0
+                parsed_state["ai_critic_4h"] = 0.0
                 parsed_state["state_vector"] = []
                 
             market_states[symbol] = parsed_state

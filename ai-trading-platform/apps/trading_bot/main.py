@@ -660,7 +660,8 @@ class ProductionTradingBot:
                         # FIX: Temperature-Scaled Confidence to prevent tanh saturation
                         # Old: (action_logits[1] + 1.0) / 2.0  → always ≈ 1.00 due to tanh saturation
                         # New: sigmoid(raw / temperature) → spreads values across [0, 1] properly
-                        confidence_temperature = 3.0
+                        # T=3.0 was too aggressive (capped 41.7%–58.3%), T=1.0 gives usable 27%–73% range
+                        confidence_temperature = 1.0
                         confidence = 1.0 / (1.0 + np.exp(-action_logits[1] / confidence_temperature))
                         target_size = (action_logits[2] + 1.0) / 2.0
                         price_offset = (action_logits[3] + 1.0) / 2.0
@@ -673,11 +674,15 @@ class ProductionTradingBot:
                     if self.redis.redis:
                         critic_vals = precomputed_critics.get(sym)
                         pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
+                        pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
+                        pred_ret_4h = float(critic_vals[2]) if critic_vals is not None and len(critic_vals) > 2 else pred_ret_1h
                         ai_state = {
                             "predicted_side": predicted_side,
                             "confidence": float(confidence),
                             "target_size": float(target_size),
-                            "critic_return": float(pred_ret_5m)
+                            "critic_return": float(pred_ret_5m),
+                            "critic_1h": float(pred_ret_1h),
+                            "critic_4h": float(pred_ret_4h)
                         }
                         await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
                     
@@ -695,8 +700,8 @@ class ProductionTradingBot:
                             fast_pass_critic_hurdle = 0.75 # 0.75% massive move required to bypass 3m cooldown
                             has_critic_conviction = (action_val > 0.2 and pred_ret_5m >= fast_pass_critic_hurdle) or (action_val < -0.2 and pred_ret_5m <= -fast_pass_critic_hurdle)
                             
-                            if confidence >= 0.90 and has_critic_conviction:
-                                logger.info(f"[{sym}] 🎯 HIGH-CONVICTION FAST-PASS: Bypassing cooldown ({time_since_close:.1f}s/{cooldown_period:.0f}s) due to extreme confidence ({confidence:.2f} >= 0.90) & massive Critic return ({pred_ret_5m:+.2f}% >= {fast_pass_critic_hurdle:.2f}%)!")
+                            if confidence >= 0.72 and has_critic_conviction:
+                                logger.info(f"[{sym}] 🎯 HIGH-CONVICTION FAST-PASS: Bypassing cooldown ({time_since_close:.1f}s/{cooldown_period:.0f}s) due to extreme confidence ({confidence:.2f} >= 0.72) & massive Critic return ({pred_ret_5m:+.2f}% >= {fast_pass_critic_hurdle:.2f}%)!")
                             else:
                                 logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / {cooldown_period:.0f}s).")
                                 continue
@@ -706,12 +711,13 @@ class ProductionTradingBot:
                         # 1. Early exit if in solid impulse profit (>= +3.0% leveraged)
                         is_profit_impulse = pnl_pct_leveraged >= 0.03
                         
-                        # 2. Smart Trap Escape Door: If Critic senses a confirmed fakeout / trap against us (>= 0.20% adverse move),
+                        # 2. Smart Trap Escape Door: If Critic senses a confirmed fakeout / trap against us (5m >= 0.20% or 1h >= 0.30% adverse move),
                         # allow immediate exit to cut the trap early without waiting for the 10-minute timer!
                         critic_vals = precomputed_critics.get(sym)
                         pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
-                        is_trap_detected = (pos.quantity > 0 and pred_ret_5m <= -0.20 and confidence >= 0.70) or \
-                                           (pos.quantity < 0 and pred_ret_5m >= 0.20 and confidence >= 0.70)
+                        pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
+                        is_trap_detected = (pos.quantity > 0 and (pred_ret_5m <= -0.20 or pred_ret_1h <= -0.30) and confidence >= 0.70) or \
+                                           (pos.quantity < 0 and (pred_ret_5m >= 0.20 or pred_ret_1h >= 0.30) and confidence >= 0.70)
                         
                         is_protective_loss = pnl_pct_leveraged <= -0.08
                         
@@ -719,14 +725,14 @@ class ProductionTradingBot:
                         time_held = (time.time() - entry_t) if entry_t > 0 else 999.0
                         
                         if is_trap_detected:
-                            logger.warning(f"[{sym}] 🚨 SMART TRAP DETECTED: Critic forecasts adverse reversal ({pred_ret_5m:+.2f}%) with {confidence:.2f} confidence. Bypassing 10m hold to escape trap!")
+                            logger.warning(f"[{sym}] 🚨 SMART TRAP DETECTED: Critic forecasts adverse reversal (5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}%) with {confidence:.2f} confidence. Bypassing 10m hold to escape trap!")
                         elif time_held < 600.0 and not (is_profit_impulse or is_protective_loss):
                             logger.info(f"[{sym}] ⏳ MICRO-SWING BREATHING: Minimum hold (600s) not met yet ({time_held:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%). Giving swing room to run!")
                             continue
 
-                    # GUARD 3: Strict Confidence Filter (Raised from 0.65 to 0.75 for high-quality setups)
-                    if not is_closing and confidence < 0.75: 
-                        logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.75)")
+                    # GUARD 3: Confidence Filter (0.65 = requires tanh output > 0.62, realistic with T=1.0 sigmoid)
+                    if not is_closing and confidence < 0.65: 
+                        logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.65)")
                         continue 
 
                     # PILLAR 3: Macro Regime Trend-Alignment Gate (Block Counter-Trend Whipsaws)
@@ -736,30 +742,45 @@ class ProductionTradingBot:
                         btc_mom_15m = btc_market.features[4] if btc_market and len(btc_market.features) == 90 else 0.0
                         eth_mom_15m = eth_market.features[4] if eth_market and len(eth_market.features) == 90 else 0.0
                         
-                        btc_critic_5m = float(precomputed_critics.get("BTCUSDT", [0.0])[0]) if "BTCUSDT" in precomputed_critics and len(precomputed_critics["BTCUSDT"]) > 0 else 0.0
-                        eth_critic_5m = float(precomputed_critics.get("ETHUSDT", [0.0])[0]) if "ETHUSDT" in precomputed_critics and len(precomputed_critics["ETHUSDT"]) > 0 else 0.0
+                        btc_crit = precomputed_critics.get("BTCUSDT", [0.0, 0.0, 0.0])
+                        eth_crit = precomputed_critics.get("ETHUSDT", [0.0, 0.0, 0.0])
+                        btc_critic_5m = float(btc_crit[0]) if len(btc_crit) > 0 else 0.0
+                        btc_critic_1h = float(btc_crit[1]) if len(btc_crit) > 1 else btc_critic_5m
+                        btc_critic_4h = float(btc_crit[2]) if len(btc_crit) > 2 else btc_critic_1h
+                        
+                        eth_critic_5m = float(eth_crit[0]) if len(eth_crit) > 0 else 0.0
+                        eth_critic_1h = float(eth_crit[1]) if len(eth_crit) > 1 else eth_critic_5m
+                        eth_critic_4h = float(eth_crit[2]) if len(eth_crit) > 2 else eth_critic_1h
 
-                        # Macro Downtrend: Clear downward momentum on both BTC & ETH (requires true drop, not flat tick)
-                        is_macro_down = (btc_mom_15m < -0.001 and eth_mom_15m < -0.001) or (btc_critic_5m < -0.15 and eth_critic_5m < -0.15)
-                        # Macro Uptrend: Clear upward momentum on both BTC & ETH
-                        is_macro_up = (btc_mom_15m > 0.001 and eth_mom_15m > 0.001) or (btc_critic_5m > 0.15 and eth_critic_5m > 0.15)
+                        # Macro Downtrend: Clear downward momentum on both BTC & ETH, or multi-horizon breakdown
+                        is_macro_down = (btc_mom_15m < -0.001 and eth_mom_15m < -0.001) or \
+                                        (btc_critic_5m < -0.15 and eth_critic_5m < -0.15) or \
+                                        (btc_critic_1h < -0.25 and eth_critic_1h < -0.25)
+                        # Macro Uptrend: Clear upward momentum on both BTC & ETH, or multi-horizon surge
+                        is_macro_up = (btc_mom_15m > 0.001 and eth_mom_15m > 0.001) or \
+                                      (btc_critic_5m > 0.15 and eth_critic_5m > 0.15) or \
+                                      (btc_critic_1h > 0.25 and eth_critic_1h > 0.25)
 
                         if action_val > 0.2 and is_macro_down:
-                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC 15m ({btc_mom_15m*100:+.2f}%) & ETH 15m ({eth_mom_15m*100:+.2f}%) are trending DOWN. Blocking counter-trend OPEN_LONG!")
+                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH trending DOWN (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%, 1h: {btc_critic_1h:+.2f}%/{eth_critic_1h:+.2f}%). Blocking counter-trend OPEN_LONG!")
                             continue
                         elif action_val < -0.2 and is_macro_up:
-                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC 15m ({btc_mom_15m*100:+.2f}%) & ETH 15m ({eth_mom_15m*100:+.2f}%) are trending UP. Blocking counter-trend OPEN_SHORT!")
+                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH trending UP (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%, 1h: {btc_critic_1h:+.2f}%/{eth_critic_1h:+.2f}%). Blocking counter-trend OPEN_SHORT!")
                             continue
 
                     elif is_closing and not exit_override:
-                        # PILLAR 2: Dynamic Profit Harvesting & Critic-Assisted Reversal Exit
+                        # PILLAR 2: Dynamic Profit Harvesting & Multi-Horizon Critic-Assisted Reversal Exit
                         critic_vals = precomputed_critics.get(sym)
                         pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
-                        has_reversal_critic = (pos.quantity > 0 and pred_ret_5m <= -0.15) or (pos.quantity < 0 and pred_ret_5m >= 0.15)
+                        pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
+                        pred_ret_4h = float(critic_vals[2]) if critic_vals is not None and len(critic_vals) > 2 else pred_ret_1h
+                        
+                        has_reversal_critic = (pos.quantity > 0 and (pred_ret_5m <= -0.15 or pred_ret_1h <= -0.25)) or \
+                                              (pos.quantity < 0 and (pred_ret_5m >= 0.15 or pred_ret_1h >= 0.25))
                         
                         # 1. Critic-Assisted Exit: If in profit (+1.5% to +4.0%) and Critic detects adverse reversal, lock in gain immediately!
                         if 0.015 <= pnl_pct_leveraged < 0.040 and has_reversal_critic:
-                            logger.info(f"[{sym}] 🎯 CRITIC-ASSISTED PROFIT EXIT: PnL is +{pnl_pct_leveraged*100:.2f}% and Critic forecasts adverse reversal ({pred_ret_5m:+.2f}%). Securing green profit immediately!")
+                            logger.info(f"[{sym}] 🎯 CRITIC-ASSISTED PROFIT EXIT: PnL is +{pnl_pct_leveraged*100:.2f}% and Critic forecasts adverse reversal (5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}%). Securing green profit immediately!")
                             # Bypass fee-protection gate and allow smooth exit
                         elif 0.0 <= pnl_pct_leveraged < 0.018:
                             # 2. Fee Protection Gate: Lowered from +5.0% to +1.8% leveraged (covers 0.40% round-trip fees with net profit buffer)
@@ -774,16 +795,17 @@ class ProductionTradingBot:
                         else:
                             # 4. Negative PnL (< 0.0% leveraged):
                             # Crypto wicks are normal (noise buffer allows breathing room up to -15% hard stop).
-                            # Cut early ONLY if Critic confirms a real trend breakdown (>= 0.20% adverse move), OR loss exceeds -12%
-                            has_adverse_critic = (pos.quantity > 0 and pred_ret_5m <= -0.20) or (pos.quantity < 0 and pred_ret_5m >= 0.20)
+                            # Cut early ONLY if Critic confirms a real trend breakdown (5m >= 0.20% or 1h >= 0.30% adverse move), OR loss exceeds -12%
+                            has_adverse_critic = (pos.quantity > 0 and (pred_ret_5m <= -0.20 or pred_ret_1h <= -0.30)) or \
+                                                 (pos.quantity < 0 and (pred_ret_5m >= 0.20 or pred_ret_1h >= 0.30))
                             
                             if pnl_pct_leveraged > -0.15 and not has_adverse_critic:
-                                logger.info(f"[{sym}] SKIPPING WICK EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (surviving wick noise buffer up to -15%, Critic return {pred_ret_5m:+.2f}% is not adverse). Giving swing room to run!")
+                                logger.info(f"[{sym}] SKIPPING WICK EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (surviving wick noise buffer up to -15%, Critic return 5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}% is not adverse). Giving swing room to run!")
                                 continue
                             
-                            # Deep loss cut: require >= 0.75 conviction to cut before hard stop
-                            if confidence < 0.75:
-                                logger.info(f"[{sym}] SKIPPING LOSS CLOSE (Conviction {confidence:.2f} < 0.75, PnL: {pnl_pct_leveraged*100:+.2f}%)")
+                            # Deep loss cut: require >= 0.65 conviction to cut before hard stop
+                            if confidence < 0.65:
+                                logger.info(f"[{sym}] SKIPPING LOSS CLOSE (Conviction {confidence:.2f} < 0.65, PnL: {pnl_pct_leveraged*100:+.2f}%)")
                                 continue
 
                     # GUARD 4: Critic Multi-Horizon Swing Return Check (5m, 1h, 4h)

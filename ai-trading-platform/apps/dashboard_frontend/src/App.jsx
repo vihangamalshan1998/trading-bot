@@ -555,6 +555,24 @@ function App() {
                             {(state.ai_critic_return || 0) >= 0 ? '+' : ''}{((state.ai_critic_return || 0)).toFixed(2)}%
                           </span>
                         </div>
+                        <div className="ai-brain-metric">
+                          <span>Critic (1h):</span>
+                          <div className="progress-bar-container">
+                            <div className={`progress-bar ${(state.ai_critic_1h || 0) >= 0 ? 'critic-pos' : 'critic-neg'}`} style={{ width: `${Math.min(100, Math.abs((state.ai_critic_1h || 0)) * 100)}%` }}></div>
+                          </div>
+                          <span className={(state.ai_critic_1h || 0) > 0 ? 'profit' : (state.ai_critic_1h || 0) < 0 ? 'loss' : 'neutral'} style={{ fontWeight: 600 }}>
+                            {(state.ai_critic_1h || 0) >= 0 ? '+' : ''}{((state.ai_critic_1h || 0)).toFixed(2)}%
+                          </span>
+                        </div>
+                        <div className="ai-brain-metric">
+                          <span>Critic (4h):</span>
+                          <div className="progress-bar-container">
+                            <div className={`progress-bar ${(state.ai_critic_4h || 0) >= 0 ? 'critic-pos' : 'critic-neg'}`} style={{ width: `${Math.min(100, Math.abs((state.ai_critic_4h || 0)) * 50)}%` }}></div>
+                          </div>
+                          <span className={(state.ai_critic_4h || 0) > 0 ? 'profit' : (state.ai_critic_4h || 0) < 0 ? 'loss' : 'neutral'} style={{ fontWeight: 600 }}>
+                            {(state.ai_critic_4h || 0) >= 0 ? '+' : ''}{((state.ai_critic_4h || 0)).toFixed(2)}%
+                          </span>
+                        </div>
                         
                       </div>
                     </div>

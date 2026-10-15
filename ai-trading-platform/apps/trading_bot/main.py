@@ -622,22 +622,22 @@ class ProductionTradingBot:
                                         logger.warning(f"[{sym}] ⚡ SUDDEN VELOCITY SHOCK DETECTED: Rapid drop from +{recent_peak*100:.2f}% to +{pnl_pct_leveraged*100:.2f}% in <15s! Locking in profit immediately.")
                                         sudden_shock_triggered = True
 
-                            # 3. DYNAMIC ADAPTIVE RATCHETING TRAILING STOP (Micro-Swing 3-Tier System)
+                            # 3. DYNAMIC ADAPTIVE RATCHETING TRAILING STOP (True Micro-Swing Protection)
                             if not (hard_stop_triggered or sudden_shock_triggered):
-                                # Tier 1: Micro-Swing Impulse Protection (+4% to +10% peak)
-                                if 0.04 <= prev_peak < 0.10:
-                                    trailing_floor = max(0.02, prev_peak * 0.65) # Guarantee at least +2.0% net gain
+                                # Tier 1: Micro-Swing Impulse Protection (Requires >= +8.0% peak to ensure fees & slippage are cleanly beaten)
+                                if 0.08 <= prev_peak < 0.15:
+                                    trailing_floor = max(0.04, prev_peak * 0.70) # Guarantee at least +4.0% net gain above fees
                                     if pnl_pct_leveraged < trailing_floor:
-                                        logger.info(f"[{sym}] 🔒 MICRO-SWING IMPULSE TRAIL: Peak +{prev_peak*100:.2f}%, now +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Banking impulse gain!")
+                                        logger.info(f"[{sym}] 🔒 MICRO-SWING IMPULSE TRAIL: Peak +{prev_peak*100:.2f}%, now +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Banking solid swing gain!")
                                         trailing_stop_triggered = True
-                                # Tier 2: Developing Trend (+10% to +25% peak)
-                                elif 0.10 <= prev_peak < 0.25:
-                                    trailing_floor = max(0.05, prev_peak * 0.75) # 25% breathing room, min +5% floor
+                                # Tier 2: Developing Trend (+15% to +30% peak)
+                                elif 0.15 <= prev_peak < 0.30:
+                                    trailing_floor = max(0.08, prev_peak * 0.75) # 25% breathing room, min +8% floor
                                     if pnl_pct_leveraged < trailing_floor:
                                         logger.info(f"[{sym}] 🔒 TRAILING STOP TRIGGERED (Developing Swing): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing gain!")
                                         trailing_stop_triggered = True
-                                # Tier 3: Mature Deep Trend Runner (>= +25% peak, e.g. +50%, +100%+)
-                                elif prev_peak >= 0.25:
+                                # Tier 3: Mature Deep Trend Runner (>= +30% peak, e.g. +50%, +100%+)
+                                elif prev_peak >= 0.30:
                                     trailing_floor = prev_peak * 0.85 # Tight 15% trail to harvest 85% of peak gains
                                     if pnl_pct_leveraged < trailing_floor:
                                         logger.info(f"[{sym}] 🔒 TRAILING STOP TRIGGERED (Deep Runner): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing massive gain!")
@@ -790,21 +790,27 @@ class ProductionTradingBot:
                         eth_critic_1h = float(eth_crit[1]) if len(eth_crit) > 1 else eth_critic_5m
                         eth_critic_4h = float(eth_crit[2]) if len(eth_crit) > 2 else eth_critic_1h
 
-                        # Macro Downtrend: Clear downward momentum on both BTC & ETH, or multi-horizon breakdown
-                        is_macro_down = (btc_mom_15m < -0.001 and eth_mom_15m < -0.001) or \
-                                        (btc_critic_5m < -0.15 and eth_critic_5m < -0.15) or \
-                                        (btc_critic_1h < -0.25 and eth_critic_1h < -0.25)
-                        # Macro Uptrend: Clear upward momentum on both BTC & ETH, or multi-horizon surge
-                        is_macro_up = (btc_mom_15m > 0.001 and eth_mom_15m > 0.001) or \
-                                      (btc_critic_5m > 0.15 and eth_critic_5m > 0.15) or \
-                                      (btc_critic_1h > 0.25 and eth_critic_1h > 0.25)
+                        # HIGH-CONVICTION FAST PASS: If symbol has strong conviction (>= 70%) and large predicted move, bypass macro noise!
+                        sym_critic = precomputed_critics.get(sym, [0.0, 0.0, 0.0])
+                        sym_c5m = float(sym_critic[0]) if len(sym_critic) > 0 else 0.0
+                        has_high_conviction = confidence >= 0.70 and abs(sym_c5m) >= 0.40
 
-                        if action_val > 0.2 and is_macro_down:
-                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH trending DOWN (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%, 1h: {btc_critic_1h:+.2f}%/{eth_critic_1h:+.2f}%). Blocking counter-trend OPEN_LONG!")
-                            continue
-                        elif action_val < -0.2 and is_macro_up:
-                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH trending UP (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%, 1h: {btc_critic_1h:+.2f}%/{eth_critic_1h:+.2f}%). Blocking counter-trend OPEN_SHORT!")
-                            continue
+                        # Macro Downtrend: Clear downward momentum on both BTC & ETH (>= -0.80% move)
+                        is_macro_down = (btc_mom_15m < -0.008 and eth_mom_15m < -0.008) or \
+                                        (btc_critic_1h < -0.40 and eth_critic_1h < -0.40)
+                        # Macro Uptrend: Clear upward momentum on both BTC & ETH (>= +0.80% move)
+                        is_macro_up = (btc_mom_15m > 0.008 and eth_mom_15m > 0.008) or \
+                                      (btc_critic_1h > 0.40 and eth_critic_1h > 0.40)
+
+                        if not has_high_conviction:
+                            if action_val > 0.2 and is_macro_down:
+                                logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH severe breakdown (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%). Blocking counter-trend OPEN_LONG!")
+                                continue
+                            elif action_val < -0.2 and is_macro_up:
+                                logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH severe breakout (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%). Blocking counter-trend OPEN_SHORT!")
+                                continue
+                        elif has_high_conviction and ((action_val > 0.2 and is_macro_down) or (action_val < -0.2 and is_macro_up)):
+                            logger.info(f"[{sym}] 🚀 HIGH-CONVICTION BYPASS: Proceeding with trade (Confidence: {confidence:.2f}, 5m Critic: {sym_c5m:+.2f}%) despite macro divergence.")
 
                     elif is_closing and not exit_override:
                         # PILLAR 2: Dynamic Profit Harvesting & Multi-Horizon Critic-Assisted Reversal Exit

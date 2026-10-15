@@ -327,10 +327,19 @@ class RiskManager:
         # Cap single position margin to max_position_margin_pct of equity
         max_allowed_margin = portfolio_state.equity * self.max_position_margin_pct
         if required_margin > max_allowed_margin and max_allowed_margin > 0:
-            return self._reject("MAX_POSITION_MARGIN_EXCEEDED")
+            # Safely clamp quantity to fit within max allowable margin budget
+            qty = (max_allowed_margin * self.max_leverage) / price
+            proposed_notional = qty * price
+            required_margin = max_allowed_margin
 
         if portfolio_state.free_margin < required_margin:
-            return self._reject("INSUFFICIENT_FREE_MARGIN")
+            # If free margin is slightly below required margin, clamp qty to available free margin
+            if portfolio_state.free_margin > 0:
+                qty = (portfolio_state.free_margin * self.max_leverage) / price
+                proposed_notional = qty * price
+                required_margin = portfolio_state.free_margin
+            else:
+                return self._reject("INSUFFICIENT_FREE_MARGIN")
 
         # ========================================================
         # 13. Portfolio exposure

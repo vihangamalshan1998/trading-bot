@@ -713,21 +713,21 @@ class ProductionTradingBot:
                         # 1. Early exit if in solid impulse profit (>= +4.0% leveraged to cover fees)
                         is_profit_impulse = pnl_pct_leveraged >= 0.04
                         
-                        # 2. Smart Trap Escape Door: If Critic senses a confirmed fakeout / trap against us (5m >= 0.20% or 1h >= 0.30% adverse move),
-                        # allow immediate exit to cut the trap early without waiting for the 10-minute timer!
+                        # 2. Smart Trap Escape Door: Only cut early if Critic confirms a REAL adverse breakdown (5m >= 0.60% or 1h >= 0.80% adverse move)
+                        # with high conviction (>= 0.70). Prevents cutting positions after 50s on minor 0.2% AI flickers!
                         critic_vals = precomputed_critics.get(sym)
                         pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
                         pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
-                        is_trap_detected = (pos.quantity > 0 and (pred_ret_5m <= -0.20 or pred_ret_1h <= -0.30) and confidence >= 0.65) or \
-                                           (pos.quantity < 0 and (pred_ret_5m >= 0.20 or pred_ret_1h >= 0.30) and confidence >= 0.65)
+                        is_trap_detected = (pos.quantity > 0 and (pred_ret_5m <= -0.60 or pred_ret_1h <= -0.80) and confidence >= 0.70) or \
+                                           (pos.quantity < 0 and (pred_ret_5m >= 0.60 or pred_ret_1h >= 0.80) and confidence >= 0.70)
                         
-                        is_protective_loss = pnl_pct_leveraged <= -0.08
+                        is_protective_loss = pnl_pct_leveraged <= -0.12  # Allows surviving wicks up to -12% leveraged (-0.60% price move)
                         
                         entry_t = self.position_entry_times.get(sym, 0.0)
                         time_held = (time.time() - entry_t) if entry_t > 0 else 999.0
                         
                         if is_trap_detected:
-                            logger.warning(f"[{sym}] 🚨 SMART TRAP DETECTED: Critic forecasts adverse reversal (5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}%) with {confidence:.2f} confidence. Bypassing 10m hold to escape trap!")
+                            logger.warning(f"[{sym}] 🚨 CONFIRMED SMART TRAP: Critic forecasts severe adverse reversal (5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}%) with {confidence:.2f} confidence. Cutting trap early!")
                         elif time_held < 600.0 and not (is_profit_impulse or is_protective_loss):
                             logger.info(f"[{sym}] ⏳ MICRO-SWING BREATHING: Minimum hold (600s) not met yet ({time_held:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%). Giving swing room to run!")
                             continue
@@ -839,12 +839,12 @@ class ProductionTradingBot:
                         else:
                             # 4. Negative PnL (< 0.0% leveraged):
                             # Crypto wicks are normal (noise buffer allows breathing room up to -15% hard stop).
-                            # Cut early ONLY if Critic confirms a real trend breakdown (5m >= 0.20% or 1h >= 0.30% adverse move), OR loss exceeds -12%
-                            has_adverse_critic = (pos.quantity > 0 and (pred_ret_5m <= -0.20 or pred_ret_1h <= -0.30)) or \
-                                                 (pos.quantity < 0 and (pred_ret_5m >= 0.20 or pred_ret_1h >= 0.30))
+                            # Cut early ONLY if Critic confirms a REAL adverse trend breakdown (5m >= 0.50% or 1h >= 0.70% adverse move)
+                            has_adverse_critic = (pos.quantity > 0 and (pred_ret_5m <= -0.50 or pred_ret_1h <= -0.70)) or \
+                                                 (pos.quantity < 0 and (pred_ret_5m >= 0.50 or pred_ret_1h >= 0.70))
                             
                             if pnl_pct_leveraged > -0.15 and not has_adverse_critic:
-                                logger.info(f"[{sym}] SKIPPING WICK EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (surviving wick noise buffer up to -15%, Critic return 5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}% is not adverse). Giving swing room to run!")
+                                logger.info(f"[{sym}] SKIPPING WICK EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (surviving wick noise buffer up to -15%, Critic return 5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}% is not severe). Giving swing room to run!")
                                 continue
                             
                             # Deep loss cut: require >= 0.65 conviction to cut before hard stop

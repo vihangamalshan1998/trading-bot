@@ -893,7 +893,7 @@ class ProductionTradingBot:
                                            for s, p in self.portfolio_state.positions.items()
                                            if p.quantity < -1e-5 and s in self.market_states and self.market_states[s].mid_price > 0)
                         
-                        net_exposure_ceiling = max(500.0, self.portfolio_state.equity * 0.30) # 30% of equity (min $500 safety buffer)
+                        net_exposure_ceiling = max(800.0, self.portfolio_state.equity * 0.50) # 50% of equity (min $800 safety buffer)
                         
                         if action_val > 0.20:
                             if len(open_longs) >= 3:
@@ -1190,8 +1190,8 @@ class ProductionTradingBot:
 
                     # GUARD 5: Institutional Dynamic Volatility & Conviction Margin Sizing (Kelly / ATR Scaling)
                     # Dynamically scales between 6.0% and 15.0% based on conviction, horizon alignment, and coin volatility.
-                    # Halved to 5.0% base margin (3.0% to 8.0% dynamic) in Profit Ratchet Capital Preservation Mode.
-                    base_margin_pct = 0.05 if self.profit_ratchet_active else 0.10
+                    # Halved to 8.0% base margin (4.0% to 12.0% dynamic) in Profit Ratchet Capital Preservation Mode.
+                    base_margin_pct = 0.08 if self.profit_ratchet_active else 0.15
                     
                     # 1. Conviction Multiplier (0.80x to 1.30x scaled to session hurdle)
                     conviction_mult = float(np.clip(0.80 + (confidence - effective_conf_hurdle) * 1.5, 0.80, 1.30))
@@ -1236,8 +1236,8 @@ class ProductionTradingBot:
                         elif action_val < -0.20 and w_s >= 300_000.0 and w_s > (1.5 * w_b):
                             whale_mult = 1.05
 
-                    min_margin_bound = 0.03 if self.profit_ratchet_active else 0.06
-                    max_margin_bound = 0.08 if self.profit_ratchet_active else 0.15
+                    min_margin_bound = 0.04 if self.profit_ratchet_active else 0.08
+                    max_margin_bound = 0.12 if self.profit_ratchet_active else 0.25
                     dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult, min_margin_bound, max_margin_bound))
                     
                     max_margin_budget = max(0.0, self.portfolio_state.equity * dynamic_margin_pct)

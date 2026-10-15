@@ -96,9 +96,9 @@ def test_pipeline_pure():
     assert should_block_long, "Should block LONG during frothy positive funding!"
     print("  ✅ Funding Rate Squeeze Sniper verified for both regimes!")
 
-    # 7. Verify Dynamic Margin Sizing (Clamped 6% to 15%)
+    # 7. Verify Dynamic Margin Sizing (Clamped 8% to 25%)
     print("Testing 7: Dynamic Margin Sizing Bounds...")
-    base_margin_pct = 0.10
+    base_margin_pct = 0.15
     
     # Case A: Low conviction altcoin
     conviction_mult = 0.80
@@ -106,8 +106,8 @@ def test_pipeline_pure():
     beta_dampener = 0.75 # Altcoin
     vol_scale = 0.70
     whale_mult = 1.00
-    dyn_pct_low = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.06, 0.15))
-    assert dyn_pct_low == 0.06, f"Expected 0.06 floor, got {dyn_pct_low}"
+    dyn_pct_low = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.08, 0.25))
+    assert dyn_pct_low == 0.08, f"Expected 0.08 floor, got {dyn_pct_low}"
     
     # Case B: High conviction major coin with whale backing
     conviction_mult = 1.30
@@ -115,9 +115,9 @@ def test_pipeline_pure():
     beta_dampener = 1.10
     vol_scale = 1.00
     whale_mult = 1.10
-    dyn_pct_high = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.06, 0.15))
-    assert dyn_pct_high == 0.15, f"Expected 0.15 ceiling, got {dyn_pct_high}"
-    print(f"  ✅ Dynamic Margin bounded strictly between 6.0% (${4500*0.06:.2f}) and 15.0% (${4500*0.15:.2f})!")
+    dyn_pct_high = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.08, 0.25))
+    assert dyn_pct_high == 0.25, f"Expected 0.25 ceiling, got {dyn_pct_high}"
+    print(f"  ✅ Dynamic Margin bounded strictly between 8.0% (${4500*0.08:.2f}) and 25.0% (${4500*0.25:.2f})!")
 
     # 8. Verify Post-Only Maker (GTX) Pegging Price Calculation
     print("Testing 8: Post-Only Maker GTX Pegging Calculations...")
@@ -201,10 +201,10 @@ def test_pipeline_pure():
     should_allow_hedge_short = not (short_val < -0.20 and len(open_shorts) >= 3)
     assert should_allow_hedge_short, "Governor SHOULD allow Short trade as a market-neutral hedge!"
     
-    # Check 3: Net margin cap (30% of equity)
+    # Check 3: Net margin cap (50% of equity)
     equity = 4500.0
-    net_exposure_ceiling = equity * 0.30 # $1350
-    long_margin_used = 1400.0
+    net_exposure_ceiling = equity * 0.50 # $2250
+    long_margin_used = 2300.0
     short_margin_used = 0.0
     net_long_margin = long_margin_used - short_margin_used
     should_block_net_cap = (action_val > 0.20 and net_long_margin >= net_exposure_ceiling)

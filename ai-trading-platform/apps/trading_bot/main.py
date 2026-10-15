@@ -112,6 +112,11 @@ class ProductionTradingBot:
         self.smoothed_action_history = {sym: collections.deque(maxlen=3) for sym in self.symbols} # Institutional signal smoothing (3-tick window)
         self.smoothed_confidence_history = {sym: collections.deque(maxlen=3) for sym in self.symbols}
         
+        # Institutional Circuit Breaker (5% Daily Loss Kill Switch)
+        self.daily_start_equity = 0.0
+        self.daily_equity_reset_time = time.time()
+        self.circuit_breaker_active_until = 0.0
+        
     async def listen_macro(self):
         await self.redis.connect()
         redis_conn = self.redis.redis
@@ -420,6 +425,21 @@ class ProductionTradingBot:
                     self.model.eval()
                     logger.info("Hot reload complete.")
 
+                # 24-Hour Rolling Circuit Breaker Tracking (5% Daily Loss Kill Switch)
+                now_t = time.time()
+                current_eq = float(self.portfolio_state.equity)
+                if (now_t - self.daily_equity_reset_time) >= 86400.0 or self.daily_start_equity <= 0.0:
+                    if current_eq > 0:
+                        self.daily_start_equity = current_eq
+                        self.daily_equity_reset_time = now_t
+                        logger.info(f"📅 24-Hour Equity Benchmark Reset: Starting Equity = ${self.daily_start_equity:.2f}")
+
+                if self.daily_start_equity > 0 and current_eq > 0:
+                    daily_dd = (self.daily_start_equity - current_eq) / self.daily_start_equity
+                    if daily_dd >= 0.05 and now_t > self.circuit_breaker_active_until:
+                        self.circuit_breaker_active_until = now_t + (6 * 3600.0) # 6 hours standby
+                        logger.critical(f"🚨 5% DAILY LOSS CIRCUIT BREAKER TRIPPED! Daily drawdown is {daily_dd*100:.2f}% >= 5.00%. Pausing new entries for 6 hours!")
+
                 # Phase 2: Batched Inference Pre-Pass
                 # Collect ALL valid symbol state vectors and run ONE model call instead of 6.
                 # SAFETY SHIELD: Symbols with wrong shape are silently skipped (fall back to individual inference).
@@ -726,6 +746,12 @@ class ProductionTradingBot:
                         }
                         await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
 
+                    # GUARD 0.5: Circuit Breaker Check (5% Daily Drawdown Kill Switch)
+                    if not is_closing and time.time() < self.circuit_breaker_active_until:
+                        time_left_cb = (self.circuit_breaker_active_until - time.time()) / 3600.0
+                        logger.warning(f"[{sym}] 🛑 CIRCUIT BREAKER ACTIVE: Halting new entries ({time_left_cb:.1f}h remaining). Preserving capital!")
+                        continue
+
                     # GUARD 1: Anti-Churn Cooldown with High-Conviction Fast-Pass (180s Baseline, 120s Ironclad Rest)
                     if not is_closing:
                         time_since_close = time.time() - self.last_close_time.get(sym, 0.0)
@@ -886,6 +912,39 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🛑 STATARB DIVERGENCE: Global exchanges at premium (OKX: {okx_prem*100:+.2f}%, Bybit: {bybit_prem*100:+.2f}%). Blocking Binance fakeout SHORT!")
                                 continue
 
+                        # GUARD 3.7: Whale Market Order Flow Momentum (Whale Tracker Integration)
+                        # Prevents taking adverse trades when institutional whales are heavily dumping or sweeping the book
+                        whale_data = self.whale_states.get(sym)
+                        if whale_data and (time.time() - float(whale_data.get("timestamp", 0.0))) < 60.0:
+                            w_buy = float(whale_data.get("whale_buy_pressure", 0.0))
+                            w_sell = float(whale_data.get("whale_sell_pressure", 0.0))
+                            
+                            # Extreme whale selling ($300k+ and 2x buy volume): Never buy into whale dumps
+                            if action_val > 0.20 and w_sell >= 300_000.0 and w_sell > (2.0 * w_buy):
+                                logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale selling (${w_sell:,.0f} vs ${w_buy:,.0f}). Blocking Long entry!")
+                                continue
+                            # Extreme whale buying ($300k+ and 2x sell volume): Never short into whale sweeps
+                            elif action_val < -0.20 and w_buy >= 300_000.0 and w_buy > (2.0 * w_sell):
+                                logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale buying (${w_buy:,.0f} vs ${w_sell:,.0f}). Blocking Short entry!")
+                                continue
+
+                        # GUARD 3.8: Funding Rate Asymmetry & Squeeze Sniping
+                        # Protects against paying high funding fees; exploits deep negative funding short squeezes
+                        if market and hasattr(market, 'funding_rate') and market.funding_rate is not None:
+                            f_rate = float(market.funding_rate)
+                            # 1. Deep Negative Funding (<= -0.03%): Shorts are trapped paying longs (prime short squeeze zone)
+                            if f_rate <= -0.0003:
+                                if action_val < -0.20:
+                                    logger.info(f"[{sym}] 🛑 FUNDING DEFENSE: Deep negative funding ({f_rate*100:.3f}%). Blocking Short to avoid funding drain & squeeze trap!")
+                                    continue
+                                elif action_val > 0.20:
+                                    logger.info(f"[{sym}] 🧲 SHORT SQUEEZE SNIPER: Deep negative funding ({f_rate*100:.3f}%). Short squeeze conditions active!")
+                            # 2. Overheated Positive Funding (>= +0.05%): Overcrowded long froth
+                            elif f_rate >= 0.0005:
+                                if action_val > 0.20:
+                                    logger.info(f"[{sym}] 🛑 FUNDING DEFENSE: Frothy positive funding ({f_rate*100:.3f}%). Blocking Long to avoid heavy funding drain!")
+                                    continue
+
                     elif is_closing and not exit_override:
                         # PILLAR 2: Dynamic Profit Harvesting & Multi-Horizon Critic-Assisted Reversal Exit
                         critic_vals = precomputed_critics.get(sym)
@@ -988,7 +1047,18 @@ class ProductionTradingBot:
                     if market and hasattr(market, 'volatility') and market.volatility > 0.015:
                         vol_scale = float(np.clip(0.015 / market.volatility, 0.70, 1.00))
                         
-                    dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale, 0.06, 0.15))
+                    # 5. Whale Flow Alignment Multiplier
+                    whale_mult = 1.0
+                    whale_data = self.whale_states.get(sym)
+                    if whale_data and (time.time() - float(whale_data.get("timestamp", 0.0))) < 60.0:
+                        w_b = float(whale_data.get("whale_buy_pressure", 0.0))
+                        w_s = float(whale_data.get("whale_sell_pressure", 0.0))
+                        if action_val > 0.20 and w_b >= 200_000.0 and w_b > w_s:
+                            whale_mult = 1.10
+                        elif action_val < -0.20 and w_s >= 200_000.0 and w_s > w_b:
+                            whale_mult = 1.10
+
+                    dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.06, 0.15))
                     
                     max_margin_budget = max(0.0, self.portfolio_state.equity * dynamic_margin_pct)
                     margin_allocated = min(max_margin_budget, max(0.0, self.portfolio_state.free_margin) * target_size)

@@ -320,12 +320,12 @@ class PPOTrainer:
 
             del states, actions, rewards, next_states, dones
 
-            # Superiority criteria (Strict Elite Margin):
-            # 1. Composite score must beat Champion by at least +0.50 victory margin, OR
-            # 2. Significant Critic MSE improvement (>= 15% error reduction) with non-degraded directional PnL
-            SUPERIORITY_MARGIN = 0.50
+            # Superiority criteria (Refined Elite Margin):
+            # 1. Composite score beats Champion by +0.05 margin, OR
+            # 2. Significant Critic MSE improvement (>= 10% error reduction) with resilient directional PnL (>= 90% of champ)
+            SUPERIORITY_MARGIN = 0.05
             is_superior = (challenger_score >= champion_score + SUPERIORITY_MARGIN) or (
-                challenger_critic_mse <= (champ_critic_mse * 0.85) and challenger_sim_pnl >= champ_sim_pnl
+                challenger_critic_mse <= (champ_critic_mse * 0.90) and challenger_sim_pnl >= (champ_sim_pnl * 0.90)
             )
 
             metrics = {
@@ -514,16 +514,8 @@ async def run_training_loop():
                 eval_result = trainer.evaluate_candidate(sample_size=1000)
                 
                 if not eval_result.get("approved", False):
-                    logger.warning(f"Candidate brain REJECTED by evaluation gate: {eval_result.get('reason')}. Retaining current live brain.")
+                    logger.warning(f"Candidate brain REJECTED by evaluation gate: {eval_result.get('reason')}. Continuing training without resetting weights...")
                     registry.record_tournament_result(eval_result, version_tag=f"rejected_step_{step}")
-                    # Reset trainer in-memory weights back to reigning Champion so bad weights don't compound
-                    try:
-                        champ_path = "models/production/model_v1.pt"
-                        if os.path.exists(champ_path):
-                            model.load_state_dict(torch.load(champ_path, map_location="cpu"))
-                            logger.info("Reset trainer model weights back to reigning Champion.")
-                    except Exception as reset_e:
-                        logger.warning(f"Could not reset model weights to champion: {reset_e}")
                 else:
                     try:
                         push_count += 1

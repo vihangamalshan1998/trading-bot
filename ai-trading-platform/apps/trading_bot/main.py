@@ -663,7 +663,9 @@ class ProductionTradingBot:
                         # T=3.0 was too aggressive (capped 41.7%–58.3%), T=1.0 gives usable 27%–73% range
                         confidence_temperature = 1.0
                         confidence = 1.0 / (1.0 + np.exp(-action_logits[1] / confidence_temperature))
-                        target_size = (action_logits[2] + 1.0) / 2.0
+                        # FIX: Prevent target_size tanh saturation (which was clamping size to 0.0000000)
+                        raw_size = 1.0 / (1.0 + np.exp(-action_logits[2]))
+                        target_size = max(0.25, min(1.0, raw_size))
                         price_offset = (action_logits[3] + 1.0) / 2.0
                     
                     # 1. Determine Predicted Side (Even if confidence is low, we want to know what it *leans* towards)
@@ -733,6 +735,42 @@ class ProductionTradingBot:
                     # GUARD 3: Confidence Filter (0.65 = requires tanh output > 0.62, realistic with T=1.0 sigmoid)
                     if not is_closing and confidence < 0.65: 
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < 0.65)")
+                        
+                        # Emit authentic live HOLD experience into DB when flat (15% sample rate)
+                        # Populates LINK, ADA, AVAX, NEAR, LTC with genuine 200-dim market state sequences
+                        if pos.quantity == 0 and random.random() < 0.15:
+                            active_version = self.registry.get_current_version()
+                            hold_exp_data = {
+                                "experience_id": str(uuid.uuid4()),
+                                "timestamp": int(time.time()),
+                                "symbol": sym,
+                                "market_state": seq, 
+                                "macro_state": None, 
+                                "portfolio_state": {
+                                    "free_margin": float(self.portfolio_state.free_margin),
+                                    "total_unrealized_pnl": float(self.portfolio_state.total_unrealized_pnl)
+                                },
+                                "derivatives_state": {
+                                    "target_size": float(target_size),
+                                    "price_offset": float(price_offset)
+                                },
+                                "position_before": 0.0,
+                                "position_after": 0.0,
+                                "entry_price": 0.0,
+                                "exit_price": None,
+                                "leverage": int(pos.leverage) if hasattr(pos, 'leverage') else settings.max_leverage,
+                                "margin": 0.0,
+                                "fees": 0.0,
+                                "holding_duration": 0,
+                                "action": "HOLD",
+                                "action_probability": float(confidence),
+                                "confidence": float(confidence),
+                                "model_version": active_version,
+                                "reward": 0.05, 
+                                "realized_pnl": 0.0,
+                                "unrealized_pnl": 0.0
+                            }
+                            asyncio.create_task(redis_manager.publish_binary("experience:completed", msgpack.packb(hold_exp_data, use_bin_type=True)))
                         continue 
 
                     # PILLAR 3: Macro Regime Trend-Alignment Gate (Block Counter-Trend Whipsaws)

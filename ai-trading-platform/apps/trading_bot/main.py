@@ -971,8 +971,7 @@ class ProductionTradingBot:
                                 continue
 
                     # GUARD 1.2: Net Portfolio Beta & Correlation Exposure Governor
-                    # Caps simultaneous unidirectional open positions to max 3 Longs or 3 Shorts,
-                    # and restricts net directional margin exposure to <= 30% of account equity
+                    # Caps simultaneous unidirectional open positions to max 5 Longs or 5 Shorts
                     if not is_closing and pos.quantity == 0:
                         open_longs = [s for s, p in self.portfolio_state.positions.items() if p.quantity > 1e-5]
                         open_shorts = [s for s, p in self.portfolio_state.positions.items() if p.quantity < -1e-5]
@@ -987,15 +986,15 @@ class ProductionTradingBot:
                         net_exposure_ceiling = max(800.0, self.portfolio_state.equity * 0.50) # 50% of equity (min $800 safety buffer)
                         
                         if action_val > 0.20:
-                            if len(open_longs) >= 3:
-                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Longs reached ({len(open_longs)}/3: {open_longs}). Blocking new Long to prevent correlated drawdown!")
+                            if len(open_longs) >= 5:
+                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Longs reached ({len(open_longs)}/5: {open_longs}). Blocking new Long to prevent correlated drawdown!")
                                 continue
                             if (long_margin - short_margin) >= net_exposure_ceiling:
                                 logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Net Long margin exposure (${long_margin - short_margin:.2f} >= ${net_exposure_ceiling:.2f} limit). Blocking Long!")
                                 continue
                         elif action_val < -0.20:
-                            if len(open_shorts) >= 3:
-                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Shorts reached ({len(open_shorts)}/3: {open_shorts}). Blocking new Short to prevent correlated drawdown!")
+                            if len(open_shorts) >= 5:
+                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Shorts reached ({len(open_shorts)}/5: {open_shorts}). Blocking new Short to prevent correlated drawdown!")
                                 continue
                             if (short_margin - long_margin) >= net_exposure_ceiling:
                                 logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Net Short margin exposure (${short_margin - long_margin:.2f} >= ${net_exposure_ceiling:.2f} limit). Blocking Short!")

@@ -188,17 +188,17 @@ def test_pipeline_pure():
 
     # 11. Verify Net Portfolio Beta & Correlation Exposure Governor
     print("Testing 11: Net Portfolio Beta & Correlation Exposure Governor...")
-    open_longs = ["BTCUSDT", "ETHUSDT", "SOLUSDT"] # 3 active Longs
+    open_longs = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"] # 5 active Longs
     open_shorts = []
     
-    # Check 1: 4th Long attempt
-    action_val = 0.25 # Wants to open 4th Long
-    should_block_4th_long = (action_val > 0.20 and len(open_longs) >= 3)
-    assert should_block_4th_long, "Governor should block 4th concurrent Long!"
+    # Check 1: 6th Long attempt
+    action_val = 0.25 # Wants to open 6th Long
+    should_block_6th_long = (action_val > 0.20 and len(open_longs) >= 5)
+    assert should_block_6th_long, "Governor should block 6th concurrent Long!"
     
-    # Check 2: Short hedge attempt while 3 Longs are open
+    # Check 2: Short hedge attempt while 5 Longs are open
     short_val = -0.25 # Wants to open Short
-    should_allow_hedge_short = not (short_val < -0.20 and len(open_shorts) >= 3)
+    should_allow_hedge_short = not (short_val < -0.20 and len(open_shorts) >= 5)
     assert should_allow_hedge_short, "Governor SHOULD allow Short trade as a market-neutral hedge!"
     
     # Check 3: Net margin cap (50% of equity)
@@ -209,7 +209,7 @@ def test_pipeline_pure():
     net_long_margin = long_margin_used - short_margin_used
     should_block_net_cap = (action_val > 0.20 and net_long_margin >= net_exposure_ceiling)
     assert should_block_net_cap, f"Governor should block Long when net margin ${net_long_margin:.2f} >= ${net_exposure_ceiling:.2f} ceiling!"
-    print("  ✅ Portfolio Beta Governor restricts correlated risk while permitting market-neutral hedges!")
+    print("  ✅ Portfolio Beta Governor restricts correlated risk while permitting market-neutral hedges (up to 5 concurrent positions)!")
 
     # 12. Verify Dynamic 50% Scale-Out & Free-Roll Runner
     print("Testing 12: Dynamic 50% Scale-Out & Free-Roll Runner...")

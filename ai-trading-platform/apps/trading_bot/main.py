@@ -1437,18 +1437,16 @@ class ProductionTradingBot:
                     margin_allocated = min(max_margin_budget, max(0.0, self.portfolio_state.free_margin) * target_size)
                     notional_requested = margin_allocated * pos.leverage
                     
-                    # Side determination respecting Hysteresis Deadband
+                    # Side determination respecting Hysteresis Deadband (Strict One-Trade-One-Entry: No Add-ons)
                     side = "HOLD"
                     if pos.quantity > 0:
                         if is_closing:
                             side = "CLOSE_LONG"
-                        elif action_val > 0.20:
-                            side = "OPEN_LONG"
+                        # When already in a Long, hold the position. Never generate OPEN_LONG to add contracts!
                     elif pos.quantity < 0:
                         if is_closing:
                             side = "CLOSE_SHORT"
-                        elif action_val < -0.20:
-                            side = "OPEN_SHORT"
+                        # When already in a Short, hold the position. Never generate OPEN_SHORT to add contracts!
                     else:
                         if action_val < -0.20:
                             side = "OPEN_SHORT"
@@ -1507,27 +1505,23 @@ class ProductionTradingBot:
                         active_version = self.registry.get_current_version()
                         target_qty = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack
                         
-                        # MICRO-SWING CONSOLIDATED ENTRY: Clean One-Shot Execution & Winner Preservation
+                        # MICRO-SWING CONSOLIDATED ENTRY: Strict One-Trade-One-Entry Rule
                         if "OPEN" in side:
                             if abs(pos.quantity) > 0:
-                                # RULE 2: Winner Preservation (Never add to an existing position in profit)
-                                # Averaging into a winning trade dilutes entry price at local bottoms/tops right before pullbacks.
-                                if pnl_pct_leveraged >= 0.020:
-                                    logger.info(f"[{sym}] 🔒 WINNER PRESERVATION: Position is already in profit (+{pnl_pct_leveraged*100:.2f}%). Strictly forbidding add-on to protect entry price (${pos.entry_price:.4f})!")
-                                    continue
-                                elif abs(pos.quantity) >= (0.50 * target_qty):
-                                    logger.info(f"[{sym}] Micro-Swing position established ({abs(pos.quantity):.4f} >= 50% of target {target_qty:.4f}). Skipping micro-slice.")
-                                    continue
-                                qty_raw = max(0.0, target_qty - abs(pos.quantity))
-                            else:
-                                # RULE 1: Clean One-Shot Entry (Forbid Micro-Dust Starters)
-                                # A full swing position requires at least $100-$150 margin ($1,500-$2,500 notional at 10x-20x leverage).
-                                # Never open tiny $20 dust orders that leave positions underfunded and force add-ons later!
-                                min_viable_notional = 1500.0 if not is_major else 2500.0
-                                if notional_requested < min_viable_notional:
-                                    logger.info(f"[{sym}] Skipping initial entry: notional ${notional_requested:.2f} < ${min_viable_notional:.2f} minimum viable size. Waiting for full margin to ensure clean one-shot entry!")
-                                    continue
-                                qty_raw = target_qty
+                                # STRICT ONE-TRADE-ONE-ENTRY POLICY: Zero multi-open add-ons permitted.
+                                # Averaging into an existing position dilutes entries, corrupts hold timers,
+                                # and has historically caused repeated fee bleed. Let active trades ride cleanly!
+                                logger.info(f"[{sym}] 🔒 ONE-TRADE-ONE-ENTRY: Position already active ({abs(pos.quantity):.4f}). Strictly forbidding add-ons!")
+                                continue
+                            
+                            # Clean One-Shot Entry (Forbid Micro-Dust Starters)
+                            # A full swing position requires at least $100-$150 margin ($1,500-$2,500 notional at 10x-20x leverage).
+                            # Never open tiny $20 dust orders that leave positions underfunded!
+                            min_viable_notional = 1500.0 if not is_major else 2500.0
+                            if notional_requested < min_viable_notional:
+                                logger.info(f"[{sym}] Skipping initial entry: notional ${notional_requested:.2f} < ${min_viable_notional:.2f} minimum viable size. Waiting for full margin to ensure clean one-shot entry!")
+                                continue
+                            qty_raw = target_qty
                                 
                             # Filter micro-dust orders under $100 notional to prevent fee bleed
                             if (qty_raw * market.mid_price) < 100.0:

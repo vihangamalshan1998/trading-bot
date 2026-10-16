@@ -1144,6 +1144,28 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🛑 ANTI-COUNTERTREND GUARD: Coin is dumping (15m: {sym_mom_15m*100:+.2f}%, 1h Critic: {sym_c1h:+.2f}%). Blocking counter-trend OPEN_LONG!")
                                 continue
 
+                        # GUARD 3.2: Over-Extension & Exhaustion Guard (Anti-Chasing at Tops & Bottoms)
+                        # Prevents the classic "Buying the Top Wick" or "Shorting the Bottom Wick" trap!
+                        # When price stretches too far from its mean, probability of continuation collapses.
+                        if market and len(market.features) == 90:
+                            ret_15m = float(market.features[4])
+                            rsi_norm = float(market.features[35]) # (RSI - 50) / 50 -> +0.50 is RSI 75, -0.50 is RSI 25
+                            bb_pos = float(market.features[48])  # Bollinger band relative position (-1.0 to +1.0)
+                            
+                            # 1. Top Exhaustion (Ceiling): Block OPEN_LONG if price is over-extended at the top
+                            # Triggers if 15m pump exceeds +1.20% AND price is pinned against extreme upper BB (>= +0.80) or RSI >= 75
+                            if action_val > 0.20 and (ret_15m >= 0.0120 and (bb_pos >= 0.80 or rsi_norm >= 0.50)):
+                                rsi_actual = (rsi_norm * 50.0) + 50.0
+                                logger.info(f"[{sym}] 🛑 OVER-EXTENSION GUARD: Coin is over-extended at the top (15m: +{ret_15m*100:.2f}%, BB: {bb_pos:+.2f}, RSI: {rsi_actual:.1f}). Skipping Long to prevent buying the top wick!")
+                                continue
+                                
+                            # 2. Bottom Exhaustion (Floor): Block OPEN_SHORT if price is over-extended at the bottom
+                            # Triggers if 15m dump exceeds -1.20% AND price is pinned against extreme lower BB (<= -0.80) or RSI <= 25
+                            elif action_val < -0.20 and (ret_15m <= -0.0120 and (bb_pos <= -0.80 or rsi_norm <= -0.50)):
+                                rsi_actual = (rsi_norm * 50.0) + 50.0
+                                logger.info(f"[{sym}] 🛑 OVER-EXTENSION GUARD: Coin is over-extended at the bottom (15m: {ret_15m*100:.2f}%, BB: {bb_pos:+.2f}, RSI: {rsi_actual:.1f}). Skipping Short to prevent selling the bottom wick!")
+                                continue
+
                         # GUARD 3.4: Cross-Asset Lead-Lag Sniping ("The Crypto Echo" Momentum Front-Running)
                         # Altcoins lag Bitcoin impulse moves by 30-180 seconds.
                         # 1. Flash Dump Defense: Block Altcoin Longs if BTC is dumping (<= -0.35% in 1m)

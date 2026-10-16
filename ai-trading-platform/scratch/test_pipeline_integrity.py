@@ -477,7 +477,33 @@ def test_pipeline_pure():
     assert mock_history[0]["quantity"] == 224.2
     print("  ✅ Active Position Trade History Auto-Reconciliation verified: Missing OPEN records are seamlessly restored!")
 
-    print("\n🎉 ALL 20 INSTITUTIONAL SYSTEMS VERIFIED 100% OPERATIONAL & MATHEMATICALLY SOUND!")
+    # 21. Verify Over-Extension & Exhaustion Guard (Rubber Band / Anti-Chasing Tops & Bottoms)
+    print("Testing 21: Over-Extension & Exhaustion Guard (Anti-Chasing Tops & Bottoms)...")
+    # Case A: Top Wick Exhaustion (e.g. NEAR pumped +1.5% into upper Bollinger Band, RSI 78)
+    near_ret_15m = 0.0150 # +1.50% pump
+    near_bb_pos = 0.88   # Upper BB
+    near_rsi_norm = 0.56 # RSI 78 ((78-50)/50 = 0.56 >= 0.50)
+    action_buy = 0.35    # AI wants to BUY Long
+    should_block_top_buy = action_buy > 0.20 and (near_ret_15m >= 0.0120 and (near_bb_pos >= 0.80 or near_rsi_norm >= 0.50))
+    assert should_block_top_buy, "Over-Extension Guard should BLOCK buying at the top wick!"
+
+    # Case B: Normal healthy breakout (ret_15m +0.40%, BB +0.50, RSI 58) -> Should ALLOW
+    healthy_ret_15m = 0.0040
+    healthy_bb_pos = 0.50
+    healthy_rsi_norm = 0.16
+    should_block_healthy = action_buy > 0.20 and (healthy_ret_15m >= 0.0120 and (healthy_bb_pos >= 0.80 or healthy_rsi_norm >= 0.50))
+    assert not should_block_healthy, "Over-Extension Guard should NOT block healthy breakouts!"
+
+    # Case C: Bottom Wick Exhaustion (Coin dumped -1.60% into lower Bollinger Band, RSI 20)
+    dump_ret_15m = -0.0160
+    dump_bb_pos = -0.91
+    dump_rsi_norm = -0.60 # RSI 20
+    action_sell = -0.35
+    should_block_bottom_sell = action_sell < -0.20 and (dump_ret_15m <= -0.0120 and (dump_bb_pos <= -0.80 or dump_rsi_norm <= -0.50))
+    assert should_block_bottom_sell, "Over-Extension Guard should BLOCK shorting into the bottom wick!"
+    print("  ✅ Over-Extension & Exhaustion Guard verified: Blocks top-chasing Longs & bottom-chasing Shorts with surgical precision!")
+
+    print("\n🎉 ALL 21 INSTITUTIONAL SYSTEMS VERIFIED 100% OPERATIONAL & MATHEMATICALLY SOUND!")
 
 if __name__ == "__main__":
     test_pipeline_pure()

@@ -1117,6 +1117,26 @@ class ProductionTradingBot:
                         elif has_high_conviction and ((action_val > 0.2 and is_macro_down) or (action_val < -0.2 and is_macro_up)):
                             logger.info(f"[{sym}] 🚀 HIGH-CONVICTION BYPASS: Proceeding with trade (Confidence: {confidence:.2f}, 5m Critic: {sym_c5m:+.2f}%) despite macro divergence.")
 
+                        # GUARD 3.1: Anti-Countertrend Iron Guard (Asset-Level Trend Protection)
+                        # Forbids opening Shorts into an asset that is actively rallying,
+                        # and forbids opening Longs into an asset that is actively dumping!
+                        if market and len(market.features) == 90:
+                            sym_mom_15m = float(market.features[4])
+                            sym_critic = precomputed_critics.get(sym, [0.0, 0.0, 0.0])
+                            sym_c1h = float(sym_critic[1]) if len(sym_critic) > 1 else 0.0
+                            
+                            # Short Protection: If coin is rallying (15m momentum >= +0.20% OR 1h Critic >= +0.08%),
+                            # block OPEN_SHORT to prevent fighting an uptrend!
+                            if action_val < -0.20 and (sym_mom_15m >= 0.0020 or sym_c1h >= 0.08):
+                                logger.info(f"[{sym}] 🛑 ANTI-COUNTERTREND GUARD: Coin is rallying (15m: {sym_mom_15m*100:+.2f}%, 1h Critic: {sym_c1h:+.2f}%). Blocking counter-trend OPEN_SHORT!")
+                                continue
+                                
+                            # Long Protection: If coin is dumping (15m momentum <= -0.20% OR 1h Critic <= -0.08%),
+                            # block OPEN_LONG to avoid catching a falling knife!
+                            elif action_val > 0.20 and (sym_mom_15m <= -0.0020 or sym_c1h <= -0.08):
+                                logger.info(f"[{sym}] 🛑 ANTI-COUNTERTREND GUARD: Coin is dumping (15m: {sym_mom_15m*100:+.2f}%, 1h Critic: {sym_c1h:+.2f}%). Blocking counter-trend OPEN_LONG!")
+                                continue
+
                         # GUARD 3.4: Cross-Asset Lead-Lag Sniping ("The Crypto Echo" Momentum Front-Running)
                         # Altcoins lag Bitcoin impulse moves by 30-180 seconds.
                         # 1. Flash Dump Defense: Block Altcoin Longs if BTC is dumping (<= -0.35% in 1m)
@@ -1378,13 +1398,13 @@ class ProductionTradingBot:
                         elif action_val < -0.20 and w_s >= whale_boost_hurdle and w_s > (1.5 * w_b):
                             whale_mult = 1.05
                     if is_major:
-                        # Major Coins (BTC, ETH, SOL, BNB): 12% - 25% margin
-                        min_margin_bound = 0.08 if self.profit_ratchet_active else 0.12
-                        max_margin_bound = 0.15 if self.profit_ratchet_active else 0.25
+                        # Major Coins (BTC, ETH, SOL, BNB): 10% - 20% margin
+                        min_margin_bound = 0.08 if self.profit_ratchet_active else 0.10
+                        max_margin_bound = 0.14 if self.profit_ratchet_active else 0.20
                     else:
-                        # Altcoins (ADA, XRP, LINK, AVAX, NEAR, LTC): 10% - 20% margin (Scaled Up)
-                        min_margin_bound = 0.06 if self.profit_ratchet_active else 0.10
-                        max_margin_bound = 0.12 if self.profit_ratchet_active else 0.20
+                        # Altcoins (ADA, XRP, LINK, AVAX, NEAR, LTC): 8% - 12% margin (Capped to slash fee bleed)
+                        min_margin_bound = 0.06 if self.profit_ratchet_active else 0.08
+                        max_margin_bound = 0.10 if self.profit_ratchet_active else 0.12
                     dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult * liq_mult, min_margin_bound, max_margin_bound))
                     
                     # System 4: Dynamic High-Water Equity Auto-Compounder (Asymmetric Kelly Scaling)

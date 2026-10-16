@@ -65,10 +65,13 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         
         try:
             async with self.session.request(method, url, params=params) as response:
-                data = await response.json()
+                try:
+                    data = await response.json()
+                except Exception:
+                    data = await response.text()
                 if response.status != 200:
                     logger.error(f"Binance API Error: {data}")
-                    response.raise_for_status()
+                    raise Exception(f"Binance API Error {response.status}: {data}")
                 return data
         except Exception as e:
             logger.error(f"Request failed: {method} {url} - {e}")

@@ -868,6 +868,7 @@ class ProductionTradingBot:
                     
                     pos = self.portfolio_state.positions[sym]
                     lead_lag_mult = 1.00
+                    liq_mult = 1.00
                     
                     # 2. Institutional Hysteresis Deadband
                     # Entries from flat require |action_val| > 0.20
@@ -1189,6 +1190,38 @@ class ProductionTradingBot:
                                     logger.info(f"[{sym}] 🛑 FUNDING DEFENSE: Frothy positive funding ({f_rate*100:.3f}%). Blocking Long to avoid heavy funding drain!")
                                     continue
 
+                        # GUARD 3.9: Liquidation Cascade Bounce Sniper & Waterfall Shield (Jump Crypto Model)
+                        # Exploits forced retail liquidation wicks and protects against active falling-knife margin cascades.
+                        if market and len(market.features) == 90:
+                            liq_1m = float(market.features[81])
+                            ob_imb = float(market.order_book_imbalance) if hasattr(market, 'order_book_imbalance') and market.order_book_imbalance is not None else 0.0
+                            
+                            # Asset-tiered liquidation volume hurdles:
+                            # BTC/ETH: $250k in 1m; SOL/BNB/XRP: $120k; Alts: $50k
+                            if sym in ["BTCUSDT", "ETHUSDT"]:
+                                liq_hurdle = 250_000.0
+                            elif sym in ["SOLUSDT", "BNBUSDT", "XRPUSDT"]:
+                                liq_hurdle = 120_000.0
+                            else:
+                                liq_hurdle = 50_000.0
+                                
+                            if liq_1m >= liq_hurdle:
+                                # 1. Long Waterfall Defense: Forced long liquidations cascading down with book collapsing
+                                if action_val > 0.20 and ob_imb < -0.35:
+                                    logger.info(f"[{sym}] 🛑 LIQUIDATION WATERFALL DEFENSE: Active cascading liquidations (${liq_1m:,.0f}) with no bid support (OFI: {ob_imb:.2f}). Skipping entry to avoid falling knife!")
+                                    continue
+                                # 2. Short Squeeze Waterfall Defense: Forced short liquidations cascading up with asks collapsing
+                                elif action_val < -0.20 and ob_imb > 0.35:
+                                    logger.info(f"[{sym}] 🛑 LIQUIDATION SHORT-SQUEEZE DEFENSE: Active cascading short liquidations (${liq_1m:,.0f}). Skipping short into squeeze!")
+                                    continue
+                                # 3. Liquidation Absorption Bounce Sniper (Reversal impulse!):
+                                elif action_val > 0.20 and ob_imb >= -0.10:
+                                    liq_mult = 1.12
+                                    logger.info(f"[{sym}] 💥 LIQUIDATION CASCADE BOUNCE SNIPER: Massive liquidations (${liq_1m:,.0f}) absorbed by bids (OFI: {ob_imb:+.2f}). Boosting conviction 1.12x for mean-reversion bounce!")
+                                elif action_val < -0.20 and ob_imb <= 0.10:
+                                    liq_mult = 1.12
+                                    logger.info(f"[{sym}] 💥 LIQUIDATION CASCADE BLOWOFF SNIPER: Short liquidations (${liq_1m:,.0f}) absorbed by asks (OFI: {ob_imb:+.2f}). Boosting Short conviction 1.12x!")
+
                     elif is_closing and not exit_override:
                         # PILLAR 2: Dynamic Profit Harvesting & Multi-Horizon Critic-Assisted Reversal Exit
                         critic_vals = precomputed_critics.get(sym)
@@ -1311,9 +1344,28 @@ class ProductionTradingBot:
                         # Altcoins (ADA, XRP, LINK, AVAX, NEAR, LTC): 5% - 10% margin
                         min_margin_bound = 0.03 if self.profit_ratchet_active else 0.05
                         max_margin_bound = 0.06 if self.profit_ratchet_active else 0.10
-                    dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult, min_margin_bound, max_margin_bound))
+                    dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult * liq_mult, min_margin_bound, max_margin_bound))
                     
-                    max_margin_budget = max(0.0, self.portfolio_state.equity * dynamic_margin_pct)
+                    # System 4: Dynamic High-Water Equity Auto-Compounder (Asymmetric Kelly Scaling)
+                    # Tracks peak session equity (HWM). When at new peaks, accelerates compounding (+5%).
+                    # When in drawdown (D), dampens risk (1.0 - 2.5*D) to protect principal from compounding downward.
+                    current_eq = float(self.portfolio_state.equity)
+                    if current_eq > self.max_equity:
+                        self.max_equity = current_eq
+
+                    hwm_equity = self.max_equity
+                    if hwm_equity > 0:
+                        drawdown_from_hwm = max(0.0, (hwm_equity - current_eq) / hwm_equity)
+                        if drawdown_from_hwm < 0.01:
+                            # At or near all-time high: Expansion Regime (compounding accelerator)
+                            kelly_compound_mult = 1.05
+                        else:
+                            # In drawdown: Asymmetrical capital preservation dampener
+                            kelly_compound_mult = float(np.clip(1.0 - (2.5 * drawdown_from_hwm), 0.70, 1.00))
+                    else:
+                        kelly_compound_mult = 1.00
+
+                    max_margin_budget = max(0.0, current_eq * dynamic_margin_pct * kelly_compound_mult)
                     margin_allocated = min(max_margin_budget, max(0.0, self.portfolio_state.free_margin) * target_size)
                     notional_requested = margin_allocated * pos.leverage
                     
@@ -1466,13 +1518,30 @@ class ProductionTradingBot:
                                     
                                     binance_side = "BUY" if side in ["OPEN_LONG", "CLOSE_SHORT"] else "SELL"
                                     
-                                    # Institutional Top-of-Book Maker Pegging:
-                                    # If BUY: peg to best bid (or 1 tick below mid) to guarantee Maker status
-                                    # If SELL: peg to best ask (or 1 tick above mid) to guarantee Maker status
+                                    # System 2: Volume-Weighted Micro-Price (P_micro) Execution Pegger (Jane Street Model)
+                                    # Calculates queue pressure: P_micro = I * P_ask + (1 - I) * P_bid
+                                    # Ensures Post-Only Maker queue priority and protects against adverse selection fills.
+                                    ob_skew = float(market.order_book_imbalance) if hasattr(market, 'order_book_imbalance') and market.order_book_imbalance is not None else 0.0
+                                    imb_weight = float(np.clip((ob_skew + 1.0) / 2.0, 0.0, 1.0))
+                                    
+                                    bid_px = market.bid if market.bid > 0 else (market.mid_price - tick_size)
+                                    ask_px = market.ask if market.ask > 0 else (market.mid_price + tick_size)
+                                    p_micro = (imb_weight * ask_px) + ((1.0 - imb_weight) * bid_px)
+                                    
                                     if binance_side == "BUY":
-                                        limit_price = market.bid if market.bid > 0 else (market.mid_price - tick_size)
+                                        # If sellers dominate and press down (p_micro < mid): peg 1 tick deeper to avoid toxic fill!
+                                        if p_micro < (market.mid_price - (0.5 * tick_size)):
+                                            limit_price = bid_px - tick_size
+                                            logger.debug(f"[{sym}] 🏛️ P_MICRO PEG: Sellers pressing (P_micro ${p_micro:.4f} < Mid ${market.mid_price:.4f}). Shifting bid 1 tick deeper.")
+                                        else:
+                                            limit_price = bid_px
                                     else:
-                                        limit_price = market.ask if market.ask > 0 else (market.mid_price + tick_size)
+                                        # If buyers dominate and push up (p_micro > mid): peg 1 tick higher to harvest the wick!
+                                        if p_micro > (market.mid_price + (0.5 * tick_size)):
+                                            limit_price = ask_px + tick_size
+                                            logger.debug(f"[{sym}] 🏛️ P_MICRO PEG: Buyers pushing (P_micro ${p_micro:.4f} > Mid ${market.mid_price:.4f}). Shifting ask 1 tick higher.")
+                                        else:
+                                            limit_price = ask_px
                                         
                                     limit_price_str = sym_config.format_price(limit_price)
                                     

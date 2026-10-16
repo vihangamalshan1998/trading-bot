@@ -264,16 +264,39 @@ async def resume_pm2():
 
 @app.post("/api/system/pm2/restart")
 async def restart_pm2():
-    """Restart all pm2 processes except dashboard and disarm kill switch"""
+    """Restart all active bot pm2 processes dynamically without crashing on absent processes"""
     try:
+        import subprocess
         if redis_manager.redis:
             await redis_manager.redis.set("system:kill_switch:active", "false")
-        bots_to_restart = "market-collector macro-collector ai-trainer trading-bot reward-calculator whale-tracker statarb-collector"
-        result = subprocess.run(f"pm2 restart {bots_to_restart}", shell=True, capture_output=True, text=True)
-        if result.returncode == 0:
-            return {"status": "success", "message": "All bots (including Whale Tracker & StatArb) restarted successfully."}
+            
+        # Discover running PM2 processes dynamically via jlist
+        jlist_res = subprocess.run("pm2 jlist", shell=True, capture_output=True, text=True)
+        active_names = []
+        if jlist_res.returncode == 0:
+            try:
+                pm2_procs = json.loads(jlist_res.stdout)
+                active_names = [p.get("name") for p in pm2_procs if p.get("name") and "dashboard" not in p.get("name", "")]
+            except Exception:
+                pass
+                
+        # If jlist succeeded and found active bots, restart only those
+        if active_names:
+            bots_to_restart = " ".join(active_names)
+            res = subprocess.run(f"pm2 restart {bots_to_restart}", shell=True, capture_output=True, text=True)
+            if res.returncode == 0:
+                return {"status": "success", "message": f"Successfully restarted active bots: {', '.join(active_names)}"}
+            else:
+                return {"status": "error", "message": f"PM2 Error: {res.stderr}"}
         else:
-            return {"status": "error", "message": f"PM2 Error: {result.stderr}"}
+            # Fallback: Restart known standard bots individually so absent ones don't break the rest
+            known_bots = ["trading-bot", "whale-tracker", "market-collector", "statarb-collector", "macro-collector"]
+            restarted = []
+            for b in known_bots:
+                r = subprocess.run(f"pm2 restart {b}", shell=True, capture_output=True, text=True)
+                if r.returncode == 0:
+                    restarted.append(b)
+            return {"status": "success", "message": f"Restarted: {', '.join(restarted)}"}
     except Exception as e:
         return {"status": "error", "message": f"Failed to restart bots: {str(e)}"}
 

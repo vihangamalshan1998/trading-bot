@@ -54,8 +54,8 @@ class WhaleTracker:
             streams.append(f"{s_low}@aggTrade")
             streams.append(f"{s_low}@depth20@100ms")
             
-        stream_url = f"wss://stream.binancefuture.com/stream?streams={'/'.join(streams)}"
-        logger.info(f"Connecting to Whale Streams: {stream_url}")
+        stream_url = f"wss://fstream.binance.com/stream?streams={'/'.join(streams)}"
+        logger.info(f"Connecting to LIVE Mainnet Whale Streams: {stream_url}")
         
         # Store latest orderbook state
         latest_walls = {sym: {'buy': 0.0, 'sell': 0.0} for sym in self.symbols}

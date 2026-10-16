@@ -1101,37 +1101,32 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🛑 STATARB DIVERGENCE: Global exchanges at premium (OKX: {okx_prem*100:+.2f}%, Bybit: {bybit_prem*100:+.2f}%). Blocking Binance fakeout SHORT!")
                                 continue
 
-                        # GUARD 3.7: Whale Market Order Flow Momentum (Whale Tracker Integration)
-                        # Prevents taking adverse trades when institutional whales are heavily dumping or sweeping the book.
-                        # On testnet, synthetic orders from testing bots are ignored so they don't block legitimate trades.
+                        # GUARD 3.7: Whale Market Order Flow Momentum (Live Whale Tracker Integration)
+                        # Prevents taking adverse trades when real institutional whales are dumping or sweeping the book.
+                        # Whale Tracker streams 100% authentic Mainnet Binance Futures data, protecting capital against real market dumps.
                         whale_data = self.whale_states.get(sym)
                         if whale_data and (time.time() - float(whale_data.get("timestamp", 0.0))) < 60.0:
                             w_buy = float(whale_data.get("whale_buy_pressure", 0.0))
                             w_sell = float(whale_data.get("whale_sell_pressure", 0.0))
                             
-                            # On Binance Testnet, testnet accounts trade with millions of fake dollars
-                            if not settings.binance_testnet and not settings.allow_testnet:
-                                sym_mom_15m = market.features[4] if market and len(market.features) == 90 else 0.0
-                                critic_vals = precomputed_critics.get(sym)
-                                c1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else 0.0
-                                
-                                # Extreme whale selling ($500k+ and 2.5x buy volume): Never buy into whale dumps UNLESS price/critic is surging
-                                if action_val > 0.20 and w_sell >= 500_000.0 and w_sell > (2.5 * max(100_000.0, w_buy)):
-                                    if sym_mom_15m > 0.002 or c1h > 0.10:
-                                        logger.info(f"[{sym}] ⚠️ BYPASSING WHALE SELL DEFENSE: Real price momentum (+{sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bullish. Overriding synthetic sell pressure (${w_sell:,.0f}).")
-                                    else:
-                                        logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale selling (${w_sell:,.0f} vs ${w_buy:,.0f}). Blocking Long entry!")
-                                        continue
-                                # Extreme whale buying ($500k+ and 2.5x sell volume): Never short into whale sweeps UNLESS price/critic is dumping
-                                elif action_val < -0.20 and w_buy >= 500_000.0 and w_buy > (2.5 * max(100_000.0, w_sell)):
-                                    if sym_mom_15m < -0.002 or c1h < -0.10:
-                                        logger.info(f"[{sym}] ⚠️ BYPASSING WHALE BUY DEFENSE: Real price momentum ({sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bearish. Overriding synthetic buy pressure (${w_buy:,.0f}).")
-                                    else:
-                                        logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale buying (${w_buy:,.0f} vs ${w_sell:,.0f}). Blocking Short entry!")
-                                        continue
-                            else:
-                                if w_sell >= 1_000_000.0 or w_buy >= 1_000_000.0:
-                                    logger.debug(f"[{sym}] 🐋 Testnet Whale Flow: Buy ${w_buy:,.0f} / Sell ${w_sell:,.0f} (Testnet telemetry only)")
+                            sym_mom_15m = market.features[4] if market and len(market.features) == 90 else 0.0
+                            critic_vals = precomputed_critics.get(sym)
+                            c1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else 0.0
+                            
+                            # Extreme whale selling ($500k+ and 2.5x buy volume): Never buy into whale dumps UNLESS price/critic is surging
+                            if action_val > 0.20 and w_sell >= 500_000.0 and w_sell > (2.5 * max(100_000.0, w_buy)):
+                                if sym_mom_15m > 0.002 or c1h > 0.10:
+                                    logger.info(f"[{sym}] ⚠️ BYPASSING WHALE SELL DEFENSE: Real price momentum (+{sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bullish. Overriding whale sell pressure (${w_sell:,.0f}).")
+                                else:
+                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Real mainnet whale dump detected (${w_sell:,.0f} vs ${w_buy:,.0f}). Blocking Long entry!")
+                                    continue
+                            # Extreme whale buying ($500k+ and 2.5x sell volume): Never short into whale sweeps UNLESS price/critic is dumping
+                            elif action_val < -0.20 and w_buy >= 500_000.0 and w_buy > (2.5 * max(100_000.0, w_sell)):
+                                if sym_mom_15m < -0.002 or c1h < -0.10:
+                                    logger.info(f"[{sym}] ⚠️ BYPASSING WHALE BUY DEFENSE: Real price momentum ({sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bearish. Overriding whale buy pressure (${w_buy:,.0f}).")
+                                else:
+                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Real mainnet whale sweep detected (${w_buy:,.0f} vs ${w_sell:,.0f}). Blocking Short entry!")
+                                    continue
 
                         # GUARD 3.8: Funding Rate Asymmetry & Squeeze Sniping
                         # Protects against paying high funding fees; exploits deep negative funding short squeezes

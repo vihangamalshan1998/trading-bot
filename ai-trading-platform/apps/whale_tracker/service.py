@@ -8,8 +8,23 @@ from core.db.redis import redis_manager
 from core.config.settings import settings
 from core.logging.logger import logger, set_log_file
 
-WHALE_TRADE_THRESHOLD_USD = 100_000.0  # $100k+ is considered a whale market order
-WHALE_WALL_THRESHOLD_USD = 500_000.0   # $500k+ limit order is considered a whale wall
+# Tiered Institutional Whale Thresholds (dynamically scaled to 24h market liquidity)
+# Tier 1: Mega-Caps (BTC, ETH) - Deepest order books ($5B - $25B daily volume)
+# Tier 2: Large-Caps (SOL, BNB, XRP) - Moderate-deep books ($1B - $4B daily volume)
+# Tier 3: Mid-Cap Altcoins (ADA, LINK, AVAX, NEAR, LTC) - Thinner books ($150M - $600M volume)
+WHALE_THRESHOLDS = {
+    "BTCUSDT": {"trade": 100_000.0, "wall": 500_000.0},
+    "ETHUSDT": {"trade": 100_000.0, "wall": 500_000.0},
+    "SOLUSDT": {"trade": 60_000.0,  "wall": 250_000.0},
+    "BNBUSDT": {"trade": 60_000.0,  "wall": 250_000.0},
+    "XRPUSDT": {"trade": 50_000.0,  "wall": 200_000.0},
+    "ADAUSDT":  {"trade": 35_000.0, "wall": 120_000.0},
+    "LINKUSDT": {"trade": 35_000.0, "wall": 120_000.0},
+    "AVAXUSDT": {"trade": 35_000.0, "wall": 120_000.0},
+    "NEARUSDT": {"trade": 30_000.0, "wall": 100_000.0},
+    "LTCUSDT":  {"trade": 35_000.0, "wall": 120_000.0},
+}
+DEFAULT_WHALE_THRESHOLD = {"trade": 50_000.0, "wall": 200_000.0}
 
 class WhaleTracker:
     def __init__(self):
@@ -74,6 +89,10 @@ class WhaleTracker:
                     if not sym or sym not in self.symbols:
                         continue
                         
+                    sym_thresh = WHALE_THRESHOLDS.get(sym, DEFAULT_WHALE_THRESHOLD)
+                    trade_thresh = sym_thresh["trade"]
+                    wall_thresh = sym_thresh["wall"]
+                        
                     if '@aggTrade' in stream:
                         price = float(payload['p'])
                         qty = float(payload['q'])
@@ -81,7 +100,7 @@ class WhaleTracker:
                         raw_usd = price * qty
                         usd_val = min(raw_usd, 2_000_000.0)
                         
-                        if usd_val >= WHALE_TRADE_THRESHOLD_USD:
+                        if usd_val >= trade_thresh:
                             is_buyer_maker = payload['m']
                             side = "SELL" if is_buyer_maker else "BUY"
                             self.whale_trades[sym].append({
@@ -89,7 +108,7 @@ class WhaleTracker:
                                 'side': side,
                                 'amount': usd_val
                             })
-                            logger.debug(f"🚨 WHALE MARKET {side}: {usd_val:,.2f} USD on {sym} (raw: {raw_usd:,.2f})")
+                            logger.debug(f"🚨 WHALE MARKET {side}: {usd_val:,.2f} USD on {sym} (raw: {raw_usd:,.2f}, thresh: {trade_thresh:,.0f})")
                             
                             # Publish immediately on a whale trade
                             await self._publish_state(sym, latest_walls[sym]['buy'], latest_walls[sym]['sell'], force=True)
@@ -106,7 +125,7 @@ class WhaleTracker:
                         buy_wall_dist = 0.0
                         for bid in bids:
                             px, qty = float(bid[0]), float(bid[1])
-                            if px * qty >= WHALE_WALL_THRESHOLD_USD:
+                            if px * qty >= wall_thresh:
                                 buy_wall_dist = (mid_price - px) / mid_price
                                 break
                                 
@@ -114,7 +133,7 @@ class WhaleTracker:
                         sell_wall_dist = 0.0
                         for ask in asks:
                             px, qty = float(ask[0]), float(ask[1])
-                            if px * qty >= WHALE_WALL_THRESHOLD_USD:
+                            if px * qty >= wall_thresh:
                                 sell_wall_dist = (px - mid_price) / mid_price
                                 break
                                 

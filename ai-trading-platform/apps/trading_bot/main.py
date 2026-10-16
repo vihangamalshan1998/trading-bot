@@ -1101,7 +1101,7 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🛑 STATARB DIVERGENCE: Global exchanges at premium (OKX: {okx_prem*100:+.2f}%, Bybit: {bybit_prem*100:+.2f}%). Blocking Binance fakeout SHORT!")
                                 continue
 
-                        # GUARD 3.7: Whale Market Order Flow Momentum (Live Whale Tracker Integration)
+                        # GUARD 3.7: Whale Market Order Flow Momentum (Asset-Tiered Whale Tracker Integration)
                         # Prevents taking adverse trades when real institutional whales are dumping or sweeping the book.
                         # Whale Tracker streams 100% authentic Mainnet Binance Futures data, protecting capital against real market dumps.
                         whale_data = self.whale_states.get(sym)
@@ -1113,19 +1113,33 @@ class ProductionTradingBot:
                             critic_vals = precomputed_critics.get(sym)
                             c1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else 0.0
                             
-                            # Extreme whale selling ($500k+ and 2.5x buy volume): Never buy into whale dumps UNLESS price/critic is surging
-                            if action_val > 0.20 and w_sell >= 500_000.0 and w_sell > (2.5 * max(100_000.0, w_buy)):
+                            # Asset-Tiered Whale Pressure Hurdles (scaled to 24h market liquidity):
+                            # Tier 1 (BTC, ETH): $500k pressure / $100k counter-pressure base
+                            # Tier 2 (SOL, BNB, XRP): $300k pressure / $60k counter-pressure base
+                            # Tier 3 (ADA, LINK, AVAX, NEAR, LTC): $180k pressure / $35k counter-pressure base
+                            if sym in ["BTCUSDT", "ETHUSDT"]:
+                                whale_pressure_hurdle = 500_000.0
+                                whale_base_counter = 100_000.0
+                            elif sym in ["SOLUSDT", "BNBUSDT", "XRPUSDT"]:
+                                whale_pressure_hurdle = 300_000.0
+                                whale_base_counter = 60_000.0
+                            else:
+                                whale_pressure_hurdle = 180_000.0
+                                whale_base_counter = 35_000.0
+                            
+                            # Extreme whale selling: Never buy into whale dumps UNLESS price/critic is surging
+                            if action_val > 0.20 and w_sell >= whale_pressure_hurdle and w_sell > (2.5 * max(whale_base_counter, w_buy)):
                                 if sym_mom_15m > 0.002 or c1h > 0.10:
                                     logger.info(f"[{sym}] ⚠️ BYPASSING WHALE SELL DEFENSE: Real price momentum (+{sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bullish. Overriding whale sell pressure (${w_sell:,.0f}).")
                                 else:
-                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Real mainnet whale dump detected (${w_sell:,.0f} vs ${w_buy:,.0f}). Blocking Long entry!")
+                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Real mainnet whale dump detected (${w_sell:,.0f} vs ${w_buy:,.0f}, hurdle: ${whale_pressure_hurdle:,.0f}). Blocking Long entry!")
                                     continue
-                            # Extreme whale buying ($500k+ and 2.5x sell volume): Never short into whale sweeps UNLESS price/critic is dumping
-                            elif action_val < -0.20 and w_buy >= 500_000.0 and w_buy > (2.5 * max(100_000.0, w_sell)):
+                            # Extreme whale buying: Never short into whale sweeps UNLESS price/critic is dumping
+                            elif action_val < -0.20 and w_buy >= whale_pressure_hurdle and w_buy > (2.5 * max(whale_base_counter, w_sell)):
                                 if sym_mom_15m < -0.002 or c1h < -0.10:
                                     logger.info(f"[{sym}] ⚠️ BYPASSING WHALE BUY DEFENSE: Real price momentum ({sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bearish. Overriding whale buy pressure (${w_buy:,.0f}).")
                                 else:
-                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Real mainnet whale sweep detected (${w_buy:,.0f} vs ${w_sell:,.0f}). Blocking Short entry!")
+                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Real mainnet whale sweep detected (${w_buy:,.0f} vs ${w_sell:,.0f}, hurdle: ${whale_pressure_hurdle:,.0f}). Blocking Short entry!")
                                     continue
 
                         # GUARD 3.8: Funding Rate Asymmetry & Squeeze Sniping
@@ -1248,18 +1262,18 @@ class ProductionTradingBot:
                     if market and hasattr(market, 'volatility') and market.volatility > 0.015:
                         vol_scale = float(np.clip(0.015 / market.volatility, 0.70, 1.00))
                         
-                    # 5. Whale Flow Alignment Multiplier
+                    # 5. Whale Flow Alignment Multiplier (Asset-Tiered)
                     whale_mult = 1.0
                     whale_data = self.whale_states.get(sym)
+                    is_major = sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+                    whale_boost_hurdle = 250_000.0 if is_major else 120_000.0
                     if whale_data and (time.time() - float(whale_data.get("timestamp", 0.0))) < 60.0:
                         w_b = float(whale_data.get("whale_buy_pressure", 0.0))
                         w_s = float(whale_data.get("whale_sell_pressure", 0.0))
-                        if action_val > 0.20 and w_b >= 300_000.0 and w_b > (1.5 * w_s):
+                        if action_val > 0.20 and w_b >= whale_boost_hurdle and w_b > (1.5 * w_s):
                             whale_mult = 1.05
-                        elif action_val < -0.20 and w_s >= 300_000.0 and w_s > (1.5 * w_b):
+                        elif action_val < -0.20 and w_s >= whale_boost_hurdle and w_s > (1.5 * w_b):
                             whale_mult = 1.05
-
-                    is_major = sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
                     if is_major:
                         min_margin_bound = 0.04 if self.profit_ratchet_active else 0.06
                         max_margin_bound = 0.08 if self.profit_ratchet_active else 0.15

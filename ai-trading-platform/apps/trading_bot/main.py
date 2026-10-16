@@ -112,6 +112,7 @@ class ProductionTradingBot:
         self.pnl_history = {sym: collections.deque(maxlen=30) for sym in self.symbols} # (timestamp, pnl_pct_leveraged) for velocity shock detection
         self.smoothed_action_history = {sym: collections.deque(maxlen=3) for sym in self.symbols} # Institutional signal smoothing (3-tick window)
         self.smoothed_confidence_history = {sym: collections.deque(maxlen=3) for sym in self.symbols}
+        self.last_hold_emission_time = {sym: 0.0 for sym in self.symbols} # VPS DISK SHIELD: Throttles HOLD experience emissions to once per 5 mins
         
         # Institutional Scale-Out & Free-Roll Runner Tracking
         self.partial_tp_triggered = {sym: False for sym in self.symbols}
@@ -1039,9 +1040,11 @@ class ProductionTradingBot:
                         reason = "Profit Ratchet Preservation" if self.profit_ratchet_active and effective_conf_hurdle > session_conf_hurdle else session_name
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < {effective_conf_hurdle:.2f} in {reason})")
                         
-                        # Emit authentic live HOLD experience into DB when flat (15% sample rate)
+                        # Emit authentic live HOLD experience into DB when flat (throttled to once per 5 mins per coin to protect VPS disk)
                         # Populates LINK, ADA, AVAX, NEAR, LTC with genuine 200-dim market state sequences
-                        if pos.quantity == 0 and random.random() < 0.15:
+                        now_hold_t = time.time()
+                        if pos.quantity == 0 and (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= 300.0:
+                            self.last_hold_emission_time[sym] = now_hold_t
                             active_version = self.registry.get_current_version()
                             hold_exp_data = {
                                 "experience_id": str(uuid.uuid4()),
@@ -1429,8 +1432,10 @@ class ProductionTradingBot:
                     if side == "HOLD":
                         logger.info(f"[{sym}] HOLDING (Action Val: {action_val:.2f})")
                         
-                        # High-Quality HOLD Experiences (15% sample rate so the agent learns that holding is profitable)
-                        if random.random() < 0.15:
+                        # High-Quality HOLD Experiences (throttled to once per 5 mins per coin to protect VPS disk)
+                        now_hold_t = time.time()
+                        if (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= 300.0:
+                            self.last_hold_emission_time[sym] = now_hold_t
                             hold_dur = 0
                             if pos.entry_price > 0 and getattr(pos, 'entry_time', 0.0) > 0:
                                 hold_dur = int(time.time() - pos.entry_time)

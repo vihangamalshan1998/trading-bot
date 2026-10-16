@@ -1007,30 +1007,37 @@ class ProductionTradingBot:
                             logger.warning(f"[{sym}] 🛑 SPREAD FIREWALL ({session_name}): Spread {spread_pct*100:.3f}% > {session_max_spread*100:.3f}% limit. Skipping entry to protect from slippage fee bleed!")
                             continue
 
-                    # GUARD 2: Minimum Hold Duration (600s / 10 mins with Smart Trap Escape Door)
+                    # GUARD 2: Minimum Hold Duration (900s / 15 mins with Massive Reversal Escape Door)
                     if is_closing and not exit_override:
                         # 1. Early exit if in solid impulse profit (>= +4.0% leveraged to cover fees)
                         is_profit_impulse = pnl_pct_leveraged >= 0.04
                         
-                        # 2. Smart Trap Escape Door: Only cut early if Critic confirms a REAL multi-timeframe adverse breakdown:
-                        # BOTH 5m AND 1h must agree on adverse direction (5m >= 0.40% AND 1h >= 0.70% adverse move),
-                        # or a severe 5m shock (5m >= 0.80% adverse) with high confidence (>= 0.72).
-                        # Prevents cutting positions after 15 minutes on minor 1h drift while 5m is favorable!
+                        # 2. Smart Trap & Massive Reversal Escape Door:
+                        # If AI sees a massive multi-timeframe reversal, exit immediately as soon as possible!
+                        # Triggers on:
+                        # a) Critic multi-timeframe adverse breakdown (5m >= 0.40% AND 1h >= 0.60% adverse, or severe 5m shock >= 0.75% adverse)
+                        # b) High-Conviction Actor thesis reversal (|action_val| >= 0.55 opposing position with confidence >= 0.75)
                         critic_vals = precomputed_critics.get(sym)
                         pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
                         pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
-                        is_trap_detected = (pos.quantity > 0 and ((pred_ret_5m <= -0.40 and pred_ret_1h <= -0.70) or pred_ret_5m <= -0.80) and confidence >= 0.72) or \
-                                           (pos.quantity < 0 and ((pred_ret_5m >= 0.40 and pred_ret_1h >= 0.70) or pred_ret_5m >= 0.80) and confidence >= 0.72)
                         
+                        critic_reversal = (pos.quantity > 0 and ((pred_ret_5m <= -0.40 and pred_ret_1h <= -0.60) or pred_ret_5m <= -0.75) and confidence >= 0.70) or \
+                                          (pos.quantity < 0 and ((pred_ret_5m >= 0.40 and pred_ret_1h >= 0.60) or pred_ret_5m >= 0.75) and confidence >= 0.70)
+                        
+                        actor_reversal = (pos.quantity > 0 and action_val <= -0.55 and confidence >= 0.75) or \
+                                         (pos.quantity < 0 and action_val >= 0.55 and confidence >= 0.75)
+                        
+                        is_massive_reversal = critic_reversal or actor_reversal
                         is_protective_loss = pnl_pct_leveraged <= -0.12  # Allows surviving wicks up to -12% leveraged (-0.60% price move)
                         
                         entry_t = self.position_entry_times.get(sym, 0.0)
                         time_held = (time.time() - entry_t) if entry_t > 0 else 999.0
                         
-                        if is_trap_detected:
-                            logger.warning(f"[{sym}] 🚨 CONFIRMED SMART TRAP: Critic forecasts severe adverse reversal (5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}%) with {confidence:.2f} confidence. Cutting trap early!")
-                        elif time_held < 600.0 and not (is_profit_impulse or is_protective_loss):
-                            logger.info(f"[{sym}] ⏳ MICRO-SWING BREATHING: Minimum hold (600s) not met yet ({time_held:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%). Giving swing room to run!")
+                        if is_massive_reversal:
+                            trigger_src = "Critic adverse breakdown" if critic_reversal else "Actor high-conviction thesis flip"
+                            logger.warning(f"[{sym}] 🚨 MASSIVE REVERSAL DETECTED ({trigger_src}): Exiting market as soon as possible (PnL: {pnl_pct_leveraged*100:+.2f}%, Held: {time_held:.1f}s)!")
+                        elif time_held < 900.0 and not (is_profit_impulse or is_protective_loss):
+                            logger.info(f"[{sym}] ⏳ MICRO-SWING BREATHING: Minimum hold (900s / 15m) not met yet ({time_held:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%). Giving swing room to run!")
                             continue
 
                     # GUARD 3: Confidence Filter (Session Adaptive & Profit Ratchet Modulated)

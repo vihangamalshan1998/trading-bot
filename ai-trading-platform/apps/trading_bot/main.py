@@ -1507,20 +1507,31 @@ class ProductionTradingBot:
                         active_version = self.registry.get_current_version()
                         target_qty = notional_requested / market.mid_price # Use EXPLICIT mid_price, no feature[6] hack
                         
-                        # MICRO-SWING CONSOLIDATED ENTRY: If position is already established (>= 60% of target),
-                        # do NOT micro-slice tiny incremental dust (eliminates fee bleed!)
+                        # MICRO-SWING CONSOLIDATED ENTRY: Clean One-Shot Execution & Winner Preservation
                         if "OPEN" in side:
                             if abs(pos.quantity) > 0:
-                                if abs(pos.quantity) >= (0.60 * target_qty):
-                                    logger.info(f"[{sym}] Micro-Swing position established ({abs(pos.quantity):.4f} >= 60% of target {target_qty:.4f}). Skipping micro-slice.")
+                                # RULE 2: Winner Preservation (Never add to an existing position in profit)
+                                # Averaging into a winning trade dilutes entry price at local bottoms/tops right before pullbacks.
+                                if pnl_pct_leveraged >= 0.020:
+                                    logger.info(f"[{sym}] 🔒 WINNER PRESERVATION: Position is already in profit (+{pnl_pct_leveraged*100:.2f}%). Strictly forbidding add-on to protect entry price (${pos.entry_price:.4f})!")
+                                    continue
+                                elif abs(pos.quantity) >= (0.50 * target_qty):
+                                    logger.info(f"[{sym}] Micro-Swing position established ({abs(pos.quantity):.4f} >= 50% of target {target_qty:.4f}). Skipping micro-slice.")
                                     continue
                                 qty_raw = max(0.0, target_qty - abs(pos.quantity))
                             else:
+                                # RULE 1: Clean One-Shot Entry (Forbid Micro-Dust Starters)
+                                # A full swing position requires at least $100-$150 margin ($1,500-$2,500 notional at 10x-20x leverage).
+                                # Never open tiny $20 dust orders that leave positions underfunded and force add-ons later!
+                                min_viable_notional = 1500.0 if not is_major else 2500.0
+                                if notional_requested < min_viable_notional:
+                                    logger.info(f"[{sym}] Skipping initial entry: notional ${notional_requested:.2f} < ${min_viable_notional:.2f} minimum viable size. Waiting for full margin to ensure clean one-shot entry!")
+                                    continue
                                 qty_raw = target_qty
                                 
-                            # Filter micro-dust orders under $50 notional to prevent fee bleed
-                            if (qty_raw * market.mid_price) < 50.0:
-                                logger.info(f"[{sym}] Skipping micro-order: notional ${qty_raw * market.mid_price:.2f} < $50.00 minimum.")
+                            # Filter micro-dust orders under $100 notional to prevent fee bleed
+                            if (qty_raw * market.mid_price) < 100.0:
+                                logger.info(f"[{sym}] Skipping micro-order: notional ${qty_raw * market.mid_price:.2f} < $100.00 minimum.")
                                 continue
                         else:
                             # For CLOSE actions, we close the entire existing quantity, UNLESS it's a 50% partial TP!

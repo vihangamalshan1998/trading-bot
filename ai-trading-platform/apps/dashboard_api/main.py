@@ -249,10 +249,25 @@ async def stop_pm2():
     except Exception as e:
         return {"status": "error", "message": f"Failed to activate kill switch: {str(e)}"}
 
+@app.post("/api/system/pm2/resume")
+async def resume_pm2():
+    """Disarms the emergency kill switch and resumes trading."""
+    try:
+        if redis_manager.redis:
+            await redis_manager.redis.set("system:kill_switch:active", "false")
+            await redis_manager.redis.publish("system:events", json.dumps({"type": "RESUME_TRADING"}))
+            return {"status": "success", "message": "Emergency Kill Switch disarmed. Trading resumed."}
+        else:
+            return {"status": "error", "message": "Failed to connect to Redis."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to disarm kill switch: {str(e)}"}
+
 @app.post("/api/system/pm2/restart")
 async def restart_pm2():
-    """Restart all pm2 processes except dashboard"""
+    """Restart all pm2 processes except dashboard and disarm kill switch"""
     try:
+        if redis_manager.redis:
+            await redis_manager.redis.set("system:kill_switch:active", "false")
         bots_to_restart = "market-collector macro-collector ai-trainer trading-bot reward-calculator whale-tracker statarb-collector"
         result = subprocess.run(f"pm2 restart {bots_to_restart}", shell=True, capture_output=True, text=True)
         if result.returncode == 0:

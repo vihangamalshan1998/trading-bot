@@ -434,6 +434,27 @@ class ProductionTradingBot:
         logger.info("Starting production inference loop...")
         while self.running:
             try:
+                # 0. Fast Authoritative Redis Kill Switch & Emergency Stop Check
+                ks_active = False
+                try:
+                    if self.redis.redis:
+                        ks = await self.redis.redis.get("system:kill_switch:active")
+                        val = (ks.decode("utf-8") if isinstance(ks, bytes) else str(ks or "")).strip().lower()
+                        if val in ["true", "1", "yes"]:
+                            ks_active = True
+                except Exception as ks_err:
+                    logger.error(f"Failed to check Redis kill switch in inference loop: {ks_err}")
+
+                if ks_active or self.emergency_stop or settings.emergency_stop:
+                    if not self.emergency_stop or not settings.emergency_stop:
+                        logger.critical("🚨 EMERGENCY KILL SWITCH DETECTED IN INFERENCE LOOP: Halting trading immediately!")
+                        self.emergency_stop = True
+                        self.trading_enabled = False
+                        settings.emergency_stop = True
+                        await self.panic_liquidate()
+                    await asyncio.sleep(3.0)
+                    continue
+
                 # 0. Hot Reload Model
                 if self.registry.check_for_updates():
                     logger.info("New model version detected. Hot reloading...")
@@ -1383,9 +1404,10 @@ class ProductionTradingBot:
                             logger.info(f"[{sym}] EXECUTING: {side} {qty_str} (Confidence: {confidence:.2f})")
                             
                             if (self.trading_enabled and 
+                                not self.emergency_stop and
+                                not settings.emergency_stop and
                                 not self.dry_run and 
                                 (settings.allow_testnet or settings.allow_live_trading) and 
-                                not settings.emergency_stop and 
                                 self.has_valid_model and 
                                 decision.approved):
                                 
@@ -1750,13 +1772,22 @@ class ProductionTradingBot:
             try:
                 if self.redis.redis:
                     ks = await self.redis.redis.get("system:kill_switch:active")
-                    if ks and ks.decode("utf-8") == "true" and not self.emergency_stop:
-                        logger.critical("🚨 EMERGENCY KILL SWITCH ACTIVATED VIA REDIS! 🚨")
-                        self.emergency_stop = True
-                        self.trading_enabled = False
-                        await self.panic_liquidate()
+                    val = (ks.decode("utf-8") if isinstance(ks, bytes) else str(ks or "")).strip().lower()
+                    if val in ["true", "1", "yes"]:
+                        if not self.emergency_stop:
+                            logger.critical("🚨 EMERGENCY KILL SWITCH ACTIVATED VIA REDIS! 🚨")
+                            self.emergency_stop = True
+                            self.trading_enabled = False
+                            settings.emergency_stop = True
+                            await self.panic_liquidate()
+                    else:
+                        if self.emergency_stop:
+                            logger.info("🟢 EMERGENCY KILL SWITCH DISARMED VIA REDIS. Normal trading restored.")
+                            self.emergency_stop = False
+                            self.trading_enabled = settings.trading_enabled
+                            settings.emergency_stop = False
             except Exception as e:
-                pass
+                logger.error(f"Error in monitor_kill_switch: {e}")
             await asyncio.sleep(2.0)
 
     async def panic_liquidate(self):
@@ -1775,17 +1806,23 @@ class ProductionTradingBot:
                         # Cancel any open orders for this symbol first
                         try:
                             await self.binance.cancel_all_orders(sym)
-                        except:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"Failed to cancel orders for {sym}: {e}")
                             
                         # Send market order to close
-                        await self.binance.place_order(
-                            symbol=sym,
-                            side=side,
-                            order_type="MARKET",
-                            quantity=abs(amt)
-                        )
-                        logger.critical(f"Panic Market {side} for {sym} executed.")
+                        client_order_id = f"panic_{uuid.uuid4().hex[:10]}"
+                        try:
+                            await self.binance.create_order(
+                                symbol=sym,
+                                side=side,
+                                quantity=abs(amt),
+                                client_order_id=client_order_id,
+                                order_type="MARKET",
+                                reduce_only=True
+                            )
+                            logger.critical(f"Panic Market {side} for {sym} executed.")
+                        except Exception as order_e:
+                            logger.error(f"Failed to execute panic liquidation for {sym}: {order_e}")
         except Exception as e:
             logger.error(f"Error during panic liquidation: {e}")
 
@@ -1818,6 +1855,20 @@ class ProductionTradingBot:
                 self.portfolio_state.equity = 1000.0
                 self.portfolio_state.free_margin = 1000.0
                 logger.info("Using mock 1000 USDT balance for Dry Run.")
+
+        # Check if kill switch is active at startup
+        try:
+            if self.redis.redis:
+                ks = await self.redis.redis.get("system:kill_switch:active")
+                val = (ks.decode("utf-8") if isinstance(ks, bytes) else str(ks or "")).strip().lower()
+                if val in ["true", "1", "yes"]:
+                    logger.critical("🚨 STARTUP BLOCKED: Kill switch is currently ACTIVE in Redis! Halting trading immediately.")
+                    self.emergency_stop = True
+                    self.trading_enabled = False
+                    settings.emergency_stop = True
+                    await self.panic_liquidate()
+        except Exception as ks_err:
+            logger.error(f"Failed to check initial kill switch: {ks_err}")
         
         tasks = [
             asyncio.create_task(self.listen_macro()),

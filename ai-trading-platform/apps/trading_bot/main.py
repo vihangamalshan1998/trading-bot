@@ -595,9 +595,39 @@ class ProductionTradingBot:
                         precomputed_actions = {}  # Force fallback
                         precomputed_critics = {}
                 
+                # Dynamic Opportunity-Ranked Priority Queue:
+                # 1. Existing positions & active limit orders are evaluated FIRST to guarantee instant SL/TP/trailing execution.
+                # 2. Flat candidate symbols are sorted in descending order of Opportunity Score (Confidence × Expected Return),
+                #    ensuring high-momentum breakouts on altcoins (e.g. NEAR, AVAX, LINK) get first access to open portfolio slots.
+                active_symbols = []
+                flat_candidates = []
+                
                 for sym in self.symbols:
                     if sym not in self.market_states:
                         continue
+                    pos = self.portfolio_state.positions.get(sym)
+                    has_active_pos = pos is not None and abs(pos.quantity) > 1e-5
+                    has_pending_order = sym in self.active_orders
+                    
+                    if has_active_pos or has_pending_order:
+                        active_symbols.append(sym)
+                    else:
+                        act_logits = precomputed_actions.get(sym)
+                        crit_vals = precomputed_critics.get(sym)
+                        score = 0.0
+                        if act_logits is not None and len(act_logits) >= 2 and crit_vals is not None and len(crit_vals) >= 1:
+                            raw_act = float(act_logits[0])
+                            raw_conf = float(1.0 / (1.0 + np.exp(-act_logits[1])))
+                            c5m = abs(float(crit_vals[0]))
+                            if abs(raw_act) > 0.20 and raw_conf >= 0.70:
+                                score = raw_conf * c5m
+                        flat_candidates.append((score, sym))
+                
+                # Sort flat symbols descending by opportunity score (highest score first)
+                flat_candidates.sort(key=lambda x: x[0], reverse=True)
+                sorted_eval_symbols = active_symbols + [sym for _, sym in flat_candidates]
+                
+                for sym in sorted_eval_symbols:
 
                         
                     # Check for pending Limit Order

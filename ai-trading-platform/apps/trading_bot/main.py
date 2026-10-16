@@ -489,22 +489,22 @@ class ProductionTradingBot:
                     session_name = "WEEKEND_LOW_LIQUIDITY"
                     session_conf_hurdle = 0.72
                     session_max_spread = 0.00045 # Tight 0.045% limit in low liquidity
-                    session_critic_hurdle = 0.40
+                    session_critic_hurdle = 0.42
                 elif 13.5 <= utc_hour < 21.0: # US New York Peak Trend & Volatility (13:30 - 21:00 UTC)
                     session_name = "US_NEW_YORK_PEAK"
                     session_conf_hurdle = 0.65
                     session_max_spread = 0.00060 # Standard 0.060%
-                    session_critic_hurdle = 0.30
+                    session_critic_hurdle = 0.35
                 elif 8.0 <= utc_hour < 13.5: # London Morning & Pre-NY (08:00 - 13:30 UTC)
                     session_name = "LONDON_TREND"
                     session_conf_hurdle = 0.65
                     session_max_spread = 0.00060
-                    session_critic_hurdle = 0.30
+                    session_critic_hurdle = 0.35
                 else: # Asia Off-Peak (00:00 - 08:00 UTC) Mean-Reversion Chop
                     session_name = "ASIA_OFF_PEAK_CHOP"
-                    session_conf_hurdle = 0.68
+                    session_conf_hurdle = 0.70
                     session_max_spread = 0.00050 # 0.050%
-                    session_critic_hurdle = 0.35
+                    session_critic_hurdle = 0.42
 
                 # Phase 2: Batched Inference Pre-Pass
                 # Collect ALL valid symbol state vectors and run ONE model call instead of 6.
@@ -922,13 +922,15 @@ class ProductionTradingBot:
                         # 1. Early exit if in solid impulse profit (>= +4.0% leveraged to cover fees)
                         is_profit_impulse = pnl_pct_leveraged >= 0.04
                         
-                        # 2. Smart Trap Escape Door: Only cut early if Critic confirms a REAL adverse breakdown (5m >= 0.60% or 1h >= 0.80% adverse move)
-                        # with high conviction (>= 0.70). Prevents cutting positions after 50s on minor 0.2% AI flickers!
+                        # 2. Smart Trap Escape Door: Only cut early if Critic confirms a REAL multi-timeframe adverse breakdown:
+                        # BOTH 5m AND 1h must agree on adverse direction (5m >= 0.40% AND 1h >= 0.70% adverse move),
+                        # or a severe 5m shock (5m >= 0.80% adverse) with high confidence (>= 0.72).
+                        # Prevents cutting positions after 15 minutes on minor 1h drift while 5m is favorable!
                         critic_vals = precomputed_critics.get(sym)
                         pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
                         pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
-                        is_trap_detected = (pos.quantity > 0 and (pred_ret_5m <= -0.60 or pred_ret_1h <= -0.80) and confidence >= 0.70) or \
-                                           (pos.quantity < 0 and (pred_ret_5m >= 0.60 or pred_ret_1h >= 0.80) and confidence >= 0.70)
+                        is_trap_detected = (pos.quantity > 0 and ((pred_ret_5m <= -0.40 and pred_ret_1h <= -0.70) or pred_ret_5m <= -0.80) and confidence >= 0.72) or \
+                                           (pos.quantity < 0 and ((pred_ret_5m >= 0.40 and pred_ret_1h >= 0.70) or pred_ret_5m >= 0.80) and confidence >= 0.72)
                         
                         is_protective_loss = pnl_pct_leveraged <= -0.12  # Allows surviving wicks up to -12% leveraged (-0.60% price move)
                         
@@ -1080,30 +1082,35 @@ class ProductionTradingBot:
 
                         # GUARD 3.7: Whale Market Order Flow Momentum (Whale Tracker Integration)
                         # Prevents taking adverse trades when institutional whales are heavily dumping or sweeping the book.
-                        # Cross-validates with real price momentum to avoid synthetic testnet lockouts!
+                        # On testnet, synthetic orders from testing bots are ignored so they don't block legitimate trades.
                         whale_data = self.whale_states.get(sym)
                         if whale_data and (time.time() - float(whale_data.get("timestamp", 0.0))) < 60.0:
                             w_buy = float(whale_data.get("whale_buy_pressure", 0.0))
                             w_sell = float(whale_data.get("whale_sell_pressure", 0.0))
                             
-                            sym_mom_15m = market.features[4] if market and len(market.features) == 90 else 0.0
-                            critic_vals = precomputed_critics.get(sym)
-                            c1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else 0.0
-                            
-                            # Extreme whale selling ($500k+ and 2.5x buy volume): Never buy into whale dumps UNLESS price/critic is surging
-                            if action_val > 0.20 and w_sell >= 500_000.0 and w_sell > (2.5 * w_buy):
-                                if sym_mom_15m > 0.002 or c1h > 0.10:
-                                    logger.info(f"[{sym}] ⚠️ BYPASSING WHALE SELL DEFENSE: Real price momentum (+{sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bullish. Overriding synthetic sell pressure (${w_sell:,.0f}).")
-                                else:
-                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale selling (${w_sell:,.0f} vs ${w_buy:,.0f}). Blocking Long entry!")
-                                    continue
-                            # Extreme whale buying ($500k+ and 2.5x sell volume): Never short into whale sweeps UNLESS price/critic is dumping
-                            elif action_val < -0.20 and w_buy >= 500_000.0 and w_buy > (2.5 * w_sell):
-                                if sym_mom_15m < -0.002 or c1h < -0.10:
-                                    logger.info(f"[{sym}] ⚠️ BYPASSING WHALE BUY DEFENSE: Real price momentum ({sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bearish. Overriding synthetic buy pressure (${w_buy:,.0f}).")
-                                else:
-                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale buying (${w_buy:,.0f} vs ${w_sell:,.0f}). Blocking Short entry!")
-                                    continue
+                            # On Binance Testnet, testnet accounts trade with millions of fake dollars
+                            if not settings.binance_testnet and not settings.allow_testnet:
+                                sym_mom_15m = market.features[4] if market and len(market.features) == 90 else 0.0
+                                critic_vals = precomputed_critics.get(sym)
+                                c1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else 0.0
+                                
+                                # Extreme whale selling ($500k+ and 2.5x buy volume): Never buy into whale dumps UNLESS price/critic is surging
+                                if action_val > 0.20 and w_sell >= 500_000.0 and w_sell > (2.5 * max(100_000.0, w_buy)):
+                                    if sym_mom_15m > 0.002 or c1h > 0.10:
+                                        logger.info(f"[{sym}] ⚠️ BYPASSING WHALE SELL DEFENSE: Real price momentum (+{sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bullish. Overriding synthetic sell pressure (${w_sell:,.0f}).")
+                                    else:
+                                        logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale selling (${w_sell:,.0f} vs ${w_buy:,.0f}). Blocking Long entry!")
+                                        continue
+                                # Extreme whale buying ($500k+ and 2.5x sell volume): Never short into whale sweeps UNLESS price/critic is dumping
+                                elif action_val < -0.20 and w_buy >= 500_000.0 and w_buy > (2.5 * max(100_000.0, w_sell)):
+                                    if sym_mom_15m < -0.002 or c1h < -0.10:
+                                        logger.info(f"[{sym}] ⚠️ BYPASSING WHALE BUY DEFENSE: Real price momentum ({sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bearish. Overriding synthetic buy pressure (${w_buy:,.0f}).")
+                                    else:
+                                        logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Extreme whale buying (${w_buy:,.0f} vs ${w_sell:,.0f}). Blocking Short entry!")
+                                        continue
+                            else:
+                                if w_sell >= 1_000_000.0 or w_buy >= 1_000_000.0:
+                                    logger.debug(f"[{sym}] 🐋 Testnet Whale Flow: Buy ${w_buy:,.0f} / Sell ${w_sell:,.0f} (Testnet telemetry only)")
 
                         # GUARD 3.8: Funding Rate Asymmetry & Squeeze Sniping
                         # Protects against paying high funding fees; exploits deep negative funding short squeezes
@@ -1236,8 +1243,14 @@ class ProductionTradingBot:
                         elif action_val < -0.20 and w_s >= 300_000.0 and w_s > (1.5 * w_b):
                             whale_mult = 1.05
 
-                    min_margin_bound = 0.04 if self.profit_ratchet_active else 0.08
-                    max_margin_bound = 0.12 if self.profit_ratchet_active else 0.25
+                    is_major = sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+                    if is_major:
+                        min_margin_bound = 0.04 if self.profit_ratchet_active else 0.06
+                        max_margin_bound = 0.08 if self.profit_ratchet_active else 0.15
+                    else:
+                        # Altcoins (ADA, XRP, LINK, AVAX, NEAR, LTC): 5% - 10% margin
+                        min_margin_bound = 0.03 if self.profit_ratchet_active else 0.05
+                        max_margin_bound = 0.06 if self.profit_ratchet_active else 0.10
                     dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult, min_margin_bound, max_margin_bound))
                     
                     max_margin_budget = max(0.0, self.portfolio_state.equity * dynamic_margin_pct)

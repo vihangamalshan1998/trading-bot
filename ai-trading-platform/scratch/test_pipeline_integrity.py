@@ -96,28 +96,28 @@ def test_pipeline_pure():
     assert should_block_long, "Should block LONG during frothy positive funding!"
     print("  ✅ Funding Rate Squeeze Sniper verified for both regimes!")
 
-    # 7. Verify Dynamic Margin Sizing (Clamped 8% to 25%)
+    # 7. Verify Dynamic Margin Sizing (Asset-Tiered: 5%-10% Altcoins, 6%-15% Majors)
     print("Testing 7: Dynamic Margin Sizing Bounds...")
     base_margin_pct = 0.15
     
-    # Case A: Low conviction altcoin
-    conviction_mult = 0.80
-    critic_mult = 0.85
-    beta_dampener = 0.75 # Altcoin
+    # Case A: Low conviction altcoin (ADA, XRP, etc.) -> clamped strictly to 5% - 10%
+    conviction_mult = 0.60
+    critic_mult = 0.80
+    beta_dampener = 0.70 # Altcoin
     vol_scale = 0.70
     whale_mult = 1.00
-    dyn_pct_low = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.08, 0.25))
-    assert dyn_pct_low == 0.08, f"Expected 0.08 floor, got {dyn_pct_low}"
+    dyn_pct_alt_low = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.05, 0.10))
+    assert dyn_pct_alt_low == 0.05, f"Expected 0.05 altcoin floor, got {dyn_pct_alt_low}"
     
-    # Case B: High conviction major coin with whale backing
+    # Case B: High conviction major coin (BTC, ETH) with whale backing -> clamped strictly to 6% - 15%
     conviction_mult = 1.30
     critic_mult = 1.15
     beta_dampener = 1.10
     vol_scale = 1.00
     whale_mult = 1.10
-    dyn_pct_high = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.08, 0.25))
-    assert dyn_pct_high == 0.25, f"Expected 0.25 ceiling, got {dyn_pct_high}"
-    print(f"  ✅ Dynamic Margin bounded strictly between 8.0% (${4500*0.08:.2f}) and 25.0% (${4500*0.25:.2f})!")
+    dyn_pct_major_high = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.06, 0.15))
+    assert dyn_pct_major_high == 0.15, f"Expected 0.15 major ceiling, got {dyn_pct_major_high}"
+    print(f"  ✅ Asset-Tiered Dynamic Margin verified: Altcoins bounded between 5.0% (${4500*0.05:.2f}) and 10.0% (${4500*0.10:.2f}); Majors bounded 6.0%-15.0% (${4500*0.15:.2f})!")
 
     # 8. Verify Post-Only Maker (GTX) Pegging Price Calculation
     print("Testing 8: Post-Only Maker GTX Pegging Calculations...")
@@ -140,25 +140,25 @@ def test_pipeline_pure():
     def get_session_params(weekday, utc_hour):
         is_weekend = (weekday >= 5)
         if is_weekend:
-            return "WEEKEND_LOW_LIQUIDITY", 0.72, 0.00045, 0.50
+            return "WEEKEND_LOW_LIQUIDITY", 0.72, 0.00045, 0.42
         elif 13.5 <= utc_hour < 21.0:
-            return "US_NEW_YORK_PEAK", 0.65, 0.00060, 0.40
+            return "US_NEW_YORK_PEAK", 0.65, 0.00060, 0.35
         elif 8.0 <= utc_hour < 13.5:
-            return "LONDON_TREND", 0.65, 0.00060, 0.40
+            return "LONDON_TREND", 0.65, 0.00060, 0.35
         else:
-            return "ASIA_OFF_PEAK_CHOP", 0.68, 0.00050, 0.45
+            return "ASIA_OFF_PEAK_CHOP", 0.70, 0.00050, 0.42
 
     # Check weekend
     w_name, w_conf, w_spread, w_critic = get_session_params(5, 14.0)
-    assert w_name == "WEEKEND_LOW_LIQUIDITY" and w_conf == 0.72 and w_spread == 0.00045 and w_critic == 0.50
+    assert w_name == "WEEKEND_LOW_LIQUIDITY" and w_conf == 0.72 and w_spread == 0.00045 and w_critic == 0.42
     
     # Check Asia off-peak chop
     a_name, a_conf, a_spread, a_critic = get_session_params(2, 4.0)
-    assert a_name == "ASIA_OFF_PEAK_CHOP" and a_conf == 0.68 and a_spread == 0.00050 and a_critic == 0.45
+    assert a_name == "ASIA_OFF_PEAK_CHOP" and a_conf == 0.70 and a_spread == 0.00050 and a_critic == 0.42
     
     # Check US NY Peak
     ny_name, ny_conf, ny_spread, ny_critic = get_session_params(3, 16.0)
-    assert ny_name == "US_NEW_YORK_PEAK" and ny_conf == 0.65 and ny_spread == 0.00060 and ny_critic == 0.40
+    assert ny_name == "US_NEW_YORK_PEAK" and ny_conf == 0.65 and ny_spread == 0.00060 and ny_critic == 0.35
     print("  ✅ Liquidity Clock accurately modulates hurdles & firewalls across all 4 regimes!")
 
     # 10. Verify Stale Position Pruner & Capital Recycling

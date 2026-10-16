@@ -46,9 +46,9 @@ class Settings(BaseSettings):
     max_portfolio_exposure_pct: float = Field(default=25.0, gt=0)
 
     max_leverage: int = Field(default=20, gt=0)
-    max_position_margin_pct: float = Field(default=0.25, gt=0, le=1.0)  # Max 25% of equity margin per coin
+    max_position_margin_pct: float = Field(default=0.15, gt=0, le=1.0)  # Max 15% of equity margin per coin (up to 15% on majors, 10% on alts)
     min_close_confidence: float = Field(default=0.60, ge=0, le=1.0)     # Avoid closing on noise
-    min_open_expected_return_pct: float = Field(default=0.30, ge=0)     # 0.30% min predicted move (ensures net profit after fees)
+    min_open_expected_return_pct: float = Field(default=0.38, ge=0)     # 0.38% min predicted move (ensures net profit after fees & spread)
     taker_fee_pct: float = Field(default=0.0005, ge=0)                  # 0.05% taker fee
     maker_fee_pct: float = Field(default=0.0002, ge=0)                  # 0.02% maker fee
 

@@ -1327,9 +1327,9 @@ class ProductionTradingBot:
                             continue
 
                     # GUARD 5: Institutional Dynamic Volatility & Conviction Margin Sizing (Kelly / ATR Scaling)
-                    # Dynamically scales between 6.0% and 15.0% based on conviction, horizon alignment, and coin volatility.
-                    # Halved to 8.0% base margin (4.0% to 12.0% dynamic) in Profit Ratchet Capital Preservation Mode.
-                    base_margin_pct = 0.08 if self.profit_ratchet_active else 0.15
+                    # Dynamically scales between 10.0% and 25.0% based on conviction, horizon alignment, and coin volatility.
+                    # Halved to 12.0% base margin (6.0% to 15.0% dynamic) in Profit Ratchet Capital Preservation Mode.
+                    base_margin_pct = 0.12 if self.profit_ratchet_active else 0.20
                     
                     # 1. Conviction Multiplier (0.80x to 1.30x scaled to session hurdle)
                     conviction_mult = float(np.clip(0.80 + (confidence - effective_conf_hurdle) * 1.5, 0.80, 1.30))
@@ -1356,7 +1356,7 @@ class ProductionTradingBot:
                     elif sym in ["SOLUSDT", "BNBUSDT", "LTCUSDT"]:
                         beta_dampener = 1.00
                     else: # ADA, XRP, NEAR, AVAX, LINK (wild altcoins)
-                        beta_dampener = 0.75
+                        beta_dampener = 0.85
                         
                     # 4. Volatility Scaling from Market Observation
                     vol_scale = 1.0
@@ -1376,12 +1376,13 @@ class ProductionTradingBot:
                         elif action_val < -0.20 and w_s >= whale_boost_hurdle and w_s > (1.5 * w_b):
                             whale_mult = 1.05
                     if is_major:
-                        min_margin_bound = 0.04 if self.profit_ratchet_active else 0.06
-                        max_margin_bound = 0.08 if self.profit_ratchet_active else 0.15
+                        # Major Coins (BTC, ETH, SOL, BNB): 12% - 25% margin
+                        min_margin_bound = 0.08 if self.profit_ratchet_active else 0.12
+                        max_margin_bound = 0.15 if self.profit_ratchet_active else 0.25
                     else:
-                        # Altcoins (ADA, XRP, LINK, AVAX, NEAR, LTC): 5% - 10% margin
-                        min_margin_bound = 0.03 if self.profit_ratchet_active else 0.05
-                        max_margin_bound = 0.06 if self.profit_ratchet_active else 0.10
+                        # Altcoins (ADA, XRP, LINK, AVAX, NEAR, LTC): 10% - 20% margin (Scaled Up)
+                        min_margin_bound = 0.06 if self.profit_ratchet_active else 0.10
+                        max_margin_bound = 0.12 if self.profit_ratchet_active else 0.20
                     dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult * liq_mult, min_margin_bound, max_margin_bound))
                     
                     # System 4: Dynamic High-Water Equity Auto-Compounder (Asymmetric Kelly Scaling)

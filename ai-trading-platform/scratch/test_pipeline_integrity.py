@@ -96,28 +96,28 @@ def test_pipeline_pure():
     assert should_block_long, "Should block LONG during frothy positive funding!"
     print("  ✅ Funding Rate Squeeze Sniper verified for both regimes!")
 
-    # 7. Verify Dynamic Margin Sizing (Asset-Tiered: 5%-10% Altcoins, 6%-15% Majors)
-    print("Testing 7: Dynamic Margin Sizing Bounds...")
-    base_margin_pct = 0.15
+    # 7. Verify Dynamic Margin Sizing (Scaled Up: 10%-20% Altcoins, 12%-25% Majors)
+    print("Testing 7: Scaled Up Dynamic Margin Sizing Bounds...")
+    base_margin_pct = 0.20
     
-    # Case A: Low conviction altcoin (ADA, XRP, etc.) -> clamped strictly to 5% - 10%
+    # Case A: Low conviction altcoin (ADA, XRP, etc.) -> clamped strictly to 10% - 20%
     conviction_mult = 0.60
     critic_mult = 0.80
-    beta_dampener = 0.70 # Altcoin
+    beta_dampener = 0.85 # Altcoin
     vol_scale = 0.70
     whale_mult = 1.00
-    dyn_pct_alt_low = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.05, 0.10))
-    assert dyn_pct_alt_low == 0.05, f"Expected 0.05 altcoin floor, got {dyn_pct_alt_low}"
+    dyn_pct_alt_low = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.10, 0.20))
+    assert dyn_pct_alt_low == 0.10, f"Expected 0.10 altcoin floor, got {dyn_pct_alt_low}"
     
-    # Case B: High conviction major coin (BTC, ETH) with whale backing -> clamped strictly to 6% - 15%
+    # Case B: High conviction major coin (BTC, ETH) with whale backing -> clamped strictly to 12% - 25%
     conviction_mult = 1.30
     critic_mult = 1.15
     beta_dampener = 1.10
     vol_scale = 1.00
     whale_mult = 1.10
-    dyn_pct_major_high = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.06, 0.15))
-    assert dyn_pct_major_high == 0.15, f"Expected 0.15 major ceiling, got {dyn_pct_major_high}"
-    print(f"  ✅ Asset-Tiered Dynamic Margin verified: Altcoins bounded between 5.0% (${4500*0.05:.2f}) and 10.0% (${4500*0.10:.2f}); Majors bounded 6.0%-15.0% (${4500*0.15:.2f})!")
+    dyn_pct_major_high = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult, 0.12, 0.25))
+    assert dyn_pct_major_high == 0.25, f"Expected 0.25 major ceiling, got {dyn_pct_major_high}"
+    print(f"  ✅ Scaled Up Dynamic Margin verified: Altcoins bounded between 10.0% (${4500*0.10:.2f}) and 20.0% (${4500*0.20:.2f}); Majors bounded 12.0%-25.0% (${4500*0.25:.2f})!")
 
     # 8. Verify Post-Only Maker (GTX) Pegging Price Calculation
     print("Testing 8: Post-Only Maker GTX Pegging Calculations...")

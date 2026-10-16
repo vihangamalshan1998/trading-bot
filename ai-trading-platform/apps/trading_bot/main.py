@@ -547,24 +547,24 @@ class ProductionTradingBot:
                 
                 if is_weekend:
                     session_name = "WEEKEND_LOW_LIQUIDITY"
-                    session_conf_hurdle = 0.72
+                    session_conf_hurdle = 0.65
                     session_max_spread = 0.00045 # Tight 0.045% limit in low liquidity
-                    session_critic_hurdle = 0.42
+                    session_critic_hurdle = 0.30
                 elif 13.5 <= utc_hour < 21.0: # US New York Peak Trend & Volatility (13:30 - 21:00 UTC)
                     session_name = "US_NEW_YORK_PEAK"
-                    session_conf_hurdle = 0.65
+                    session_conf_hurdle = 0.58
                     session_max_spread = 0.00060 # Standard 0.060%
-                    session_critic_hurdle = 0.35
+                    session_critic_hurdle = 0.22
                 elif 8.0 <= utc_hour < 13.5: # London Morning & Pre-NY (08:00 - 13:30 UTC)
                     session_name = "LONDON_TREND"
-                    session_conf_hurdle = 0.65
+                    session_conf_hurdle = 0.58
                     session_max_spread = 0.00060
-                    session_critic_hurdle = 0.35
+                    session_critic_hurdle = 0.22
                 else: # Asia Off-Peak (00:00 - 08:00 UTC) Mean-Reversion Chop
                     session_name = "ASIA_OFF_PEAK_CHOP"
-                    session_conf_hurdle = 0.70
+                    session_conf_hurdle = 0.64
                     session_max_spread = 0.00050 # 0.050%
-                    session_critic_hurdle = 0.42
+                    session_critic_hurdle = 0.30
 
                 # Phase 2: Batched Inference Pre-Pass
                 # Collect ALL valid symbol state vectors and run ONE model call instead of 6.
@@ -1132,15 +1132,15 @@ class ProductionTradingBot:
                             sym_critic = precomputed_critics.get(sym, [0.0, 0.0, 0.0])
                             sym_c1h = float(sym_critic[1]) if len(sym_critic) > 1 else 0.0
                             
-                            # Short Protection: If coin is rallying (15m momentum >= +0.20% OR 1h Critic >= +0.08%),
-                            # block OPEN_SHORT to prevent fighting an uptrend!
-                            if action_val < -0.20 and (sym_mom_15m >= 0.0020 or sym_c1h >= 0.08):
+                            # Short Protection: If coin is rallying (15m momentum >= +0.35% OR 1h Critic >= +0.20%),
+                            # block OPEN_SHORT to prevent fighting an authentic uptrend!
+                            if action_val < -0.20 and (sym_mom_15m >= 0.0035 or sym_c1h >= 0.20):
                                 logger.info(f"[{sym}] 🛑 ANTI-COUNTERTREND GUARD: Coin is rallying (15m: {sym_mom_15m*100:+.2f}%, 1h Critic: {sym_c1h:+.2f}%). Blocking counter-trend OPEN_SHORT!")
                                 continue
                                 
-                            # Long Protection: If coin is dumping (15m momentum <= -0.20% OR 1h Critic <= -0.08%),
+                            # Long Protection: If coin is dumping (15m momentum <= -0.35% OR 1h Critic <= -0.20%),
                             # block OPEN_LONG to avoid catching a falling knife!
-                            elif action_val > 0.20 and (sym_mom_15m <= -0.0020 or sym_c1h <= -0.08):
+                            elif action_val > 0.20 and (sym_mom_15m <= -0.0035 or sym_c1h <= -0.20):
                                 logger.info(f"[{sym}] 🛑 ANTI-COUNTERTREND GUARD: Coin is dumping (15m: {sym_mom_15m*100:+.2f}%, 1h Critic: {sym_c1h:+.2f}%). Blocking counter-trend OPEN_LONG!")
                                 continue
 
@@ -1370,10 +1370,10 @@ class ProductionTradingBot:
                             
                         # 2. 1-Hour & 4-Hour Multi-Horizon Swing Alignment (Strict Anti-Suicide Rule)
                         # Strictly forbids entering counter-trend positions into strong macro swing momentum
-                        if action_val > 0.2 and (pred_ret_1h < -0.05 or pred_ret_4h < -0.10):
+                        if action_val > 0.2 and (pred_ret_1h < -0.20 or pred_ret_4h < -0.30):
                             logger.info(f"[{sym}] 🛑 SKIPPING OPEN_LONG: 1h Critic ({pred_ret_1h:+.2f}%) or 4h Critic ({pred_ret_4h:+.2f}%) opposes Long swing!")
                             continue
-                        elif action_val < -0.2 and (pred_ret_1h > 0.05 or pred_ret_4h > 0.10):
+                        elif action_val < -0.2 and (pred_ret_1h > 0.20 or pred_ret_4h > 0.30):
                             logger.info(f"[{sym}] 🛑 SKIPPING OPEN_SHORT: 1h Critic ({pred_ret_1h:+.2f}%) or 4h Critic ({pred_ret_4h:+.2f}%) opposes Short swing!")
                             continue
 

@@ -678,14 +678,15 @@ class ProductionTradingBot:
                         
                     # Check for pending Limit Order
                     if sym in self.active_orders:
-                        time_elapsed = time.time() - self.active_orders[sym]['timestamp']
-                        if time_elapsed > 30:
-                            logger.info(f"[{sym}] POST-ONLY MAKER TIMEOUT (> 30s). Cancelling unfilled order...")
+                        is_close_order = 'trade_record' in self.active_orders[sym] and "CLOSE" in self.active_orders[sym]['trade_record'].get('side', '')
+                        timeout_limit = 15.0 if is_close_order else 30.0
+                        if time_elapsed > timeout_limit:
+                            logger.info(f"[{sym}] POST-ONLY MAKER TIMEOUT (> {timeout_limit:.0f}s, is_close={is_close_order}). Cancelling unfilled order...")
                             try:
                                 await self.binance.cancel_order(sym, self.active_orders[sym]['order_id'])
                             except Exception as e:
                                 logger.warning(f"[{sym}] Failed to cancel (maybe already filled/cancelled): {e}")
-                            # Revert optimistic portfolio update since order timed out and didn't fill
+                            
                             side = ""
                             qty = 0.0
                             if 'trade_record' in self.active_orders[sym]:
@@ -694,20 +695,31 @@ class ProductionTradingBot:
                                 price = float(self.active_orders[sym]['trade_record']['price'])
                                 margin_used = (qty * price) / settings.max_leverage
                                 
-                                if "OPEN_LONG" in side or "CLOSE_SHORT" in side:
-                                    self.portfolio_state.positions[sym].quantity -= qty
-                                elif "CLOSE_LONG" in side or "OPEN_SHORT" in side:
-                                    self.portfolio_state.positions[sym].quantity += qty
-                                    
-                                if abs(self.portfolio_state.positions[sym].quantity) < 1e-5:
-                                    self.portfolio_state.positions[sym].quantity = 0.0
-                                    self.portfolio_state.positions[sym].entry_price = 0.0
-                                    self.position_entry_times[sym] = 0.0
-                                    
-                                if "OPEN" in side:
+                                # If an unfilled MAKER CLOSE timed out, fall back immediately to MARKET CLOSE to secure the exit!
+                                if "CLOSE" in side and qty > 0 and (self.trading_enabled and not self.dry_run):
+                                    logger.info(f"[{sym}] ⏰ MAKER EXIT TIMEOUT. Executing immediate MARKET CLOSE fallback to secure exit!")
+                                    close_binance_side = "BUY" if "SHORT" in side else "SELL"
+                                    try:
+                                        await self.binance.create_order(sym, close_binance_side, qty, f"ai_mkt_fb_{uuid.uuid4().hex[:8]}", order_type="MARKET", reduce_only=True)
+                                        self.last_close_time[sym] = time.time()
+                                        self.portfolio_state.positions[sym].quantity = 0.0
+                                        self.portfolio_state.positions[sym].entry_price = 0.0
+                                        self.position_entry_times[sym] = 0.0
+                                    except Exception as fb_err:
+                                        logger.warning(f"[{sym}] Fallback market exit error: {fb_err}")
+                                else:
+                                    # Revert optimistic portfolio update for OPEN order since it timed out and didn't fill
+                                    if "OPEN_LONG" in side:
+                                        self.portfolio_state.positions[sym].quantity -= qty
+                                    elif "OPEN_SHORT" in side:
+                                        self.portfolio_state.positions[sym].quantity += qty
+                                        
+                                    if abs(self.portfolio_state.positions[sym].quantity) < 1e-5:
+                                        self.portfolio_state.positions[sym].quantity = 0.0
+                                        self.portfolio_state.positions[sym].entry_price = 0.0
+                                        self.position_entry_times[sym] = 0.0
+                                        
                                     self.portfolio_state.free_margin += margin_used
-                                elif "CLOSE" in side:
-                                    self.portfolio_state.free_margin -= margin_used
 
                             # Partial-Fill Micro-Stub Protection:
                             # If an OPEN order timed out and only a tiny micro-stub (< 25% of intended size) filled,
@@ -1729,22 +1741,39 @@ class ProductionTradingBot:
                                                     if binance_ep > 0:
                                                         entry_px = binance_ep
                                                         self.portfolio_state.positions[sym].entry_price = binance_ep
-                                                    break
+                                                        break
                                         except Exception as e:
                                             logger.warning(f"[{sym}] Could not pre-fetch entry price from Binance: {e}")
 
-                                    # Execute on Binance
+                                    # Execute on Binance (Hybrid Maker/Market Engine)
                                     client_order_id = f"ai_bot_{uuid.uuid4().hex[:10]}"
                                     is_closing = "CLOSE" in side
-                                    is_market_exit = is_closing or exit_override
+                                    
+                                    # Emergency exits must ALWAYS execute via immediate MARKET order for 100% execution certainty
+                                    is_emergency_exit = (
+                                        hard_stop_triggered or 
+                                        sudden_shock_triggered or 
+                                        (is_closing and pnl_pct_leveraged <= -0.10)
+                                    )
+                                    
+                                    # Planned profitable exits (Take-Profit, Trailing Stop, Free-Roll, or profitable AI Close >= +1.5%)
+                                    # are routed through Post-Only Maker GTX to capture the ultra-low 0.02% Maker fee (saves ~43% on fees!)
+                                    is_maker_exit = is_closing and not is_emergency_exit and (
+                                        pnl_pct_leveraged >= 0.015 or 
+                                        partial_tp_triggered or 
+                                        hard_take_profit_triggered or 
+                                        trailing_stop_triggered
+                                    )
+                                    
+                                    is_market_exit = is_emergency_exit or (is_closing and not is_maker_exit) or (exit_override and not is_maker_exit)
                                     
                                     if is_market_exit:
                                         exit_reason = "HARD STOP" if hard_stop_triggered else ("HARD TAKE-PROFIT" if hard_take_profit_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else ("STALE PRUNE" if stale_trade_triggered else ("FREE-ROLL BREAKEVEN" if freeroll_stop_triggered else ("PARTIAL TP 50%" if partial_tp_triggered else "AI CLOSE"))))))
                                         logger.info(f"[{sym}] MARKET INTENT ({exit_reason}): {binance_side} {qty_str}")
                                         try:
-                                             await self.binance.cancel_all_orders(sym)
+                                              await self.binance.cancel_all_orders(sym)
                                         except Exception as e:
-                                             logger.warning(f"[{sym}] Failed to cancel lingering orders: {e}")
+                                              logger.warning(f"[{sym}] Failed to cancel lingering orders: {e}")
                                         order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="MARKET", reduce_only=True)
                                         self.active_orders.pop(sym, None)
                                         self.last_close_time[sym] = time.time()
@@ -1755,19 +1784,26 @@ class ProductionTradingBot:
                                     else:
                                         # Institutional Post-Only Maker Execution (GTX)
                                         # Forces Maker fill (0.02% fee) and strictly forbids taker fill (0.05% fee)
-                                        logger.info(f"[{sym}] 🏛️ POST-ONLY MAKER INTENT (GTX): {binance_side} at {limit_price_str}")
+                                        exit_tag = " [PROFIT MAKER EXIT - 0.02% FEE]" if is_closing else ""
+                                        logger.info(f"[{sym}] 🏛️ POST-ONLY MAKER INTENT (GTX){exit_tag}: {binance_side} at {limit_price_str} (reduce_only={is_closing})")
                                         try:
-                                            order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTX", reduce_only=False)
+                                            order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTX", reduce_only=is_closing)
                                         except Exception as e:
-                                            # If post-only was rejected (-5022: would match and take liquidity), re-peg 1 tick deeper
+                                            # If post-only was rejected (-5022: would match and take liquidity)
                                             if "-5022" in str(e) or "Post Only" in str(e):
-                                                logger.info(f"[{sym}] Post-Only GTX would cross book. Re-pegging 1 tick deeper...")
-                                                if binance_side == "BUY":
-                                                    limit_price -= tick_size
+                                                if is_closing:
+                                                    # For profit close, if limit crosses, execute immediate market close to capture the banked gain!
+                                                    logger.info(f"[{sym}] Maker profit exit would cross book. Executing immediate MARKET exit to bank gain!")
+                                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="MARKET", reduce_only=True)
+                                                    is_market_exit = True
                                                 else:
-                                                    limit_price += tick_size
-                                                limit_price_str = sym_config.format_price(limit_price)
-                                                order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTX", reduce_only=False)
+                                                    logger.info(f"[{sym}] Post-Only GTX would cross book. Re-pegging 1 tick deeper...")
+                                                    if binance_side == "BUY":
+                                                        limit_price -= tick_size
+                                                    else:
+                                                        limit_price += tick_size
+                                                    limit_price_str = sym_config.format_price(limit_price)
+                                                    order_res = await self.binance.create_order(sym, binance_side, float(qty_str), client_order_id, order_type="LIMIT", price=limit_price_str, time_in_force="GTX", reduce_only=False)
                                             else:
                                                 raise e
                                     

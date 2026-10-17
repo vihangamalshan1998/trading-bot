@@ -413,41 +413,48 @@ class ProductionTradingBot:
                                 "marginType": p.get("marginType", "cross")
                             })
 
-                            # Auto-reconcile missing OPEN trade in history (e.g. if order filled during PM2 restart)
+                            # Auto-reconcile missing OPEN trade in history (ONLY for positions recovered after PM2 restart)
                             if self.redis.redis:
                                 try:
-                                    raw_history = await self.redis.redis.lrange("dashboard:trade_history", 0, 19)
-                                    has_open_record = False
-                                    for item in raw_history:
-                                        try:
-                                            th = json.loads(item)
-                                            if th.get("symbol") == sym:
-                                                if "OPEN" in th.get("side", ""):
-                                                    has_open_record = True
-                                                break  # Most recent trade for this symbol found
-                                        except Exception:
-                                            pass
-                                    
+                                    recent_close = (time.time() - self.last_close_time.get(sym, 0)) < 60.0
+                                    inflight_order = sym in self.active_orders
                                     entry_px = float(p.get("entryPrice", 0))
-                                    if not has_open_record and entry_px > 0:
+                                    notional = abs(amt) * entry_px
+                                    
+                                    # Never auto-reconcile if a close just happened, order is in-flight, or it's sub-$10 micro-dust
+                                    if not recent_close and not inflight_order and entry_px > 0 and notional >= 10.0:
+                                        raw_history = await self.redis.redis.lrange("dashboard:trade_history", 0, 19)
+                                        has_open_record = False
+                                        for item in raw_history:
+                                            try:
+                                                th = json.loads(item)
+                                                if th.get("symbol") == sym:
+                                                    if "OPEN" in th.get("side", ""):
+                                                        has_open_record = True
+                                                    break  # Most recent trade for this symbol found
+                                            except Exception:
+                                                pass
+                                        
+                                        # Only reconcile if position has been open for > 15s (proves it's a persistent recovered position, not a transient order)
                                         entry_t = self.position_entry_times.get(sym, time.time())
-                                        open_record = {
-                                            "timestamp": entry_t,
-                                            "symbol": sym,
-                                            "side": "OPEN_LONG" if amt > 0 else "OPEN_SHORT",
-                                            "quantity": abs(amt),
-                                            "price": entry_px,
-                                            "confidence": 0.85,
-                                            "order_id": f"synced_{int(entry_t)}",
-                                            "entry_price": entry_px,
-                                            "gross_pnl": 0.0,
-                                            "fees_paid": 0.0,
-                                            "realized_pnl": 0.0,
-                                            "roi_pct": 0.0
-                                        }
-                                        await self.redis.redis.lpush("dashboard:trade_history", json.dumps(open_record))
-                                        await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
-                                        logger.info(f"[{sym}] 🔄 Auto-reconciled missing OPEN trade into Dashboard History ({open_record['side']} {abs(amt)} at ${entry_px})")
+                                        if not has_open_record and (time.time() - entry_t) > 15.0:
+                                            open_record = {
+                                                "timestamp": entry_t,
+                                                "symbol": sym,
+                                                "side": "OPEN_LONG" if amt > 0 else "OPEN_SHORT",
+                                                "quantity": abs(amt),
+                                                "price": entry_px,
+                                                "confidence": 0.85,
+                                                "order_id": f"synced_{int(entry_t)}",
+                                                "entry_price": entry_px,
+                                                "gross_pnl": 0.0,
+                                                "fees_paid": 0.0,
+                                                "realized_pnl": 0.0,
+                                                "roi_pct": 0.0
+                                            }
+                                            await self.redis.redis.lpush("dashboard:trade_history", json.dumps(open_record))
+                                            await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
+                                            logger.info(f"[{sym}] 🔄 Auto-reconciled recovered OPEN trade into Dashboard History ({open_record['side']} {abs(amt)} at ${entry_px})")
                                 except Exception as hist_err:
                                     logger.warning(f"[{sym}] History auto-reconcile check failed: {hist_err}")
 

@@ -547,22 +547,22 @@ class ProductionTradingBot:
                 
                 if is_weekend:
                     session_name = "WEEKEND_LOW_LIQUIDITY"
-                    session_conf_hurdle = 0.68
+                    session_conf_hurdle = settings.conf_hurdle_weekend
                     session_max_spread = 0.00045 # Tight 0.045% limit in low liquidity
                     session_critic_hurdle = 0.30
                 elif 13.5 <= utc_hour < 21.0: # US New York Peak Trend & Volatility (13:30 - 21:00 UTC)
                     session_name = "US_NEW_YORK_PEAK"
-                    session_conf_hurdle = 0.62
+                    session_conf_hurdle = settings.conf_hurdle_ny_peak
                     session_max_spread = 0.00060 # Standard 0.060%
                     session_critic_hurdle = 0.22
                 elif 8.0 <= utc_hour < 13.5: # London Morning & Pre-NY (08:00 - 13:30 UTC)
                     session_name = "LONDON_TREND"
-                    session_conf_hurdle = 0.62
+                    session_conf_hurdle = settings.conf_hurdle_london
                     session_max_spread = 0.00060
                     session_critic_hurdle = 0.22
                 else: # Asia Off-Peak (00:00 - 08:00 UTC) Mean-Reversion Chop
                     session_name = "ASIA_OFF_PEAK_CHOP"
-                    session_conf_hurdle = 0.67
+                    session_conf_hurdle = settings.conf_hurdle_asia
                     session_max_spread = 0.00050 # 0.050%
                     session_critic_hurdle = 0.30
 

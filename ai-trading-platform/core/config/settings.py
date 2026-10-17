@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     max_position_margin_pct: float = Field(default=0.25, gt=0, le=1.0)  # Max 25% of equity margin per coin (up to 25% on majors, 20% on alts)
     min_close_confidence: float = Field(default=0.60, ge=0, le=1.0)     # Avoid closing on noise
     min_open_expected_return_pct: float = Field(default=0.22, ge=0)     # 0.22% min predicted move (ensures net profit after fees & spread)
+    
+    # Institutional Session Confidence Matrix (Middle Ground Calibration)
+    conf_hurdle_ny_peak: float = Field(default=0.62, ge=0.0, le=1.0)   # US New York Peak Trend (13:30 - 21:00 UTC)
+    conf_hurdle_london: float = Field(default=0.62, ge=0.0, le=1.0)    # London Trend (08:00 - 13:30 UTC)
+    conf_hurdle_asia: float = Field(default=0.67, ge=0.0, le=1.0)      # Asia Off-Peak Chop (00:00 - 08:00 UTC)
+    conf_hurdle_weekend: float = Field(default=0.68, ge=0.0, le=1.0)   # Weekend Low Liquidity (Saturday & Sunday)
+    
     taker_fee_pct: float = Field(default=0.0005, ge=0)                  # 0.05% taker fee
     maker_fee_pct: float = Field(default=0.0002, ge=0)                  # 0.02% maker fee
 

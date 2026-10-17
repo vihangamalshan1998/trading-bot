@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     conf_hurdle_asia: float = Field(default=0.67, ge=0.0, le=1.0)      # Asia Off-Peak Chop (00:00 - 08:00 UTC)
     conf_hurdle_weekend: float = Field(default=0.68, ge=0.0, le=1.0)   # Weekend Low Liquidity (Saturday & Sunday)
     
+    # Dynamic Margin Sizing Bounds (Option A: 15%-25% Majors, 12%-18% Alts)
+    major_min_margin_pct: float = Field(default=0.15, ge=0.01, le=0.50)  # 15% min margin on majors (BTC, ETH, SOL, BNB)
+    major_max_margin_pct: float = Field(default=0.25, ge=0.01, le=0.50)  # 25% max margin on majors
+    alt_min_margin_pct: float = Field(default=0.12, ge=0.01, le=0.50)    # 12% min margin on altcoins (ADA, XRP, NEAR, etc.)
+    alt_max_margin_pct: float = Field(default=0.18, ge=0.01, le=0.50)    # 18% max margin on altcoins
+    
     taker_fee_pct: float = Field(default=0.0005, ge=0)                  # 0.05% taker fee
     maker_fee_pct: float = Field(default=0.0002, ge=0)                  # 0.02% maker fee
 

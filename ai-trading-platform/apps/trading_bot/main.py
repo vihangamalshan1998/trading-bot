@@ -1151,31 +1151,52 @@ class ProductionTradingBot:
                         is_macro_up = (btc_mom_15m > 0.008 and eth_mom_15m > 0.008) or \
                                       (btc_critic_1h > 0.40 and eth_critic_1h > 0.40)
 
-                        if not has_high_conviction:
-                            if action_val > 0.2 and is_macro_down:
-                                logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH severe breakdown (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%). Blocking counter-trend OPEN_LONG!")
-                                continue
-                            elif action_val < -0.2 and is_macro_up:
-                                logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH severe breakout (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%). Blocking counter-trend OPEN_SHORT!")
-                                continue
-                        elif has_high_conviction and ((action_val > 0.2 and is_macro_down) or (action_val < -0.2 and is_macro_up)):
-                            logger.info(f"[{sym}] 🚀 HIGH-CONVICTION BYPASS: Proceeding with trade (Confidence: {confidence:.2f}, 5m Critic: {sym_c5m:+.2f}%) despite macro divergence.")
+                        # Macro Trend Gate: BTC & ETH Market-Wide Breakdown/Breakout Protection
+                        if action_val > 0.2 and is_macro_down:
+                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH severe breakdown (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%). Blocking counter-trend OPEN_LONG!")
+                            continue
+                        elif action_val < -0.2 and is_macro_up:
+                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH severe breakout (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%). Blocking counter-trend OPEN_SHORT!")
+                            continue
 
-                        # GUARD 3.1: Anti-Countertrend Iron Guard (Asset-Level Trend Protection)
+                        # GUARD 3.1: Anti-Countertrend Iron Guard & Falling Knife Gate (Asset-Level Protection)
                         # Forbids opening Shorts into an asset that is actively rallying,
-                        # and forbids opening Longs into an asset that is actively dumping!
+                        # and strictly forbids opening Longs into an asset that is actively dumping!
                         if market and len(market.features) == 90:
                             sym_mom_15m = float(market.features[4])
                             sym_critic = precomputed_critics.get(sym, [0.0, 0.0, 0.0])
                             sym_c1h = float(sym_critic[1]) if len(sym_critic) > 1 else 0.0
+                            sym_c4h = float(sym_critic[2]) if len(sym_critic) > 2 else sym_c1h
+                            ret_24h = float(market.features[6]) if len(market.features) > 6 else 0.0
                             
-                            # Short Protection: If coin is rallying (15m momentum >= +0.35% OR 1h Critic >= +0.20%),
+                            # 1. Macro Trend Gate (Falling Knife Defense & Bear-Market Reversal Confirmation):
+                            # When the 4-Hour Critic is negative (<= -0.30%) OR the coin is down >= 3.0% over 24h,
+                            # strictly forbid OPEN_LONG unless BOTH the 1-Hour Critic has confirmed a real reversal (> 0.00%)
+                            # AND 15-minute momentum has turned positive (> 0.00%).
+                            # This completely prevents buying dead-cat bounces in a heavy bear trend!
+                            if action_val > 0.20:
+                                is_macro_bearish = (sym_c4h <= -0.30 or ret_24h <= -0.030)
+                                if is_macro_bearish and (sym_c1h <= 0.00 or sym_mom_15m <= 0.00):
+                                    logger.info(f"[{sym}] 🛑 MACRO TREND GATE: Coin is in heavy macro downtrend (4h Critic: {sym_c4h:+.2f}%, 24h: {ret_24h*100:+.2f}%). Blocking falling knife OPEN_LONG until 1h/15m confirms reversal (1h Critic: {sym_c1h:+.2f}%, 15m: {sym_mom_15m*100:+.2f}%)!")
+                                    continue
+                                    
+                            # Symmetric Rocket-Ship Defense:
+                            # When 4-Hour Critic is positive (>= +0.30%) OR the coin is up >= 3.0% over 24h,
+                            # strictly forbid OPEN_SHORT unless BOTH the 1-Hour Critic has confirmed a real reversal (< 0.00%)
+                            # AND 15-minute momentum has turned negative (< 0.00%).
+                            elif action_val < -0.20:
+                                is_macro_bullish = (sym_c4h >= 0.30 or ret_24h >= 0.030)
+                                if is_macro_bullish and (sym_c1h >= 0.00 or sym_mom_15m >= 0.00):
+                                    logger.info(f"[{sym}] 🛑 MACRO TREND GATE: Coin is in heavy macro uptrend (4h Critic: {sym_c4h:+.2f}%, 24h: {ret_24h*100:+.2f}%). Blocking counter-trend OPEN_SHORT until 1h/15m confirms reversal (1h Critic: {sym_c1h:+.2f}%, 15m: {sym_mom_15m*100:+.2f}%)!")
+                                    continue
+                            
+                            # 2. Short Protection: If coin is rallying (15m momentum >= +0.35% OR 1h Critic >= +0.20%),
                             # block OPEN_SHORT to prevent fighting an authentic uptrend!
                             if action_val < -0.20 and (sym_mom_15m >= 0.0035 or sym_c1h >= 0.20):
                                 logger.info(f"[{sym}] 🛑 ANTI-COUNTERTREND GUARD: Coin is rallying (15m: {sym_mom_15m*100:+.2f}%, 1h Critic: {sym_c1h:+.2f}%). Blocking counter-trend OPEN_SHORT!")
                                 continue
                                 
-                            # Long Protection: If coin is dumping (15m momentum <= -0.35% OR 1h Critic <= -0.20%),
+                            # 3. Long Protection: If coin is dumping (15m momentum <= -0.35% OR 1h Critic <= -0.20%),
                             # block OPEN_LONG to avoid catching a falling knife!
                             elif action_val > 0.20 and (sym_mom_15m <= -0.0035 or sym_c1h <= -0.20):
                                 logger.info(f"[{sym}] 🛑 ANTI-COUNTERTREND GUARD: Coin is dumping (15m: {sym_mom_15m*100:+.2f}%, 1h Critic: {sym_c1h:+.2f}%). Blocking counter-trend OPEN_LONG!")
@@ -1407,17 +1428,25 @@ class ProductionTradingBot:
                             
                         # 2. 1-Hour & 4-Hour Multi-Horizon Swing Alignment (Strict Anti-Suicide Rule)
                         # Strictly forbids entering counter-trend positions into strong macro swing momentum
-                        if action_val > 0.2 and (pred_ret_1h < -0.20 or pred_ret_4h < -0.30):
-                            logger.info(f"[{sym}] 🛑 SKIPPING OPEN_LONG: 1h Critic ({pred_ret_1h:+.2f}%) or 4h Critic ({pred_ret_4h:+.2f}%) opposes Long swing!")
-                            continue
-                        elif action_val < -0.2 and (pred_ret_1h > 0.20 or pred_ret_4h > 0.30):
-                            logger.info(f"[{sym}] 🛑 SKIPPING OPEN_SHORT: 1h Critic ({pred_ret_1h:+.2f}%) or 4h Critic ({pred_ret_4h:+.2f}%) opposes Short swing!")
-                            continue
+                        if action_val > 0.2:
+                            if pred_ret_1h < -0.20:
+                                logger.info(f"[{sym}] 🛑 SKIPPING OPEN_LONG: 1h Critic ({pred_ret_1h:+.2f}%) opposes Long swing!")
+                                continue
+                            if pred_ret_4h < -0.30 and pred_ret_1h <= 0.00:
+                                logger.info(f"[{sym}] 🛑 SKIPPING OPEN_LONG: 4h Critic ({pred_ret_4h:+.2f}%) is heavily bearish and 1h Critic ({pred_ret_1h:+.2f}%) has not confirmed reversal!")
+                                continue
+                        elif action_val < -0.2:
+                            if pred_ret_1h > 0.20:
+                                logger.info(f"[{sym}] 🛑 SKIPPING OPEN_SHORT: 1h Critic ({pred_ret_1h:+.2f}%) opposes Short swing!")
+                                continue
+                            if pred_ret_4h > 0.30 and pred_ret_1h >= 0.00:
+                                logger.info(f"[{sym}] 🛑 SKIPPING OPEN_SHORT: 4h Critic ({pred_ret_4h:+.2f}%) is heavily bullish and 1h Critic ({pred_ret_1h:+.2f}%) has not confirmed reversal!")
+                                continue
 
                     # GUARD 5: Institutional Dynamic Volatility & Conviction Margin Sizing (Kelly / ATR Scaling)
-                    # Dynamically scales between 10.0% and 25.0% based on conviction, horizon alignment, and coin volatility.
-                    # Halved to 12.0% base margin (6.0% to 15.0% dynamic) in Profit Ratchet Capital Preservation Mode.
-                    base_margin_pct = 0.12 if self.profit_ratchet_active else 0.20
+                    # Dynamically scales between 12.0% and 25.0% based on conviction, horizon alignment, and coin volatility.
+                    # Halved to 16.0% base margin in Profit Ratchet Capital Preservation Mode.
+                    base_margin_pct = 0.16 if self.profit_ratchet_active else 0.25
                     
                     # 1. Conviction Multiplier (0.80x to 1.30x scaled to session hurdle)
                     conviction_mult = float(np.clip(0.80 + (confidence - effective_conf_hurdle) * 1.5, 0.80, 1.30))
@@ -1464,13 +1493,13 @@ class ProductionTradingBot:
                         elif action_val < -0.20 and w_s >= whale_boost_hurdle and w_s > (1.5 * w_b):
                             whale_mult = 1.05
                     if is_major:
-                        # Major Coins (BTC, ETH, SOL, BNB): 10% - 20% margin
-                        min_margin_bound = 0.08 if self.profit_ratchet_active else 0.10
-                        max_margin_bound = 0.14 if self.profit_ratchet_active else 0.20
+                        # Major Coins (BTC, ETH, SOL, BNB): 15% - 25% margin (Option A)
+                        min_margin_bound = 0.10 if self.profit_ratchet_active else settings.major_min_margin_pct
+                        max_margin_bound = 0.18 if self.profit_ratchet_active else settings.major_max_margin_pct
                     else:
-                        # Altcoins (ADA, XRP, LINK, AVAX, NEAR, LTC): 8% - 12% margin (Capped to slash fee bleed)
-                        min_margin_bound = 0.06 if self.profit_ratchet_active else 0.08
-                        max_margin_bound = 0.10 if self.profit_ratchet_active else 0.12
+                        # Altcoins (ADA, XRP, LINK, AVAX, NEAR, LTC): 12% - 18% margin (Option A)
+                        min_margin_bound = 0.08 if self.profit_ratchet_active else settings.alt_min_margin_pct
+                        max_margin_bound = 0.14 if self.profit_ratchet_active else settings.alt_max_margin_pct
                     dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult * liq_mult, min_margin_bound, max_margin_bound))
                     
                     # System 4: Dynamic High-Water Equity Auto-Compounder (Asymmetric Kelly Scaling)
@@ -1573,18 +1602,18 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🔒 ONE-TRADE-ONE-ENTRY: Position already active ({abs(pos.quantity):.4f}). Strictly forbidding add-ons!")
                                 continue
                             
-                            # Clean One-Shot Entry (Forbid Micro-Dust Starters)
-                            # A full swing position requires at least $100-$150 margin ($1,500-$2,500 notional at 10x-20x leverage).
-                            # Never open tiny $20 dust orders that leave positions underfunded!
-                            min_viable_notional = 1500.0 if not is_major else 2500.0
+                            # Clean One-Shot Entry (Dynamically scaled to account size)
+                            # Minimum viable size is at least 60% of target budget (min $25 notional for small live accounts)
+                            min_viable_notional = max(25.0, current_eq * min_margin_bound * pos.leverage * 0.60)
                             if notional_requested < min_viable_notional:
                                 logger.info(f"[{sym}] Skipping initial entry: notional ${notional_requested:.2f} < ${min_viable_notional:.2f} minimum viable size. Waiting for full margin to ensure clean one-shot entry!")
                                 continue
                             qty_raw = target_qty
                                 
-                            # Filter micro-dust orders under $100 notional to prevent fee bleed
-                            if (qty_raw * market.mid_price) < 100.0:
-                                logger.info(f"[{sym}] Skipping micro-order: notional ${qty_raw * market.mid_price:.2f} < $100.00 minimum.")
+                            # Filter micro-dust orders under minimum symbol notional
+                            dust_floor = max(10.0, min(50.0, current_eq * 0.05 * pos.leverage))
+                            if (qty_raw * market.mid_price) < dust_floor:
+                                logger.info(f"[{sym}] Skipping micro-order: notional ${qty_raw * market.mid_price:.2f} < ${dust_floor:.2f} minimum.")
                                 continue
                         else:
                             # For CLOSE actions, we close the entire existing quantity, UNLESS it's a 50% partial TP!

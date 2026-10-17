@@ -547,22 +547,22 @@ class ProductionTradingBot:
                 
                 if is_weekend:
                     session_name = "WEEKEND_LOW_LIQUIDITY"
-                    session_conf_hurdle = 0.65
+                    session_conf_hurdle = 0.68
                     session_max_spread = 0.00045 # Tight 0.045% limit in low liquidity
                     session_critic_hurdle = 0.30
                 elif 13.5 <= utc_hour < 21.0: # US New York Peak Trend & Volatility (13:30 - 21:00 UTC)
                     session_name = "US_NEW_YORK_PEAK"
-                    session_conf_hurdle = 0.58
+                    session_conf_hurdle = 0.62
                     session_max_spread = 0.00060 # Standard 0.060%
                     session_critic_hurdle = 0.22
                 elif 8.0 <= utc_hour < 13.5: # London Morning & Pre-NY (08:00 - 13:30 UTC)
                     session_name = "LONDON_TREND"
-                    session_conf_hurdle = 0.58
+                    session_conf_hurdle = 0.62
                     session_max_spread = 0.00060
                     session_critic_hurdle = 0.22
                 else: # Asia Off-Peak (00:00 - 08:00 UTC) Mean-Reversion Chop
                     session_name = "ASIA_OFF_PEAK_CHOP"
-                    session_conf_hurdle = 0.64
+                    session_conf_hurdle = 0.67
                     session_max_spread = 0.00050 # 0.050%
                     session_critic_hurdle = 0.30
 
@@ -679,6 +679,8 @@ class ProductionTradingBot:
                             except Exception as e:
                                 logger.warning(f"[{sym}] Failed to cancel (maybe already filled/cancelled): {e}")
                             # Revert optimistic portfolio update since order timed out and didn't fill
+                            side = ""
+                            qty = 0.0
                             if 'trade_record' in self.active_orders[sym]:
                                 side = self.active_orders[sym]['trade_record']['side']
                                 qty = float(self.active_orders[sym]['trade_record']['quantity'])
@@ -699,8 +701,43 @@ class ProductionTradingBot:
                                     self.portfolio_state.free_margin += margin_used
                                 elif "CLOSE" in side:
                                     self.portfolio_state.free_margin -= margin_used
-                            del self.active_orders[sym]
 
+                            # Partial-Fill Micro-Stub Protection:
+                            # If an OPEN order timed out and only a tiny micro-stub (< 25% of intended size) filled,
+                            # market-close the dust immediately to eliminate asymmetric underfunded risk!
+                            if "OPEN" in side and qty > 0 and (self.trading_enabled and not self.dry_run):
+                                try:
+                                    active_positions = await self.binance.get_positions()
+                                    matching = [p for p in active_positions if p.get('symbol') == sym]
+                                    actual_pos = matching[0] if matching else None
+                                    actual_qty = abs(float(actual_pos.get('positionAmt', 0.0))) if actual_pos else 0.0
+                                    
+                                    if actual_qty > 0 and actual_qty < (0.25 * qty):
+                                        logger.warning(f"[{sym}] 🧹 MICRO-STUB DETECTED: Only {actual_qty:.4f} filled out of {qty:.4f} ({actual_qty/qty*100:.1f}%). Market-closing dust stub immediately to eliminate asymmetric risk!")
+                                        close_side = "SELL" if "LONG" in side else "BUY"
+                                        sym_config = registry.get_symbol(sym)
+                                        stub_qty_str = sym_config.format_quantity(actual_qty)
+                                        if float(stub_qty_str) > 0:
+                                            await self.binance.create_order(
+                                                symbol=sym,
+                                                side=close_side,
+                                                quantity=float(stub_qty_str),
+                                                client_order_id=f"ai_stub_{uuid.uuid4().hex[:10]}",
+                                                order_type="MARKET",
+                                                reduce_only=True
+                                            )
+                                        self.portfolio_state.positions[sym].quantity = 0.0
+                                        self.portfolio_state.positions[sym].entry_price = 0.0
+                                        self.position_entry_times[sym] = 0.0
+                                    elif actual_qty >= (0.25 * qty):
+                                        logger.info(f"[{sym}] Substantial partial fill confirmed ({actual_qty:.4f} / {qty:.4f}, {actual_qty/qty*100:.1f}%). Letting position ride!")
+                                        self.portfolio_state.positions[sym].quantity = actual_qty if "LONG" in side else -actual_qty
+                                        self.portfolio_state.positions[sym].entry_price = float(actual_pos.get('entryPrice', 0.0))
+                                        self.position_entry_times[sym] = time.time()
+                                except Exception as e:
+                                    logger.warning(f"[{sym}] Could not verify micro-stub on Binance: {e}")
+
+                            del self.active_orders[sym]
                             continue
                         else:
                             # Order is still active. Verify if it's already filled via Binance API

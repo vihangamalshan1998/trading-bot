@@ -2,7 +2,7 @@
 
 ## 1. Executive Agreement & Absolute Code Freeze
 
-* **Experiment Window**: **Sunday, Oct 18, 2026 @ 09:06:52 IST (03:36:52 UTC) $\rightarrow$ Wednesday, Oct 21, 2026 @ 09:00:00 IST (03:30:00 UTC)**.
+* **Experiment Window**: **Sunday, Oct 18, 2026 @ 18:13:48 IST (12:43:48 UTC) $\rightarrow$ Wednesday, Oct 21, 2026 @ 18:13:48 IST (12:43:48 UTC)**.
 * **Duration**: Exactly **72 Hours (3 Global Trading Days: Asia, London, New York)**.
 * **Policy**: **ABSOLUTE CODE FREEZE**.
   * Zero code edits to `main.py` or risk managers.
@@ -11,22 +11,19 @@
 
 ---
 
-## 2. Ground Truth Benchmark Starting State
+## 2. Ground Truth Benchmark Starting State (Reset Baseline)
 
-The following figures were captured directly from the live Binance Testnet ledger at the moment of code freeze:
+The following figures were captured directly from the live Binance Testnet ledger at the moment of reset and code freeze:
 
 | Metric | Ground Truth Value |
 | :--- | :--- |
-| **Benchmark Start Time (UTC)** | `2026-10-18 03:36:52 UTC` |
-| **Benchmark Start Time (IST)** | `2026-10-18 09:06:52 IST` |
-| **Benchmark Epoch Timestamp** | `1792294612528 ms` |
-| **Starting Wallet Balance** | **`$4,440.1045 USDT`** |
-| **Starting Available Balance** | **`$4,440.1045 USDT`** |
-| **Starting Unrealized PnL** | **`$0.0000 USDT`** |
-| **Starting Net Equity** | **`$4,440.1045 USDT`** |
-| **Open Positions at Start** | **`0` (Completely flat liquid cash)** |
-| **Active Open Orders** | **`0`** |
-| **Last Income Transaction ID** | `90101174260245` (2026-10-18 00:36:35 UTC) |
+| **Benchmark Start Time (UTC)** | `2026-10-18 12:43:48 UTC` |
+| **Benchmark Start Time (IST)** | `2026-10-18 18:13:48 IST` |
+| **Benchmark Epoch Timestamp** | `1792327428276 ms` |
+| **Starting Wallet Balance** | **`$4,393.0716 USDT`** |
+| **Starting Unrealized PnL** | **`+$4.5086 USDT`** (1 Active Position: XRP Short) |
+| **Starting Net Equity** | **`$4,397.5801 USDT`** |
+| **Active Positions at Start** | **`1` (XRPUSDT Short 5,635.7 @ 1.2964, +$4.51 UnPnl)** |
 
 ---
 

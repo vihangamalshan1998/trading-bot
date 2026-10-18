@@ -746,9 +746,29 @@ class ProductionTradingBot:
                                                 order_type="MARKET",
                                                 reduce_only=True
                                             )
+                                        self.last_close_time[sym] = time.time()
                                         self.portfolio_state.positions[sym].quantity = 0.0
                                         self.portfolio_state.positions[sym].entry_price = 0.0
                                         self.position_entry_times[sym] = 0.0
+                                        
+                                        # Transparent Telemetry: Record in dashboard history so it never vanishes without a trace!
+                                        if self.redis.redis:
+                                            stub_record = {
+                                                "timestamp": time.time(),
+                                                "symbol": sym,
+                                                "side": f"DUST_CLEAN_{side}",
+                                                "quantity": float(stub_qty_str),
+                                                "price": float(actual_pos.get('entryPrice', 0.0)),
+                                                "confidence": 0.0,
+                                                "order_id": f"ai_stub_{sym}",
+                                                "entry_price": float(actual_pos.get('entryPrice', 0.0)),
+                                                "gross_pnl": 0.0,
+                                                "fees_paid": 0.0,
+                                                "realized_pnl": 0.0,
+                                                "roi_pct": 0.0
+                                            }
+                                            await self.redis.redis.lpush("dashboard:trade_history", json.dumps(stub_record))
+                                            await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                     elif actual_qty >= (0.25 * qty):
                                         logger.info(f"[{sym}] Substantial partial fill confirmed ({actual_qty:.4f} / {qty:.4f}, {actual_qty/qty*100:.1f}%). Letting position ride!")
                                         self.portfolio_state.positions[sym].quantity = actual_qty if "LONG" in side else -actual_qty

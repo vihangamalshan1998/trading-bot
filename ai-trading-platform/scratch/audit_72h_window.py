@@ -8,9 +8,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from core.exchange.binance_client import BinanceFuturesAdapter
 
-# EXACT BASELINE FIXED VALUES (Locked at 2026-10-18 03:36:52 UTC / 09:06:52 IST)
-STARTING_EPOCH_MS = 1792294612528
-STARTING_WALLET_BALANCE = 4440.1045
+# EXACT BASELINE FIXED VALUES (Reset & Locked at 2026-10-18 12:43:48 UTC / 18:13:48 IST)
+STARTING_EPOCH_MS = 1792327428276
+STARTING_WALLET_BALANCE = 4393.0716
+STARTING_EQUITY = 4397.5801
 
 async def run_72h_audit():
     client = BinanceFuturesAdapter()
@@ -59,7 +60,7 @@ async def run_72h_audit():
     print("\n=======================================================")
     print("      72-HOUR EXPERIMENT FORENSIC AUDIT REPORT         ")
     print("=======================================================")
-    print(f"Benchmark Start Time: 2026-10-18 03:36:52 UTC (09:06:52 IST)")
+    print(f"Benchmark Start Time: 2026-10-18 12:43:48 UTC (18:13:48 IST)")
     print(f"Current Audit Time:   {datetime.datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print(f"Starting Wallet:      ${STARTING_WALLET_BALANCE:.4f} USDT")
     print(f"Current Wallet:       ${current_wallet:.4f} USDT")

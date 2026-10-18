@@ -677,10 +677,41 @@ class ProductionTradingBot:
 
                         
                     # Check for pending Limit Order
+                    # Check for pending Limit Order
                     if sym in self.active_orders:
+                        # 1. ALWAYS VERIFY IF FILLED FIRST (Eliminates race conditions where a filled order is mistaken for a timeout!)
+                        order_id_to_check = str(self.active_orders[sym]['order_id'])
+                        is_still_open = True
+                        try:
+                            open_orders = await self.binance.get_open_orders(sym)
+                            is_still_open = any(str(o.get('orderId')) == order_id_to_check or o.get('clientOrderId') == order_id_to_check for o in open_orders)
+                        except Exception as e:
+                            logger.warning(f"[{sym}] Error checking open orders: {e}")
+                            
+                        if not is_still_open:
+                            logger.info(f"[{sym}] LIMIT ORDER FILLED/NO LONGER OPEN! Removing from tracker.")
+                            
+                            # Publish to dashboard history ONLY WHEN FILLED!
+                            if 'trade_record' in self.active_orders[sym] and self.redis.redis:
+                                self.active_orders[sym]['trade_record']['timestamp'] = time.time()
+                                await self.redis.redis.lpush("dashboard:trade_history", json.dumps(self.active_orders[sym]['trade_record']))
+                                await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
+                                
+                            # Publish experience to Redis ONLY WHEN CONFIRMED FILLED!
+                            if 'experience_payload' in self.active_orders[sym]:
+                                await redis_manager.publish_binary(
+                                    "experience:completed",
+                                    self.active_orders[sym]['experience_payload'],
+                                )
+                                
+                            del self.active_orders[sym]
+                            continue
+
+                        # 2. ONLY IF STILL OPEN: Check for Timeout!
                         time_elapsed = time.time() - self.active_orders[sym].get('timestamp', time.time())
                         is_close_order = 'trade_record' in self.active_orders[sym] and "CLOSE" in self.active_orders[sym]['trade_record'].get('side', '')
                         timeout_limit = 15.0 if is_close_order else 30.0
+                        
                         if time_elapsed > timeout_limit:
                             logger.info(f"[{sym}] POST-ONLY MAKER TIMEOUT (> {timeout_limit:.0f}s, is_close={is_close_order}). Cancelling unfilled order...")
                             try:
@@ -780,40 +811,8 @@ class ProductionTradingBot:
                             del self.active_orders[sym]
                             continue
                         else:
-                            # Order is still active. Verify if it's already filled via Binance API
-                            try:
-                                open_orders = await self.binance.get_open_orders(sym)
-                                # orderId from binance could be int or str, we check both string casts
-                                if not any(str(o.get('orderId')) == str(self.active_orders[sym]['order_id']) or o.get('clientOrderId') == self.active_orders[sym]['order_id'] for o in open_orders):
-                                    logger.info(f"[{sym}] LIMIT ORDER FILLED/NO LONGER OPEN! Removing from tracker.")
-                                    
-                                    # CRITICAL FIX: Publish to dashboard history ONLY WHEN FILLED!
-                                    if 'trade_record' in self.active_orders[sym] and self.redis.redis:
-                                        self.active_orders[sym]['trade_record']['timestamp'] = time.time()
-                                        await self.redis.redis.lpush("dashboard:trade_history", json.dumps(self.active_orders[sym]['trade_record']))
-                                        await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
-                                        
-                                    # CRITICAL FIX: Publish experience to Redis ONLY WHEN CONFIRMED FILLED!
-                                    # Prevents phantom experiences from entering training buffer if cancelled!
-                                    if 'experience_payload' in self.active_orders[sym]:
-                                        await redis_manager.publish_binary(
-                                            "experience:completed",
-                                            self.active_orders[sym]['experience_payload'],
-                                        )
-                                        
-                                    del self.active_orders[sym]
-                                    
-                                    # No need to sync position here. We optimistically updated it when the order was placed.
-                                    # Binance REST API has eventual consistency delays, so querying it now might return stale data 
-                                    # and accidentally resurrect a closed position.
-
-                                    continue
-                                else:
-                                    logger.debug(f"[{sym}] Limit order still pending. Skipping tick.")
-                                    continue
-                            except Exception as e:
-                                logger.warning(f"[{sym}] Error checking open orders: {e}")
-                                continue
+                            logger.debug(f"[{sym}] Limit order still pending. Skipping tick.")
+                            continue
                         
                     # Phase 2: Use precomputed batched result if available
                     if sym in precomputed_actions and sym in precomputed_seqs:

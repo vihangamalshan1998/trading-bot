@@ -678,6 +678,7 @@ class ProductionTradingBot:
                         
                     # Check for pending Limit Order
                     if sym in self.active_orders:
+                        time_elapsed = time.time() - self.active_orders[sym].get('timestamp', time.time())
                         is_close_order = 'trade_record' in self.active_orders[sym] and "CLOSE" in self.active_orders[sym]['trade_record'].get('side', '')
                         timeout_limit = 15.0 if is_close_order else 30.0
                         if time_elapsed > timeout_limit:

@@ -100,6 +100,14 @@ class Settings(BaseSettings):
             "AVAXUSDT",
             "NEARUSDT",
             "LTCUSDT",
+            "SUIUSDT",
+            "DOGEUSDT",
+            "RENDERUSDT",
+            "1000PEPEUSDT",
+            "APTUSDT",
+            "TAOUSDT",
+            "WIFUSDT",
+            "INJUSDT",
         ]
     )
 

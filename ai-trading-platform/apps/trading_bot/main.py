@@ -1489,9 +1489,11 @@ class ProductionTradingBot:
                     # Large caps (BTC, ETH) can handle higher margin; high-beta altcoins get dampener to prevent big fee bleed
                     if sym in ["BTCUSDT", "ETHUSDT"]:
                         beta_dampener = 1.10
-                    elif sym in ["SOLUSDT", "BNBUSDT", "LTCUSDT"]:
+                    elif sym in ["SOLUSDT", "BNBUSDT", "LTCUSDT", "DOGEUSDT"]:
                         beta_dampener = 1.00
-                    else: # ADA, XRP, NEAR, AVAX, LINK (wild altcoins)
+                    elif sym in ["1000PEPEUSDT", "WIFUSDT"]:
+                        beta_dampener = 0.80 # High-beta meme coins: conservative margin dampener to stay extra safe
+                    else: # ADA, XRP, NEAR, AVAX, LINK, SUI, RENDER, APT, TAO, INJ (wild altcoins)
                         beta_dampener = 0.85
                         
                     # 4. Volatility Scaling from Market Observation
@@ -1502,7 +1504,7 @@ class ProductionTradingBot:
                     # 5. Whale Flow Alignment Multiplier (Asset-Tiered)
                     whale_mult = 1.0
                     whale_data = self.whale_states.get(sym)
-                    is_major = sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+                    is_major = sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT"]
                     whale_boost_hurdle = 250_000.0 if is_major else 120_000.0
                     if whale_data and (time.time() - float(whale_data.get("timestamp", 0.0))) < 60.0:
                         w_b = float(whale_data.get("whale_buy_pressure", 0.0))

@@ -50,27 +50,82 @@ class StatArbCollector:
         
         await redis_manager.redis.publish(f"statarb:state:{sym}", json.dumps(state))
 
+    def _resolve_exchange_symbols(self, exchange, exchange_id: str):
+        """
+        Dynamically maps our 18-symbol universe to the exact symbol format used by the exchange.
+        Handles ticker differences (e.g. OKX has PEPE/USDT:USDT with 1000x multiplier instead of 1000PEPE/USDT:USDT).
+        """
+        valid_symbols = []
+        symbol_map = {}  # ccxt_symbol -> (canonical_sym, price_multiplier)
+        
+        for sym in self.symbols:
+            if not sym.endswith("USDT"):
+                continue
+            base = sym[:-4]
+            candidates = []
+            
+            # Standard futures symbol format (e.g. BTC/USDT:USDT)
+            candidates.append((f"{base}/USDT:USDT", 1.0))
+            
+            # 1000-unit meme coin mapping (e.g. Binance has 1000PEPE, OKX has PEPE with 1000x multiplier)
+            if base.startswith("1000"):
+                raw_base = base[4:]
+                candidates.append((f"{raw_base}/USDT:USDT", 1000.0))
+                candidates.append((f"{raw_base}/USDT", 1000.0))
+                
+            # Rebranded / alternative tokens (e.g. RENDER vs RNDR)
+            if base == "RENDER":
+                candidates.append(("RNDR/USDT:USDT", 1.0))
+            elif base == "RNDR":
+                candidates.append(("RENDER/USDT:USDT", 1.0))
+                
+            # Spot fallback if futures contract doesn't exist
+            candidates.append((f"{base}/USDT", 1.0))
+            
+            matched = False
+            for ccxt_sym, mult in candidates:
+                if exchange.markets and ccxt_sym in exchange.markets:
+                    valid_symbols.append(ccxt_sym)
+                    symbol_map[ccxt_sym] = (sym, mult)
+                    matched = True
+                    break
+                    
+            if not matched:
+                logger.warning(f"[{exchange_id}] Symbol {sym} not available in {exchange_id} markets. Skipping for this exchange.")
+                
+        return valid_symbols, symbol_map
+
     async def watch_exchange(self, exchange_id: str):
         exchange_class = getattr(ccxt, exchange_id)
         exchange = None
         consecutive_errors = 0
+        valid_symbols = []
+        symbol_map = {}
         
         while self.running:
             try:
                 if exchange is None:
                     logger.info(f"Connecting to {exchange_id}...")
                     exchange = exchange_class({'enableRateLimit': True})
+                    await exchange.load_markets()
+                    valid_symbols, symbol_map = self._resolve_exchange_symbols(exchange, exchange_id)
+                    logger.info(f"[{exchange_id}] Successfully mapped {len(valid_symbols)}/{len(self.symbols)} active symbols.")
+                    
+                    if not valid_symbols:
+                        logger.error(f"[{exchange_id}] No matching symbols found. Retrying in 60s...")
+                        await asyncio.sleep(60)
+                        continue
                 
                 # Timeout after 30s to detect and recover from deadlocked CCXT websocket connections
-                tickers = await asyncio.wait_for(exchange.watch_tickers(self.ccxt_symbols), timeout=30.0)
+                tickers = await asyncio.wait_for(exchange.watch_tickers(valid_symbols), timeout=30.0)
                 consecutive_errors = 0 # reset on successful tick
                 
                 for ccxt_sym, ticker in tickers.items():
-                    if ccxt_sym in self.symbol_map:
-                        sym = self.symbol_map[ccxt_sym]
+                    if ccxt_sym in symbol_map:
+                        sym, mult = symbol_map[ccxt_sym]
                         price = float(ticker.get('last', 0.0))
                         if price > 0:
-                            self.prices[exchange_id][sym] = price
+                            self.prices[exchange_id][sym] = price * mult
                             self.last_update_time = time.time()
                             # If we just updated an external exchange, publish the new statarb state
                             if exchange_id != "binance":

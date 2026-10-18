@@ -13,18 +13,26 @@ from core.logging.logger import logger, set_log_file
 # Tier 2: Large-Caps (SOL, BNB, XRP) - Moderate-deep books ($1B - $4B daily volume)
 # Tier 3: Mid-Cap Altcoins (ADA, LINK, AVAX, NEAR, LTC) - Thinner books ($150M - $600M volume)
 WHALE_THRESHOLDS = {
-    "BTCUSDT": {"trade": 100_000.0, "wall": 500_000.0},
-    "ETHUSDT": {"trade": 100_000.0, "wall": 500_000.0},
-    "SOLUSDT": {"trade": 60_000.0,  "wall": 250_000.0},
-    "BNBUSDT": {"trade": 60_000.0,  "wall": 250_000.0},
-    "XRPUSDT": {"trade": 50_000.0,  "wall": 200_000.0},
-    "ADAUSDT":  {"trade": 35_000.0, "wall": 120_000.0},
-    "LINKUSDT": {"trade": 35_000.0, "wall": 120_000.0},
-    "AVAXUSDT": {"trade": 35_000.0, "wall": 120_000.0},
-    "NEARUSDT": {"trade": 30_000.0, "wall": 100_000.0},
-    "LTCUSDT":  {"trade": 35_000.0, "wall": 120_000.0},
+    "BTCUSDT":      {"trade": 100_000.0, "wall": 500_000.0},
+    "ETHUSDT":      {"trade": 100_000.0, "wall": 500_000.0},
+    "SOLUSDT":      {"trade": 60_000.0,  "wall": 250_000.0},
+    "BNBUSDT":      {"trade": 60_000.0,  "wall": 250_000.0},
+    "XRPUSDT":      {"trade": 50_000.0,  "wall": 200_000.0},
+    "ADAUSDT":      {"trade": 35_000.0,  "wall": 120_000.0},
+    "LINKUSDT":     {"trade": 35_000.0,  "wall": 120_000.0},
+    "AVAXUSDT":     {"trade": 35_000.0,  "wall": 120_000.0},
+    "NEARUSDT":     {"trade": 30_000.0,  "wall": 100_000.0},
+    "LTCUSDT":      {"trade": 35_000.0,  "wall": 120_000.0},
+    "SUIUSDT":      {"trade": 35_000.0,  "wall": 120_000.0},
+    "DOGEUSDT":     {"trade": 40_000.0,  "wall": 150_000.0},
+    "RENDERUSDT":   {"trade": 30_000.0,  "wall": 100_000.0},
+    "1000PEPEUSDT": {"trade": 35_000.0,  "wall": 120_000.0},
+    "APTUSDT":      {"trade": 35_000.0,  "wall": 120_000.0},
+    "TAOUSDT":      {"trade": 35_000.0,  "wall": 120_000.0},
+    "WIFUSDT":      {"trade": 35_000.0,  "wall": 120_000.0},
+    "INJUSDT":      {"trade": 30_000.0,  "wall": 100_000.0},
 }
-DEFAULT_WHALE_THRESHOLD = {"trade": 50_000.0, "wall": 200_000.0}
+DEFAULT_WHALE_THRESHOLD = {"trade": 35_000.0, "wall": 120_000.0}
 
 class WhaleTracker:
     def __init__(self):

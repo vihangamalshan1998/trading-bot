@@ -75,15 +75,25 @@ class OnlineTrainer:
                     _, next_values = self.candidate_model(next_states)
                     target_values = rewards + self.gamma * next_values * (1 - dones)
                     
-                # Critic Loss (MSE of Value)
+                # Critic Loss (MSE of Multi-Horizon Values: 5m, 1h, 4h)
                 critic_loss = F.mse_loss(values, target_values)
                 
-                # Actor Loss (Simplified DPG/Advantage)
-                advantage = (target_values - values).detach()
-                actor_loss = -(action_logits.mean(dim=2) * advantage).mean()
+                # Actor Loss: Align direction and conviction with multi-horizon advantages
+                adv_5m = (target_values[:, 0:1] - values[:, 0:1]).detach()
+                adv_std = adv_5m.std()
+                adv_norm = (adv_5m - adv_5m.mean()) / (adv_std + 1e-8) if adv_std > 1e-6 else adv_5m
                 
-                # Total Loss
+                # Directional action loss + imitation regularization from verified historical action
+                action_dir = action_logits[:, 0:1] # Directional conviction [-1.0, 1.0]
+                policy_loss = -(action_dir * adv_norm).mean()
+                imitation_loss = F.mse_loss(action_logits, actions)
+                actor_loss = policy_loss + 0.2 * imitation_loss
+                
+                # Total Loss with finite guard
                 loss = critic_loss + actor_loss
+                if not torch.isfinite(loss):
+                    logger.warning("Online trainer loss is non-finite. Skipping optimization step.")
+                    continue
                 
                 self.optimizer.zero_grad()
                 loss.backward()

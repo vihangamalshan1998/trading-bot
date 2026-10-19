@@ -23,21 +23,24 @@ class UniverseScreener:
         self.active_set_key = "system:active_symbols"
         
     async def get_top_symbols(self) -> List[str]:
-        """Fetches 24hr ticker data and sorts by quote volume."""
+        """Fetches 24hr ticker data and sorts curated symbols by quote volume."""
+        from core.config.settings import settings
+        curated = getattr(settings, "symbol_universe", [])
+        excluded = getattr(settings, "excluded_trading_symbols", [])
+        active_curated = [s for s in curated if s not in excluded]
         try:
             tickers = await self.client.get_24hr_ticker()
-            # Filter out non-USDT pairs or pairs with 0 volume
-            valid_tickers = [t for t in tickers if t['symbol'].endswith('USDT') and float(t['quoteVolume']) > 0]
-            
-            # Sort by volume descending
-            sorted_tickers = sorted(valid_tickers, key=lambda x: float(x['quoteVolume']), reverse=True)
-            
-            # Get top N symbols
-            top_symbols = [t['symbol'] for t in sorted_tickers[:self.target_count]]
+            valid_tickers = [t for t in tickers if t.get('symbol') in active_curated and float(t.get('quoteVolume', 0)) > 0]
+            sorted_tickers = sorted(valid_tickers, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
+            top_symbols = [t['symbol'] for t in sorted_tickers]
+            # Ensure any curated symbol missing from ticker response is still included
+            for s in active_curated:
+                if s not in top_symbols:
+                    top_symbols.append(s)
             return top_symbols
         except Exception as e:
             logger.error(f"Failed to fetch top symbols: {e}")
-            return []
+            return active_curated
 
     async def update_active_symbols(self):
         """Updates the Redis set of active symbols for the rest of the system to read."""

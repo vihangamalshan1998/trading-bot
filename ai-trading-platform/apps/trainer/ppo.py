@@ -698,17 +698,24 @@ async def run_training_loop():
             step += 1
             if step % 100 == 0:
                 logger.info(f"Completed {step} training steps. Evaluating candidate brain before deployment...")
+                
+                # Auto-save candidate weights to disk so training progress is never lost even if rejected
+                cand_dir = "models/candidates"
+                os.makedirs(cand_dir, exist_ok=True)
+                cand_step_path = os.path.join(cand_dir, f"candidate_step_{step}.pt")
+                torch.save(model.state_dict(), cand_step_path)
+                torch.save(model.state_dict(), os.path.join(cand_dir, "candidate_latest.pt"))
+                logger.info(f"💾 Saved candidate checkpoint: {cand_step_path}")
+                
                 eval_result = trainer.evaluate_candidate(sample_size=1000)
                 
                 if not eval_result.get("approved", False):
-                    logger.warning(f"Candidate brain REJECTED by evaluation gate: {eval_result.get('reason')}. Continuing training without resetting weights...")
+                    logger.warning(f"Candidate brain REJECTED by evaluation gate: {eval_result.get('reason')}. Continuing training without resetting weights (Saved at {cand_step_path})...")
                     registry.record_tournament_result(eval_result, version_tag=f"rejected_step_{step}")
                 else:
                     try:
                         push_count += 1
                         version_tag = f"v1_push_{push_count}"
-                        cand_dir = "models/candidates"
-                        os.makedirs(cand_dir, exist_ok=True)
                         cand_path = os.path.join(cand_dir, f"{version_tag}.pt")
                         torch.save(model.state_dict(), cand_path)
                         cand_hash = registry.compute_file_sha256(cand_path)
@@ -721,7 +728,7 @@ async def run_training_loop():
                             continue
                         
                         if local_mode and (time.time() - last_push_time > 300):
-                            logger.info(f"🚀 Pushing evaluated Brain ({version_tag}) to VPS in the background ({push_count}/100)...")
+                            logger.info(f"🚀 Pushing evaluated Brain ({version_tag}) to VPS in the background ({push_count}/150)...")
                             last_push_time = time.time()
                             import subprocess
                             subprocess.Popen(
@@ -740,9 +747,9 @@ async def run_training_loop():
                                 stderr=subprocess.DEVNULL
                             )
                             
-                            # Auto-Shutdown after 100 successful pushes (approx 1 to 1.5 hours)
-                            if push_count >= 100:
-                                logger.info("✅ Successfully completed 100 Brain pushes. Auto-shutting down Master Trainer!")
+                            # Auto-Shutdown after 150 successful pushes
+                            if push_count >= 150:
+                                logger.info("✅ Successfully completed 150 Brain pushes. Auto-shutting down Master Trainer!")
                                 import sys
                                 sys.exit(0)
                         

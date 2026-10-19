@@ -1404,10 +1404,10 @@ class ProductionTradingBot:
                         }
                         await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
 
-                    # GUARD 0.4: Dynamic Universe Check (Only enter new trades on active screener symbols)
+                    # GUARD 0.4: Dynamic Universe Check (Allow all curated universe symbols, skip explicitly excluded ones)
                     # Existing open positions and pending orders are NEVER abandoned and continue full risk/exit management!
-                    if not is_closing and pos.quantity == 0 and sym not in getattr(self, "dynamic_active_symbols", self.symbols):
-                        logger.info(f"[{sym}] SKIPPING OPEN: Symbol is currently inactive in dynamic universe screener.")
+                    if not is_closing and pos.quantity == 0 and sym in getattr(settings, "excluded_trading_symbols", []):
+                        logger.info(f"[{sym}] SKIPPING OPEN: Symbol is in excluded_trading_symbols.")
                         continue
 
                     # GUARD 0.5: Circuit Breaker Check (5% Daily Drawdown Kill Switch)

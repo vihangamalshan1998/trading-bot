@@ -37,13 +37,13 @@ DEFAULT_WHALE_THRESHOLD = {"trade": 35_000.0, "wall": 120_000.0}
 class WhaleTracker:
     def __init__(self):
         self.symbols = settings.symbol_universe
-        self.whale_trades = {sym: deque(maxlen=1000) for sym in self.symbols}
+        self.whale_trades = {sym: deque(maxlen=3000) for sym in self.symbols}
         self.last_published = {sym: 0.0 for sym in self.symbols}
         self.running = False
         
     def _clean_old_trades(self, sym: str, current_time: float):
-        """Removes trades older than 60 seconds from the rolling window."""
-        while self.whale_trades[sym] and current_time - self.whale_trades[sym][0]['time'] > 60:
+        """Removes trades older than 15 minutes (900 seconds) from the rolling window."""
+        while self.whale_trades[sym] and current_time - self.whale_trades[sym][0]['time'] > 900:
             self.whale_trades[sym].popleft()
 
     async def _publish_state(self, sym: str, buy_wall_dist: float, sell_wall_dist: float, force: bool = False):
@@ -55,16 +55,25 @@ class WhaleTracker:
         self.last_published[sym] = current_time
         self._clean_old_trades(sym, current_time)
         
-        # Calculate Rolling 60s Pressure with institutional sanity caps ($10M max window to prevent synthetic testnet distortion)
-        whale_buy_pressure = min(10_000_000.0, float(sum(t['amount'] for t in self.whale_trades[sym] if t['side'] == 'BUY')))
-        whale_sell_pressure = min(10_000_000.0, float(sum(t['amount'] for t in self.whale_trades[sym] if t['side'] == 'SELL')))
+        # 1. Immediate 60s Rolling Window (Tactical execution)
+        trades_60s = [t for t in self.whale_trades[sym] if current_time - t['time'] <= 60]
+        whale_buy_60s = min(10_000_000.0, float(sum(t['amount'] for t in trades_60s if t['side'] == 'BUY')))
+        whale_sell_60s = min(10_000_000.0, float(sum(t['amount'] for t in trades_60s if t['side'] == 'SELL')))
+
+        # 2. Institutional 15-Minute Rolling Window (Order Flow Absorption Gate)
+        whale_buy_15m = min(50_000_000.0, float(sum(t['amount'] for t in self.whale_trades[sym] if t['side'] == 'BUY')))
+        whale_sell_15m = min(50_000_000.0, float(sum(t['amount'] for t in self.whale_trades[sym] if t['side'] == 'SELL')))
+        whale_net_flow_15m = whale_buy_15m - whale_sell_15m
         
         state = {
             "timestamp": current_time,
             "buy_wall_distance": float(buy_wall_dist),
             "sell_wall_distance": float(sell_wall_dist),
-            "whale_buy_pressure": whale_buy_pressure,
-            "whale_sell_pressure": whale_sell_pressure
+            "whale_buy_pressure": whale_buy_60s,
+            "whale_sell_pressure": whale_sell_60s,
+            "whale_buy_pressure_15m": whale_buy_15m,
+            "whale_sell_pressure_15m": whale_sell_15m,
+            "whale_net_flow_15m": whale_net_flow_15m
         }
         
         # Publish to Redis so main.py can pick it up

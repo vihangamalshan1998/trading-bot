@@ -21,6 +21,7 @@ from core.logging.logger import logger, set_log_file
 from core.ai.memory import EventMemoryBuffer
 from core.schemas.state_schema import MarketState, PortfolioState, PositionState, MacroState, OrderRequest
 from core.config.settings import settings
+from core.ai.institutional_alpha import InstitutionalAlphaEngine
 
 class ProductionTradingBot:
     """
@@ -124,6 +125,12 @@ class ProductionTradingBot:
         self.circuit_breaker_active_until = 0.0
         self.profit_ratchet_active = False
         
+        # Institutional Hedge Fund Safeguards (Penalty Box, HTF Regime, Whale Gate, Capital De-escalation)
+        self.consecutive_losses = {sym: 0 for sym in self.symbols}
+        self.loss_lockout_until = {sym: {"LONG": 0.0, "SHORT": 0.0} for sym in self.symbols}
+        self.htf_regimes = {sym: {"trend": "NEUTRAL", "adx": 0.0, "ema20": 0.0, "ema50": 0.0, "last_updated": 0.0} for sym in self.symbols}
+        self.alpha_engine = InstitutionalAlphaEngine(symbols=self.symbols)
+        
     async def listen_macro(self):
         await self.redis.connect()
         redis_conn = self.redis.redis
@@ -194,6 +201,79 @@ class ProductionTradingBot:
                 except Exception as e:
                     logger.error(f"Error parsing statarb state for {symbol}: {e}")
 
+    def _calc_ema(self, data: np.ndarray, period: int) -> np.ndarray:
+        """Calculates Exponential Moving Average across a 1D price series."""
+        if len(data) == 0: return np.array([])
+        alpha = 2.0 / (period + 1)
+        ema = np.zeros_like(data)
+        ema[0] = data[0]
+        for i in range(1, len(data)):
+            ema[i] = data[i] * alpha + ema[i-1] * (1 - alpha)
+        return ema
+
+    def _calc_adx(self, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> float:
+        """Calculates Average Directional Index (ADX) measuring trend strength."""
+        if len(closes) < period + 2: return 0.0
+        try:
+            tr = np.maximum(highs[1:] - lows[1:], np.maximum(abs(highs[1:] - closes[:-1]), abs(lows[1:] - closes[:-1])))
+            plus_dm = np.where((highs[1:] - highs[:-1] > lows[:-1] - lows[1:]) & (highs[1:] - highs[:-1] > 0), highs[1:] - highs[:-1], 0.0)
+            minus_dm = np.where((lows[:-1] - lows[1:] > highs[1:] - highs[:-1]) & (lows[:-1] - lows[1:] > 0), lows[:-1] - lows[1:], 0.0)
+            atr_series = self._calc_ema(tr, period)
+            atr = atr_series[-1] if len(atr_series) > 0 else 0.0
+            if atr <= 0: return 0.0
+            p_dm_series = self._calc_ema(plus_dm, period)
+            m_dm_series = self._calc_ema(minus_dm, period)
+            plus_di = (p_dm_series[-1] / atr) * 100.0 if len(p_dm_series) > 0 else 0.0
+            minus_di = (m_dm_series[-1] / atr) * 100.0 if len(m_dm_series) > 0 else 0.0
+            di_sum = plus_di + minus_di
+            if di_sum <= 0: return 0.0
+            dx = (abs(plus_di - minus_di) / di_sum) * 100.0
+            return float(dx)
+        except Exception:
+            return 0.0
+
+    async def update_htf_regimes_loop(self):
+        """
+        Periodically analyzes Higher-Timeframe (1H) trend, EMA stack, and ADX for all symbols.
+        Prevents taking counter-trend positions during violent momentum expansions (Hedge Fund Rule).
+        """
+        while self.running:
+            try:
+                for sym in self.symbols:
+                    try:
+                        klines = await self.binance.get_klines(sym, interval="1h", limit=50)
+                        if klines and len(klines) >= 20:
+                            closes = np.array([float(k[4]) for k in klines])
+                            highs = np.array([float(k[2]) for k in klines])
+                            lows = np.array([float(k[3]) for k in klines])
+                            cur_px = closes[-1]
+                            
+                            ema20 = float(self._calc_ema(closes, 20)[-1])
+                            ema50 = float(self._calc_ema(closes, min(50, len(closes)))[-1])
+                            adx_val = float(self._calc_adx(highs, lows, closes, period=14))
+                            
+                            # Bullish Regime: Price > EMA20 > EMA50
+                            if cur_px > ema20 and ema20 > ema50 and (adx_val >= 20.0 or (ema20 - ema50)/ema50 > 0.003):
+                                trend = "STRONG_BULL"
+                            # Bearish Regime: Price < EMA20 < EMA50
+                            elif cur_px < ema20 and ema20 < ema50 and (adx_val >= 20.0 or (ema50 - ema20)/ema50 > 0.003):
+                                trend = "STRONG_BEAR"
+                            else:
+                                trend = "RANGING"
+                                
+                            self.htf_regimes[sym] = {
+                                "trend": trend,
+                                "adx": adx_val,
+                                "ema20": ema20,
+                                "ema50": ema50,
+                                "last_updated": time.time()
+                            }
+                    except Exception as sym_err:
+                        logger.debug(f"[{sym}] HTF update skipped: {sym_err}")
+                    await asyncio.sleep(0.4)
+            except Exception as e:
+                logger.warning(f"Error in HTF regime loop: {e}")
+            await asyncio.sleep(180.0) # Refresh every 3 minutes
                     
     def _build_state_vector(self, symbol: str) -> tuple[torch.Tensor, list]:
         obs = []
@@ -837,6 +917,7 @@ class ProductionTradingBot:
 
                         
                     market = self.market_states[sym]
+                    self.alpha_engine.update_tick(sym, market)
                     
                     # Update portfolio state with current price for RiskManager correlated exposure checks
                     if sym in self.portfolio_state.positions:
@@ -850,6 +931,11 @@ class ProductionTradingBot:
                     partial_tp_triggered = False
                     freeroll_stop_triggered = False
                     pnl_pct_leveraged = 0.0
+                    breadth_mult = 1.0
+                    cvd_mult = 1.0
+                    funding_mult = 1.0
+                    dom_mult = 1.0
+                    sq_mult = 1.0
 
                     if sym in self.portfolio_state.positions:
                         pos_check = self.portfolio_state.positions[sym]
@@ -894,9 +980,9 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🎯 HARD TAKE-PROFIT TRIGGERED: Massive surge to +{pnl_pct_leveraged*100:.2f}% leveraged! Snatching windfall profit immediately at wick peak.")
                                 hard_take_profit_triggered = True
 
-                            # 1.8. INSTITUTIONAL DYNAMIC 50% SCALE-OUT (TP1 at +12.0% leveraged gain)
+                            # 1.8. INSTITUTIONAL DYNAMIC 50% SCALE-OUT (TP1 at +5.0% leveraged gain)
                             # Takes profit on 50% of the position, banking guaranteed cash and arming the Free-Roll!
-                            elif not is_in_freeroll and pnl_pct_leveraged >= 0.120:
+                            elif not is_in_freeroll and pnl_pct_leveraged >= 0.050:
                                 logger.info(f"[{sym}] 💰 DYNAMIC 50% SCALE-OUT (TP1): Surged to +{pnl_pct_leveraged*100:.2f}% leveraged! Banking 50% profit and arming Free-Roll runner.")
                                 partial_tp_triggered = True
                             
@@ -1076,12 +1162,166 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Net Short margin exposure (${short_margin - long_margin:.2f} >= ${net_exposure_ceiling:.2f} limit). Blocking Short!")
                                 continue
 
+                    # GUARD 1.3: Institutional Penalty Box & Stop-Loss Lockout (Citadel / Jane Street Model)
+                    # Blocks re-entering a direction that just suffered a stop-loss (Tier 1: 60m lockout, Tier 2: 4h quarantine)
+                    if not is_closing and pos.quantity == 0:
+                        intended_dir = "LONG" if action_val > 0.20 else ("SHORT" if action_val < -0.20 else None)
+                        if intended_dir:
+                            lockout_expiry = self.loss_lockout_until.get(sym, {}).get(intended_dir, 0.0)
+                            if time.time() < lockout_expiry:
+                                rem_mins = (lockout_expiry - time.time()) / 60.0
+                                logger.info(f"[{sym}] 🛑 PENALTY BOX ACTIVE: {intended_dir} locked out for {rem_mins:.1f} more mins after recent stop-loss. Refusing to fight trend!")
+                                continue
+
+                    # GUARD 1.4: Higher-Timeframe (1H) Regime Gate (Jump Crypto Trend Expansion Filter)
+                    # "No counter-trend trades during high-momentum expansions."
+                    # If Price > 1h EMA20 > 1h EMA50 and ADX > 20: SHORTS ARE STRICTLY LOCKED OUT!
+                    # If Price < 1h EMA20 < 1h EMA50 and ADX > 20: LONGS ARE STRICTLY LOCKED OUT!
+                    if not is_closing and pos.quantity == 0:
+                        htf_data = self.htf_regimes.get(sym, {})
+                        htf_trend = htf_data.get("trend", "NEUTRAL")
+                        htf_adx = float(htf_data.get("adx", 0.0))
+                        
+                        # Real-time multi-timeframe fast momentum features
+                        ret_30m = float(market.features[5]) if market and len(market.features) == 90 else 0.0
+                        ret_15m = float(market.features[4]) if market and len(market.features) == 90 else 0.0
+                        rsi_1h = float(market.features[38]) if market and len(market.features) == 90 else 0.0
+                        
+                        # 1. Bullish Momentum Squeeze Expansion -> Strict Short Lockout
+                        if action_val < -0.20:
+                            is_bull_expansion = (htf_trend == "STRONG_BULL") or (ret_30m >= 0.018) or (ret_15m >= 0.012) or (rsi_1h >= 0.65)
+                            if is_bull_expansion:
+                                reason = f"1H Trend: {htf_trend} (ADX: {htf_adx:.1f})" if htf_trend == "STRONG_BULL" else f"Fast Ret30m: {ret_30m*100:+.2f}%, RSI1h: {rsi_1h*100:+.1f}%"
+                                logger.warning(f"[{sym}] 🛑 HTF REGIME GATE: Bullish momentum expansion active ({reason}). SHORTS ARE STRICTLY LOCKED OUT to prevent squeeze bleed!")
+                                continue
+                                
+                        # 2. Bearish Momentum Breakdown -> Strict Long Lockout
+                        elif action_val > 0.20:
+                            is_bear_expansion = (htf_trend == "STRONG_BEAR") or (ret_30m <= -0.018) or (ret_15m <= -0.012) or (rsi_1h <= -0.65)
+                            if is_bear_expansion:
+                                reason = f"1H Trend: {htf_trend} (ADX: {htf_adx:.1f})" if htf_trend == "STRONG_BEAR" else f"Fast Ret30m: {ret_30m*100:+.2f}%, RSI1h: {rsi_1h*100:+.1f}%"
+                                logger.warning(f"[{sym}] 🛑 HTF REGIME GATE: Bearish breakdown active ({reason}). LONGS ARE STRICTLY LOCKED OUT to prevent falling knife!")
+                                continue
+
                     # GUARD 1.5: Spread Firewall (Protect against illiquid book slippage bleed)
                     if not is_closing and market and market.mid_price > 0:
                         spread_pct = market.spread / market.mid_price
                         if spread_pct > session_max_spread:
                             logger.warning(f"[{sym}] 🛑 SPREAD FIREWALL ({session_name}): Spread {spread_pct*100:.3f}% > {session_max_spread*100:.3f}% limit. Skipping entry to protect from slippage fee bleed!")
                             continue
+
+                    # GUARD 1.6: Whale Order Flow Absorption Gate (Institutional CVD & Depth Wall Shield)
+                    # Connects to real-time whale tracker stream.
+                    # If net whale volume in last 15m is heavily net-buying (>= +$500k), veto all Shorts.
+                    # If net whale volume in last 15m is heavily net-selling (<= -$500k), veto all Longs.
+                    # Also protects against shorting directly into an institutional Buy Wall (< 0.3% distance).
+                    if not is_closing and pos.quantity == 0:
+                        whale_info = self.whale_states.get(sym)
+                        if whale_info and (time.time() - float(whale_info.get("timestamp", 0.0))) < 120.0:
+                            w_net_15m = float(whale_info.get("whale_net_flow_15m", 0.0))
+                            buy_wall_dist = float(whale_info.get("buy_wall_distance", 1.0))
+                            sell_wall_dist = float(whale_info.get("sell_wall_distance", 1.0))
+                            
+                            is_mega = sym in ["BTCUSDT", "ETHUSDT"]
+                            is_large = sym in ["SOLUSDT", "BNBUSDT", "XRPUSDT"]
+                            whale_flow_hurdle = 1_000_000.0 if is_mega else (500_000.0 if is_large else 250_000.0)
+                            
+                            if action_val < -0.20:
+                                if w_net_15m >= whale_flow_hurdle:
+                                    logger.warning(f"[{sym}] 🛑 WHALE ABSORPTION GATE: Institutional Whales are net-buying (+${w_net_15m:,.0f} in 15m >= ${whale_flow_hurdle:,.0f} hurdle). Vetoing Short into whale accumulation!")
+                                    continue
+                                if 0.0 < buy_wall_dist < 0.003:
+                                    logger.warning(f"[{sym}] 🛑 WHALE BUY-WALL SHIELD: Institutional Buy Wall resting directly below price ({buy_wall_dist*100:.2f}% away). Vetoing Short into wall!")
+                                    continue
+                                    
+                            elif action_val > 0.20:
+                                if w_net_15m <= -whale_flow_hurdle:
+                                    logger.warning(f"[{sym}] 🛑 WHALE ABSORPTION GATE: Institutional Whales are net-selling (-${abs(w_net_15m):,.0f} in 15m <= -${whale_flow_hurdle:,.0f} hurdle). Vetoing Long into whale dump!")
+                                    continue
+                                if 0.0 < sell_wall_dist < 0.003:
+                                    logger.warning(f"[{sym}] 🛑 WHALE SELL-WALL SHIELD: Institutional Sell Wall resting directly above price ({sell_wall_dist*100:.2f}% away). Vetoing Long into wall!")
+                                    continue
+
+                    # =========================================================================
+                    # INSTITUTIONAL ALPHA ENGINE: 6 HEDGE FUND STRUCTURAL PILLARS
+                    # =========================================================================
+                    if not is_closing and pos.quantity == 0:
+                        side_str = "LONG" if action_val > 0.20 else ("SHORT" if action_val < -0.20 else None)
+                        if side_str:
+                            # PILLAR 1: Liquidation Cluster & Stop-Hunt Mapping
+                            p1_ok, p1_reason = self.alpha_engine.evaluate_stop_hunt(sym, market, side_str)
+                            if not p1_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 1 (Stop-Hunt Mapping): {p1_reason}")
+                                continue
+                                
+                            # PILLAR 2: Open Interest (OI) Delta Divergence
+                            p2_ok, oi_mult_eval, p2_reason = self.alpha_engine.evaluate_oi_divergence(sym, market, side_str)
+                            if not p2_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 2 (OI Divergence): {p2_reason}")
+                                continue
+                            if oi_mult_eval != 1.0:
+                                logger.info(f"[{sym}] 🚀 PILLAR 2 (OI Divergence): {p2_reason}")
+                                
+                            # PILLAR 3: Lead-Lag Cross-Asset Velocity (BTC/ETH Drivers)
+                            p3_ok, p3_reason = self.alpha_engine.evaluate_btc_lead_lag(sym, self.market_states, side_str)
+                            if not p3_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 3 (BTC Lead-Lag): {p3_reason}")
+                                continue
+                                
+                            # PILLAR 4: Perpetual-Spot Basis & Mark Price Premium Gate
+                            p4_ok, p4_reason = self.alpha_engine.evaluate_perp_spot_basis(sym, market, side_str)
+                            if not p4_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 4 (Perp-Spot Basis): {p4_reason}")
+                                continue
+                                
+                            # PILLAR 5: Order Flow Toxicity (VPIN)
+                            p5_ok, p5_reason = self.alpha_engine.evaluate_vpin_toxicity(sym, market, side_str)
+                            if not p5_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 5 (VPIN Toxicity): {p5_reason}")
+                                continue
+                                
+                            # PILLAR 6: Real-Time Market Regime Classification (Shock / Trend / Chop)
+                            htf_t = self.htf_regimes.get(sym, {}).get("trend", "NEUTRAL")
+                            p6_ok, regime_name, p6_reason = self.alpha_engine.classify_and_filter_regime(sym, market, htf_t, side_str)
+                            if not p6_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 6 ({regime_name}): {p6_reason}")
+                                continue
+
+                            # PILLAR 7: Market Breadth (Advance/Decline & VWAP Ratio)
+                            p7_ok, breadth_mult, p7_reason = self.alpha_engine.evaluate_market_breadth(self.market_states, side_str)
+                            if not p7_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 7 (Market Breadth): {p7_reason}")
+                                continue
+                                
+                            # PILLAR 8: Market-Wide CVD (Total Net Taker Flow Across All Coins)
+                            p8_ok, cvd_mult, p8_reason = self.alpha_engine.evaluate_market_wide_cvd(sym, market, self.whale_states, side_str)
+                            if not p8_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 8 (Market CVD): {p8_reason}")
+                                continue
+                                
+                            # PILLAR 9: Funding Rate Heatmap & Crowded Trade Index
+                            p9_ok, funding_mult, p9_reason = self.alpha_engine.evaluate_funding_heatmap(sym, self.market_states, side_str)
+                            if not p9_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 9 (Funding Heatmap): {p9_reason}")
+                                continue
+                                
+                            # PILLAR 10: Bitcoin Dominance (BTC.D) & Altcoin Season Index
+                            p10_ok, dom_mult, p10_reason = self.alpha_engine.evaluate_btc_dominance_regime(sym, self.market_states, side_str)
+                            if not p10_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 10 (BTC Dominance): {p10_reason}")
+                                continue
+                                
+                            # PILLAR 11: Multi-Exchange Liquidation Ratio (Squeeze vs Flush)
+                            p11_ok, p11_reason = self.alpha_engine.evaluate_liquidation_cascade(sym, self.market_states, side_str)
+                            if not p11_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 11 (Liquidation Cascade): {p11_reason}")
+                                continue
+                                
+                            # PILLAR 12: Volatility Squeeze Indicator (John Carter Squeeze)
+                            p12_ok, sq_mult, p12_reason = self.alpha_engine.evaluate_volatility_squeeze(sym, market, side_str)
+                            if not p12_ok:
+                                logger.warning(f"[{sym}] 🛑 PILLAR 12 (Volatility Squeeze): {p12_reason}")
+                                continue
 
                     # GUARD 2: Minimum Hold Duration (900s / 15 mins with Massive Reversal Escape Door)
                     if is_closing and not exit_override:
@@ -1533,6 +1773,12 @@ class ProductionTradingBot:
                             whale_mult = 1.05
                         elif action_val < -0.20 and w_s >= whale_boost_hurdle and w_s > (1.5 * w_b):
                             whale_mult = 1.05
+                            
+                    # 6. Institutional Alpha Multipliers
+                    lead_lag_mult = 1.0
+                    liq_mult = 1.0
+                    alpha_health_mult = float(np.clip(breadth_mult * cvd_mult * funding_mult * dom_mult * sq_mult, 0.65, 1.35))
+                    
                     if is_major:
                         # Major Coins (BTC, ETH, SOL, BNB): 15% - 25% margin (Option A)
                         min_margin_bound = 0.10 if self.profit_ratchet_active else settings.major_min_margin_pct
@@ -1541,7 +1787,7 @@ class ProductionTradingBot:
                         # Altcoins (ADA, XRP, LINK, AVAX, NEAR, LTC): 12% - 18% margin (Option A)
                         min_margin_bound = 0.08 if self.profit_ratchet_active else settings.alt_min_margin_pct
                         max_margin_bound = 0.14 if self.profit_ratchet_active else settings.alt_max_margin_pct
-                    dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult * liq_mult, min_margin_bound, max_margin_bound))
+                    dynamic_margin_pct = float(np.clip(base_margin_pct * conviction_mult * critic_mult * beta_dampener * vol_scale * whale_mult * lead_lag_mult * liq_mult * alpha_health_mult, min_margin_bound, max_margin_bound))
                     
                     # System 4: Dynamic High-Water Equity Auto-Compounder (Asymmetric Kelly Scaling)
                     # Tracks peak session equity (HWM). When at new peaks, accelerates compounding (+5%).
@@ -1562,7 +1808,22 @@ class ProductionTradingBot:
                     else:
                         kelly_compound_mult = 1.00
 
-                    max_margin_budget = max(0.0, current_eq * dynamic_margin_pct * kelly_compound_mult)
+                    # System 4.5: Institutional Capital De-Escalation (Inverse Sizing on Staggered Losses)
+                    # When an asset struggles, de-escalate capital allocation to prevent compounding drawdown:
+                    # 0 previous losses: 100% normal size (~$600 margin)
+                    # 1 previous loss: 50% margin cut (~$300 margin)
+                    # 2+ previous losses: 25% margin cut (~$150 margin)
+                    sym_losses = self.consecutive_losses.get(sym, 0)
+                    if sym_losses == 1:
+                        de_escalation_mult = 0.50
+                        logger.info(f"[{sym}] 📉 CAPITAL DE-ESCALATION: 1 previous loss on symbol. Scaling margin down to 50% ($300 target).")
+                    elif sym_losses >= 2:
+                        de_escalation_mult = 0.25
+                        logger.info(f"[{sym}] 📉 CAPITAL DE-ESCALATION: {sym_losses} previous losses on symbol. Scaling margin down to 25% ($150 target).")
+                    else:
+                        de_escalation_mult = 1.00
+
+                    max_margin_budget = max(0.0, current_eq * dynamic_margin_pct * kelly_compound_mult * de_escalation_mult)
                     margin_allocated = min(max_margin_budget, max(0.0, self.portfolio_state.free_margin) * target_size)
                     notional_requested = margin_allocated * pos.leverage
                     
@@ -1999,6 +2260,27 @@ class ProductionTradingBot:
                                         trade_fees = dashboard_trade_fees
                                         # pnl is already net of fees from above calculation
                                         
+                                        # --- INSTITUTIONAL PENALTY BOX & CONSECUTIVE LOSS TRACKER ---
+                                        closed_dir = "LONG" if "CLOSE_LONG" in side else "SHORT"
+                                        if pnl < -1.0: # Real loss (exceeding minor fee noise)
+                                            self.consecutive_losses[sym] = self.consecutive_losses.get(sym, 0) + 1
+                                            loss_cnt = self.consecutive_losses[sym]
+                                            
+                                            if loss_cnt == 1:
+                                                # Tier 1 Penalty Box: Lock out the SAME direction for 60 minutes (3,600s)
+                                                self.loss_lockout_until[sym][closed_dir] = time.time() + 3600.0
+                                                logger.warning(f"[{sym}] 🥊 PENALTY BOX (Tier 1): Stop-loss hit (${pnl:+.2f}). Direction '{closed_dir}' locked out for 60 mins to prevent squeeze fight!")
+                                            elif loss_cnt >= 2:
+                                                # Tier 2 Penalty Box: Lock out the ENTIRE symbol for 4 hours (14,400s)
+                                                self.loss_lockout_until[sym]["LONG"] = time.time() + 14400.0
+                                                self.loss_lockout_until[sym]["SHORT"] = time.time() + 14400.0
+                                                logger.warning(f"[{sym}] 🥊 PENALTY BOX HARD QUARANTINE (Tier 2): {loss_cnt} consecutive losses! Symbol locked out for 4 hours!")
+                                        elif pnl > 2.0: # Clean winning trade
+                                            if self.consecutive_losses.get(sym, 0) > 0:
+                                                logger.info(f"[{sym}] 🏆 WINNING EXIT (${pnl:+.2f}): Resetting consecutive loss counter and clearing Penalty Box!")
+                                            self.consecutive_losses[sym] = 0
+                                            self.loss_lockout_until[sym] = {"LONG": 0.0, "SHORT": 0.0}
+                                        
                                         entry_t = getattr(self.portfolio_state.positions[sym], 'entry_time', 0.0)
                                         if entry_t > 0:
                                             hold_dur = int(time.time() - entry_t)
@@ -2210,7 +2492,8 @@ class ProductionTradingBot:
             asyncio.create_task(self.listen_macro()),
             asyncio.create_task(self.inference_loop()),
             asyncio.create_task(self.sync_dashboard()),
-            asyncio.create_task(self.monitor_kill_switch())
+            asyncio.create_task(self.monitor_kill_switch()),
+            asyncio.create_task(self.update_htf_regimes_loop())
         ]
         for sym in self.symbols:
             tasks.append(asyncio.create_task(self.listen_market(sym)))

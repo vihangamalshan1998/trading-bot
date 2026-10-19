@@ -85,6 +85,11 @@ class BinanceFuturesAdapter(ExchangeAdapter):
     async def get_24hr_ticker(self) -> List[Dict[str, Any]]:
         """Fetches 24hr ticker data for all symbols."""
         return await self._request("GET", "/fapi/v1/ticker/24hr")
+
+    async def get_klines(self, symbol: str, interval: str = "1h", limit: int = 50) -> List[Any]:
+        """Fetches historical klines for higher-timeframe trend and regime analysis."""
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        return await self._request("GET", "/fapi/v1/klines", signed=False, params=params)
         
     # Private Endpoints
     async def get_account_details(self) -> Dict[str, Any]:

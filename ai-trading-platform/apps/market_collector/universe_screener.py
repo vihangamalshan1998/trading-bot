@@ -3,7 +3,7 @@ import json
 import logging
 from typing import List
 from core.db.redis import redis_manager
-from core.exchange.binance_client import BinanceFuturesClient
+from core.exchange.binance_client import BinanceFuturesAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ class UniverseScreener:
     def __init__(self, target_symbol_count: int = 5, poll_interval_seconds: int = 3600):
         self.target_count = target_symbol_count
         self.poll_interval = poll_interval_seconds
-        self.client = BinanceFuturesClient()
+        self.client = BinanceFuturesAdapter()
         self.redis = redis_manager
         self._running = False
         self.active_set_key = "system:active_symbols"

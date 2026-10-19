@@ -221,3 +221,6 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         except Exception as e:
             logger.error(f"Market Data Stream disconnected: {e}")
 
+# Backwards compatibility alias
+BinanceFuturesClient = BinanceFuturesAdapter
+

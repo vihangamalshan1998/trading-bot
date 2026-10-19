@@ -249,3 +249,62 @@ def test_L_zero_quantity_after_clamping(base_state):
     decision = rm.evaluate(req, portfolio, market)
     assert not decision.approved
     assert decision.adjusted_quantity == 0.0
+
+def test_invalid_startup_configuration():
+    """Verify settings startup validation rejects dangerous or invalid configurations."""
+    import pytest
+    from core.config.settings import Settings
+    
+    # Negative/zero leverage
+    with pytest.raises((ValueError, Exception), match="greater than 0|Invalid max_leverage"):
+        Settings(max_leverage=0)
+    with pytest.raises(ValueError, match="Invalid max_leverage"):
+        Settings(max_leverage=200)
+
+    # Order size exceeds position size
+    with pytest.raises(ValueError, match="cannot exceed max_position_size"):
+        Settings(max_order_size=10000.0, max_position_size=5000.0)
+
+    # Invalid daily loss
+    with pytest.raises(ValueError, match="max_daily_loss_pct"):
+        Settings(max_daily_loss_pct=1.5)
+
+    # Live trading with dry run
+    with pytest.raises(ValueError, match="allow_live_trading cannot be enabled while dry_run is True"):
+        Settings(allow_live_trading=True, dry_run=True)
+
+def test_stale_portfolio_state_rejection(base_state):
+    """Verify risk manager rejects orders when portfolio state timestamp is stale or future."""
+    market, portfolio = base_state
+    rm = RiskManager()
+    now = time.time()
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=0.01, target_position=0.1, model_version="v1", timestamp=now)
+
+    # Stale portfolio state (age > 60s)
+    portfolio.timestamp = now - 120.0
+    decision = rm.evaluate(req, portfolio, market)
+    assert not decision.approved
+    assert decision.reason == "STALE_PORTFOLIO_DATA"
+
+    # Future portfolio timestamp
+    portfolio.timestamp = now + 120.0
+    decision = rm.evaluate(req, portfolio, market)
+    assert not decision.approved
+    assert decision.reason == "INVALID_PORTFOLIO_TIMESTAMP"
+
+def test_aggregate_multi_symbol_portfolio_exposure(base_state):
+    """Verify aggregate exposure across multiple symbols triggers portfolio leverage limit."""
+    market, portfolio = base_state
+    rm = RiskManager()
+    now = time.time()
+    portfolio.timestamp = now
+    
+    # Account equity = 10,000, max portfolio exposure = 5.0x = $50,000
+    # Simulate already having $49,000 across ETH, SOL, XRP
+    portfolio.total_exposure = 49000.0
+    
+    # Proposed new order: 0.1 BTC @ $50,000 = $5,000 notional -> total $54,000 (5.4x)
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=0.1, target_position=0.1, model_version="v1", timestamp=now)
+    decision = rm.evaluate(req, portfolio, market)
+    assert not decision.approved
+    assert decision.reason == "EXCESSIVE_PORTFOLIO_EXPOSURE"

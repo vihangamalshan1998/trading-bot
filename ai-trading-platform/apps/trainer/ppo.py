@@ -84,11 +84,25 @@ class PPOTrainer:
             returns = advantages + values
             return advantages, returns
         
-    def train_step(self, batch_size: int = 64, epochs: int = 4):
-        """Executes a single mathematically valid PPO training step."""
-        batch = self.buffer.sample(batch_size)
-        if len(batch) < batch_size:
-            logger.warning(f"Not enough samples in replay buffer to train. Got {len(batch)}, needed {batch_size}")
+    def train_step(
+        self,
+        batch_size: int = 64,
+        epochs: int = 4,
+        tensors: tuple = None,
+        stored_old_log_probs: torch.Tensor = None,
+        require_stored_behavior_policy: bool = False
+    ):
+        """Executes a single mathematically valid PPO training step with strict data validation."""
+        if tensors is not None:
+            states, actions, rewards, next_states, dones = tensors
+        else:
+            batch = self.buffer.sample(batch_size)
+            if len(batch) < batch_size:
+                logger.warning(f"Not enough samples in replay buffer to train. Got {len(batch)}, needed {batch_size}")
+                return False
+            states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
+
+        if len(states) == 0:
             return False
             
         # Priority 2: Never silently reset model parameters if non-finite weights are found. Stop update & report.
@@ -97,32 +111,87 @@ class PPOTrainer:
             logger.error("CRITICAL: Non-finite model weights detected. Aborting training step to preserve checkpoint integrity.")
             return False
 
-        states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
-        if len(states) == 0:
+        # Task 3 Data Validation: Validate dimensions
+        if states.ndim != 3 or states.shape[-1] != 200:
+            logger.error(f"PPO: Invalid state tensor dimension {states.shape}. Expected (batch, seq_len, 200).")
             return False
-            
-        states = torch.nan_to_num(states, nan=0.0, posinf=1.0, neginf=-1.0)
-        next_states = torch.nan_to_num(next_states, nan=0.0, posinf=1.0, neginf=-1.0)
-        actions = torch.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0)
-        rewards = torch.nan_to_num(rewards, nan=0.0, posinf=1.0, neginf=-1.0)
-        dones = torch.nan_to_num(dones, nan=0.0, posinf=1.0, neginf=0.0)
+        if actions.ndim != 2 or actions.shape[-1] != 4:
+            logger.error(f"PPO: Invalid action tensor dimension {actions.shape}. Expected (batch, 4).")
+            return False
+        if rewards.ndim != 2 or rewards.shape[-1] != 3:
+            logger.error(f"PPO: Invalid reward tensor dimension {rewards.shape}. Expected (batch, 3).")
+            return False
+        if dones.ndim != 2 or dones.shape[-1] != 1:
+            logger.error(f"PPO: Invalid dones tensor dimension {dones.shape}. Expected (batch, 1).")
+            return False
+
+        # Detect and filter corrupted non-finite samples (Never silently convert with nan_to_num)
+        finite_s = torch.isfinite(states).all(dim=1).all(dim=1)
+        finite_ns = torch.isfinite(next_states).all(dim=1).all(dim=1)
+        finite_a = torch.isfinite(actions).all(dim=1)
+        finite_r = torch.isfinite(rewards).all(dim=1)
+        finite_d = torch.isfinite(dones).all(dim=1)
+
+        valid_mask = finite_s & finite_ns & finite_a & finite_r & finite_d
+        corrupted_count = int((~valid_mask).sum().item())
+        if corrupted_count > 0:
+            logger.warning(f"PPO: Logged and rejected {corrupted_count} corrupted samples containing NaN/Inf values. Retaining only valid historical experiences.")
+            states = states[valid_mask]
+            actions = actions[valid_mask]
+            rewards = rewards[valid_mask]
+            next_states = next_states[valid_mask]
+            dones = dones[valid_mask]
+            if stored_old_log_probs is not None and len(stored_old_log_probs) == len(valid_mask):
+                stored_old_log_probs = stored_old_log_probs[valid_mask]
+
+        if len(states) < 4:
+            logger.warning(f"PPO: Insufficient valid non-corrupted samples remaining ({len(states)} < 4). Aborting update.")
+            return False
+
+        # Verify terminal flags are strictly binary {0.0, 1.0}
+        if not torch.all((dones == 0.0) | (dones == 1.0)):
+            logger.error("PPO: Non-binary terminal flags detected in dones tensor. Aborting update.")
+            return False
+
+        # Verify action bounds
+        if (torch.abs(actions) > 10.0).any():
+            logger.error("PPO: Out-of-bounds action values detected (> 10.0). Aborting update.")
+            return False
             
         self.model.train()
         
-        # 1. Old Policy Evaluation with Continuous Gaussian Action Distribution
+        # 1. Behavior Policy Old Log Probabilities
+        if stored_old_log_probs is not None:
+            if not torch.isfinite(stored_old_log_probs).all():
+                logger.error("PPO: Stored old-policy log probabilities contain non-finite values. Aborting update.")
+                return False
+            if stored_old_log_probs.shape[0] != states.shape[0]:
+                logger.error(f"PPO: Dimension mismatch for stored old log probs: {stored_old_log_probs.shape[0]} vs {states.shape[0]}.")
+                return False
+            old_log_probs = stored_old_log_probs
+            with torch.no_grad():
+                old_action_preds, old_values = self.model(states)
+                _, next_values = self.model(next_states)
+        else:
+            if require_stored_behavior_policy:
+                logger.error("PPO: Replay samples lack stored behavior policy log probabilities. Cannot execute on-policy PPO update without actual behavior policy.")
+                return False
+            with torch.no_grad():
+                old_action_preds, old_values = self.model(states)
+                _, next_values = self.model(next_states)
+                action_std = torch.exp(torch.clamp(self.log_std, min=-2.0, max=0.5))
+                dist_old = torch.distributions.Normal(old_action_preds, action_std)
+                old_log_probs = dist_old.log_prob(actions).sum(dim=-1, keepdim=True)
+            
         with torch.no_grad():
-            old_action_preds, old_values = self.model(states)
-            _, next_values = self.model(next_states)
-            
-            # Action distribution: Normal(mu, sigma)
-            action_std = torch.exp(torch.clamp(self.log_std, min=-2.0, max=0.5))
-            dist_old = torch.distributions.Normal(old_action_preds, action_std)
-            old_log_probs = dist_old.log_prob(actions).sum(dim=-1, keepdim=True)
-            
             safe_rewards = rewards / 200.0
             advantages, returns = self.compute_gae(safe_rewards, old_values, next_values, dones)
+
+            if not (torch.isfinite(advantages).all() and torch.isfinite(returns).all()):
+                logger.error("PPO: Computed non-finite advantages or returns. Aborting update.")
+                return False
+
             actor_advantages = advantages.mean(dim=1, keepdim=True)
-            
             adv_mean = actor_advantages.mean()
             adv_std = actor_advantages.std(unbiased=False)
             
@@ -132,7 +201,6 @@ class PPOTrainer:
                 return False
                 
             actor_advantages = (actor_advantages - adv_mean) / (adv_std + 1e-8)
-            actor_advantages = torch.nan_to_num(actor_advantages, nan=0.0)
             
         # 2. PPO Epochs
         for _ in range(epochs):
@@ -291,12 +359,16 @@ class PPOTrainer:
                     logger.warning(f"Candidate evaluation FAILED: Challenger critic loss exploded ({challenger_critic_mse:.2f} > 100.0).")
                     return {"approved": False, "reason": "CRITIC_EXPLODED", "critic_loss": challenger_critic_mse}
 
-                # Real-World VPS Fee Simulation: Deduct 0.10% Binance Futures round-trip taker fee per active trade
-                fee_hurdle = 0.10  # 0.10% fee (0.05% entry + 0.05% exit)
-                challenger_is_active = (torch.abs(challenger_actions[:, 0]) > 0.2).float()
-                challenger_net_returns = (challenger_actions[:, 0] * actual_5m_ret) - (challenger_is_active * fee_hurdle)
-                challenger_sim_pnl = float(challenger_net_returns.mean().item())
-                challenger_score = challenger_sim_pnl - (0.5 * challenger_critic_mse)
+            # Real-World VPS Fee & Slippage Simulation:
+            # 0.10% Binance Futures round-trip taker fee + 0.02% conservative slippage
+            fee_hurdle = 0.10
+            slippage_hurdle = 0.02
+            total_cost_hurdle = fee_hurdle + slippage_hurdle
+
+            challenger_is_active = (torch.abs(challenger_actions[:, 0]) > 0.2).float()
+            challenger_net_returns = (challenger_actions[:, 0] * actual_5m_ret) - (challenger_is_active * total_cost_hurdle)
+            challenger_sim_pnl = float(challenger_net_returns.mean().item())
+            challenger_score = challenger_sim_pnl - (0.5 * challenger_critic_mse)
 
             # 2. Benchmark against Production Champion
             champion_path = "models/production/model_v1.pt"
@@ -311,7 +383,8 @@ class PPOTrainer:
                     "challenger_score": challenger_score,
                     "champion_score": None,
                     "critic_loss": challenger_critic_mse,
-                    "entropy": challenger_entropy
+                    "entropy": challenger_entropy,
+                    "sample_size": len(batch)
                 }
 
             # Load Champion for comparison
@@ -325,7 +398,7 @@ class PPOTrainer:
                     champ_actions, champ_values = champion_model(states)
                     champ_critic_mse = float(nn.MSELoss()(champ_values, safe_rewards).item())
                     champ_is_active = (torch.abs(champ_actions[:, 0]) > 0.2).float()
-                    champ_net_returns = (champ_actions[:, 0] * actual_5m_ret) - (champ_is_active * fee_hurdle)
+                    champ_net_returns = (champ_actions[:, 0] * actual_5m_ret) - (champ_is_active * total_cost_hurdle)
                     champ_sim_pnl = float(champ_net_returns.mean().item())
                     champion_score = champ_sim_pnl - (0.5 * champ_critic_mse)
 
@@ -339,9 +412,11 @@ class PPOTrainer:
                     "challenger_score": challenger_score,
                     "champion_score": None,
                     "critic_loss": challenger_critic_mse,
-                    "entropy": challenger_entropy
+                    "entropy": challenger_entropy,
+                    "sample_size": len(batch)
                 }
 
+            eval_sample_count = len(states)
             del states, actions, rewards, next_states, dones
 
             # Superiority criteria (Refined Elite Margin):
@@ -352,6 +427,7 @@ class PPOTrainer:
                 challenger_critic_mse <= (champ_critic_mse * 0.90) and challenger_sim_pnl >= (champ_sim_pnl * 0.90)
             )
 
+            eval_timestamp = time.time()
             metrics = {
                 "challenger_score": challenger_score,
                 "champion_score": champion_score,
@@ -359,7 +435,13 @@ class PPOTrainer:
                 "champion_critic_mse": champ_critic_mse,
                 "challenger_sim_pnl": challenger_sim_pnl,
                 "champion_sim_pnl": champ_sim_pnl,
-                "entropy": challenger_entropy
+                "critic_loss": challenger_critic_mse,
+                "entropy": challenger_entropy,
+                "sample_size": eval_sample_count,
+                "eval_timestamp": eval_timestamp,
+                "eval_type": "chronological_tournament",
+                "fee_hurdle": fee_hurdle,
+                "slippage_hurdle": slippage_hurdle
             }
 
             if is_superior:
@@ -369,7 +451,12 @@ class PPOTrainer:
                     f"Critic MSE: {challenger_critic_mse:.4f} vs {champ_critic_mse:.4f} | "
                     f"Sim PnL: {challenger_sim_pnl:.4f} vs {champ_sim_pnl:.4f}"
                 )
-                return {"approved": True, "reason": "SUPERIOR_TO_CHAMPION", "metrics": metrics}
+                return {
+                    "approved": True,
+                    "reason": "SUPERIOR_TO_CHAMPION",
+                    "metrics": metrics,
+                    **metrics
+                }
             else:
                 logger.warning(
                     f"⛔ TOURNAMENT DEFEAT: Challenger is INFERIOR to current live Champion! "
@@ -377,7 +464,12 @@ class PPOTrainer:
                     f"Critic MSE: {challenger_critic_mse:.4f} vs {champ_critic_mse:.4f} | "
                     f"Sim PnL: {challenger_sim_pnl:.4f} vs {champ_sim_pnl:.4f}. REJECTING PUSH."
                 )
-                return {"approved": False, "reason": "INFERIOR_TO_CHAMPION", "metrics": metrics}
+                return {
+                    "approved": False,
+                    "reason": "INFERIOR_TO_CHAMPION",
+                    "metrics": metrics,
+                    **metrics
+                }
         except Exception as e:
             logger.error(f"Error during candidate tournament evaluation: {e}")
             return {"approved": False, "reason": f"EXCEPTION_{e}"}

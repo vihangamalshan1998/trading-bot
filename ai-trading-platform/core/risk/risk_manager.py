@@ -183,6 +183,14 @@ class RiskManager:
         if portfolio_state.equity <= 0:
             return self._reject("INSUFFICIENT_EQUITY")
 
+        p_ts = getattr(portfolio_state, "timestamp", None)
+        if p_ts is not None:
+            p_age = now - p_ts
+            if p_age < 0:
+                return self._reject("INVALID_PORTFOLIO_TIMESTAMP")
+            if p_age > self.max_market_data_age_seconds:
+                return self._reject("STALE_PORTFOLIO_DATA")
+
         if not math.isfinite(portfolio_state.free_margin):
             return self._reject("INVALID_FREE_MARGIN")
 

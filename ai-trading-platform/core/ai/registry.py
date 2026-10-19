@@ -217,19 +217,54 @@ class ModelRegistry:
             logger.error("Cannot promote candidate: Evaluation metrics are missing or empty.")
             return False
 
-        if metrics.get("approved") is not True:
-            logger.error(f"Cannot promote candidate: Candidate is not approved (approved={metrics.get('approved')}, reason={metrics.get('reason')}).")
+        # Flatten nested metrics if provided under "metrics" key
+        m = metrics.get("metrics", metrics) if isinstance(metrics.get("metrics"), dict) else metrics
+        approved = metrics.get("approved") if "approved" in metrics else m.get("approved")
+        reason = metrics.get("reason") if "reason" in metrics else m.get("reason")
+
+        if approved is not True:
+            logger.error(f"Cannot promote candidate: Candidate is not approved (approved={approved}, reason={reason}).")
             return False
 
-        if "reason" not in metrics:
+        if not reason or not isinstance(reason, str):
             logger.error("Cannot promote candidate: Missing required evaluation evidence 'reason'.")
             return False
 
         # Validate metrics are finite numbers where present
-        for m_key in ["challenger_score", "champion_score", "critic_loss", "entropy"]:
-            val = metrics.get(m_key)
+        for m_key in ["challenger_score", "champion_score", "critic_loss", "entropy", "sample_size", "eval_timestamp"]:
+            val = m.get(m_key)
             if val is not None and (math.isnan(val) or math.isinf(val)):
                 logger.error(f"Cannot promote candidate: Non-finite evaluation metric '{m_key}' = {val}.")
+                return False
+
+        # Require genuine benchmark comparison against champion
+        champ_score = m.get("champion_score")
+        chall_score = m.get("challenger_score")
+        if champ_score is None:
+            logger.error("Cannot promote candidate: Missing 'champion_score'. Candidate must be benchmarked against current champion.")
+            return False
+        if chall_score is None:
+            logger.error("Cannot promote candidate: Missing 'challenger_score'. Candidate must have valid evaluation score.")
+            return False
+
+        # Reject fabricated metrics where challenger is inferior to champion
+        if chall_score < champ_score and "CRITIC_IMPROVEMENT" not in reason:
+            logger.error(f"Cannot promote candidate: Challenger score ({chall_score:.4f}) is inferior to champion score ({champ_score:.4f}). Fabricated metrics rejected.")
+            return False
+
+        # Validate sample size
+        sample_size = m.get("sample_size")
+        if sample_size is not None:
+            if not isinstance(sample_size, (int, float)) or sample_size < 30:
+                logger.error(f"Cannot promote candidate: Insufficient evaluation samples ({sample_size} < 30).")
+                return False
+
+        # Validate evaluation timestamp freshness (must be within last 24h and not in the future)
+        eval_timestamp = m.get("eval_timestamp")
+        if eval_timestamp is not None:
+            now_t = time.time()
+            if eval_timestamp > now_t + 60 or (now_t - eval_timestamp > 86400):
+                logger.error(f"Cannot promote candidate: Stale or future evaluation timestamp ({eval_timestamp}).")
                 return False
 
         if not os.path.exists(candidate_checkpoint_path):

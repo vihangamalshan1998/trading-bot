@@ -70,6 +70,7 @@ class PortfolioState(BaseModel):
     total_unrealized_pnl: float
     total_exposure: float = Field(ge=0.0)
     positions: Dict[str, PositionState] = Field(default_factory=dict)
+    timestamp: Optional[float] = Field(default=None)
 
     @field_validator('*', mode='before')
     @classmethod

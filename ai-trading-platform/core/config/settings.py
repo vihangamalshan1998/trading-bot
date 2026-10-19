@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, model_validator
 
 
 class Settings(BaseSettings):
@@ -126,6 +126,40 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def validate_safety_and_risk(self) -> "Settings":
+        # 1. Leverage sanity bounds
+        if self.max_leverage <= 0 or self.max_leverage > 125:
+            raise ValueError(f"Invalid max_leverage: {self.max_leverage}. Must be between 1 and 125.")
+        
+        # 2. Position and order sizing
+        if self.max_position_size <= 0:
+            raise ValueError(f"max_position_size must be positive (got {self.max_position_size}).")
+        if self.max_order_size <= 0:
+            raise ValueError(f"max_order_size must be positive (got {self.max_order_size}).")
+        if self.max_order_size > self.max_position_size:
+            raise ValueError(f"max_order_size ({self.max_order_size}) cannot exceed max_position_size ({self.max_position_size}).")
+            
+        # 3. Exposure limits
+        if not (0 < self.max_symbol_exposure_pct <= 20.0):
+            raise ValueError(f"Invalid max_symbol_exposure_pct: {self.max_symbol_exposure_pct}.")
+        if not (0 < self.max_portfolio_exposure_pct <= 20.0):
+            raise ValueError(f"Invalid max_portfolio_exposure_pct: {self.max_portfolio_exposure_pct}.")
+        if not (0 < self.correlated_exposure_limit_pct <= 20.0):
+            raise ValueError(f"Invalid correlated_exposure_limit_pct: {self.correlated_exposure_limit_pct}.")
+            
+        # 4. Drawdown & loss percentages
+        if not (0 < self.max_daily_loss_pct <= 1.0):
+            raise ValueError(f"Invalid max_daily_loss_pct: {self.max_daily_loss_pct}. Must be in (0, 1.0].")
+        if not (0 < self.max_drawdown_pct <= 1.0):
+            raise ValueError(f"Invalid max_drawdown_pct: {self.max_drawdown_pct}. Must be in (0, 1.0].")
+            
+        # 5. Live trading safe defaults
+        if self.allow_live_trading and self.dry_run:
+            raise ValueError("Configuration conflict: allow_live_trading cannot be enabled while dry_run is True.")
+            
+        return self
 
     @property
     def database_url(self) -> str:

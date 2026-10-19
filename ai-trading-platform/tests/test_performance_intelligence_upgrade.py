@@ -103,6 +103,88 @@ def test_ppo_gaussian_policy_math():
     adv_std = adv_mean.std(unbiased=False)
     assert adv_std <= 1e-6 # Verifies zero variance correctly detected
 
+def test_ppo_data_validation_and_rejection():
+    """Verify Task 3: PPO data validation, dimension checks, corrupted sample rejection, and behavior log probs."""
+    torch.manual_seed(42)
+    model = SingleSymbolActorCritic(input_dim=200)
+    trainer = PPOTrainer(model=model, limit=10)
+
+    # 1. Valid trajectory with varied rewards
+    batch_n = 10
+    states = torch.randn(batch_n, 300, 200)
+    actions = torch.clamp(torch.randn(batch_n, 4) * 0.5, -1.0, 1.0)
+    # Give varied rewards so adv_std > 1e-6
+    rewards = torch.randn(batch_n, 3) * 5.0
+    next_states = torch.randn(batch_n, 300, 200)
+    dones = torch.zeros(batch_n, 1)
+    dones[4, 0] = 1.0 # Valid binary terminal flag
+
+    # Successful valid update
+    success = trainer.train_step(tensors=(states.clone(), actions.clone(), rewards.clone(), next_states.clone(), dones.clone()), epochs=1)
+    assert success is True
+
+    # 2. Corrupted samples with NaN/Inf are filtered out and logged, not silently zeroed
+    states_corrupt = states.clone()
+    rewards_corrupt = rewards.clone()
+    # Inject NaN into 2 samples
+    states_corrupt[0, 5, 10] = float("nan")
+    rewards_corrupt[1, 0] = float("inf")
+    # 8 valid samples remain (> 4 minimum), update succeeds on valid samples
+    success_filtered = trainer.train_step(tensors=(states_corrupt, actions.clone(), rewards_corrupt, next_states.clone(), dones.clone()), epochs=1)
+    assert success_filtered is True
+
+    # 3. All samples corrupted -> aborts update
+    states_all_nan = torch.full_like(states, float("nan"))
+    assert trainer.train_step(tensors=(states_all_nan, actions.clone(), rewards.clone(), next_states.clone(), dones.clone())) is False
+
+    # 4. Invalid dimensions rejected
+    bad_states = torch.randn(batch_n, 300, 50) # Expected 200
+    assert trainer.train_step(tensors=(bad_states, actions.clone(), rewards.clone(), next_states.clone(), dones.clone())) is False
+
+    bad_actions = torch.randn(batch_n, 2) # Expected 4
+    assert trainer.train_step(tensors=(states.clone(), bad_actions, rewards.clone(), next_states.clone(), dones.clone())) is False
+
+    bad_rewards = torch.randn(batch_n, 1) # Expected 3
+    assert trainer.train_step(tensors=(states.clone(), actions.clone(), bad_rewards, next_states.clone(), dones.clone())) is False
+
+    bad_dones = torch.randn(batch_n, 2) # Expected (batch, 1)
+    assert trainer.train_step(tensors=(states.clone(), actions.clone(), rewards.clone(), next_states.clone(), bad_dones)) is False
+
+    # 5. Non-binary terminal flags rejected
+    invalid_dones = dones.clone()
+    invalid_dones[0, 0] = 0.5 # Non-binary
+    assert trainer.train_step(tensors=(states.clone(), actions.clone(), rewards.clone(), next_states.clone(), invalid_dones)) is False
+
+    # 6. Out-of-bounds action values rejected
+    extreme_actions = actions.clone()
+    extreme_actions[0, 0] = 999.0
+    assert trainer.train_step(tensors=(states.clone(), extreme_actions, rewards.clone(), next_states.clone(), dones.clone())) is False
+
+    # 7. Behavior policy log probabilities validation
+    # When require_stored_behavior_policy=True and no stored old log probs -> rejected!
+    assert trainer.train_step(
+        tensors=(states.clone(), actions.clone(), rewards.clone(), next_states.clone(), dones.clone()),
+        require_stored_behavior_policy=True
+    ) is False
+
+    # When valid stored old log probs are provided -> accepted!
+    stored_probs = torch.randn(batch_n, 1)
+    assert trainer.train_step(
+        tensors=(states.clone(), actions.clone(), rewards.clone(), next_states.clone(), dones.clone()),
+        stored_old_log_probs=stored_probs,
+        require_stored_behavior_policy=True,
+        epochs=1
+    ) is True
+
+    # When stored old log probs contain NaN -> rejected!
+    nan_stored_probs = stored_probs.clone()
+    nan_stored_probs[0, 0] = float("nan")
+    assert trainer.train_step(
+        tensors=(states.clone(), actions.clone(), rewards.clone(), next_states.clone(), dones.clone()),
+        stored_old_log_probs=nan_stored_probs,
+        require_stored_behavior_policy=True
+    ) is False
+
 def test_model_registry_promote_and_rollback(tmp_path):
     """Verify Champion vs Candidate promotion and rollback mechanics."""
     registry = ModelRegistry(model_dir=str(tmp_path))
@@ -574,6 +656,57 @@ def test_atomic_promotion_rejects_unapproved_or_nan_candidate(tmp_path):
     assert registry.promote_candidate(cand_path, version_tag="v_locked", metrics=valid_metrics) is False
     if os.path.exists(lock_file):
         os.remove(lock_file)
+
+    # 10. Missing champion_score in evaluation metrics is rejected
+    no_champ_score = {"approved": True, "reason": "SUPERIOR_TO_CHAMPION", "challenger_score": 0.5}
+    assert registry.promote_candidate(cand_path, version_tag="v_no_champ", metrics=no_champ_score) is False
+
+    # 11. Missing challenger_score in evaluation metrics is rejected
+    no_chall_score = {"approved": True, "reason": "SUPERIOR_TO_CHAMPION", "champion_score": 0.5}
+    assert registry.promote_candidate(cand_path, version_tag="v_no_chall", metrics=no_chall_score) is False
+
+    # 12. Fabricated metrics where challenger is inferior to champion must be rejected
+    inferior_metrics = {
+        "approved": True,
+        "reason": "SUPERIOR_TO_CHAMPION",
+        "challenger_score": 0.10,
+        "champion_score": 0.50
+    }
+    assert registry.promote_candidate(cand_path, version_tag="v_inferior", metrics=inferior_metrics) is False
+
+    # 13. Insufficient evaluation samples (< 30) must be rejected
+    low_samples_metrics = {
+        "approved": True,
+        "reason": "SUPERIOR_TO_CHAMPION",
+        "challenger_score": 0.50,
+        "champion_score": 0.10,
+        "sample_size": 15
+    }
+    assert registry.promote_candidate(cand_path, version_tag="v_low_samples", metrics=low_samples_metrics) is False
+
+    # 14. Stale or future evaluation timestamp must be rejected
+    stale_metrics = {
+        "approved": True,
+        "reason": "SUPERIOR_TO_CHAMPION",
+        "challenger_score": 0.50,
+        "champion_score": 0.10,
+        "eval_timestamp": time.time() - 100000 # > 24h
+    }
+    assert registry.promote_candidate(cand_path, version_tag="v_stale", metrics=stale_metrics) is False
+    future_metrics = {
+        "approved": True,
+        "reason": "SUPERIOR_TO_CHAMPION",
+        "challenger_score": 0.50,
+        "champion_score": 0.10,
+        "eval_timestamp": time.time() + 5000 # In the future
+    }
+    assert registry.promote_candidate(cand_path, version_tag="v_future", metrics=future_metrics) is False
+
+    # 15. Champion preservation: original champion file is strictly preserved on every failed promotion
+    champ_path = os.path.join(str(tmp_path), "model_v1.pt")
+    assert os.path.exists(champ_path)
+    champ_state = torch.load(champ_path, map_location="cpu")
+    assert registry.current_version == "base_v1"
 
 
 

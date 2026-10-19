@@ -11,6 +11,7 @@ load_dotenv()
 
 from core.db.redis import redis_manager
 from core.ai.replay_buffer import ReplayBuffer
+from core.ai.rollout_buffer import RolloutBuffer
 from core.logging.logger import logger, set_log_file
 from apps.research.model import SingleSymbolActorCritic
 from core.ai.registry import ModelRegistry
@@ -18,7 +19,7 @@ from core.ai.registry import ModelRegistry
 class PPOTrainer:
     """
     Phase 11: Proximal Policy Optimization (PPO) Training Loop.
-    Samples from the MySQL ReplayBuffer and updates the Actor-Critic model.
+    Samples from the MySQL ReplayBuffer or RolloutBuffer and updates the Actor-Critic model.
     """
     def __init__(self, model: SingleSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2, limit: int = 300):
         self.model = model
@@ -31,6 +32,7 @@ class PPOTrainer:
         self.gamma = gamma
         self.clip_epsilon = clip_epsilon
         self.buffer = ReplayBuffer()
+        self.rollout_buffer = RolloutBuffer()
         self.limit = limit
         
         # V3 Upgrade: The 300-frame sequence is massive (2MB per record). 
@@ -84,16 +86,47 @@ class PPOTrainer:
             returns = advantages + values
             return advantages, returns
         
+    def sample_action(
+        self,
+        state: torch.Tensor,
+        deterministic: bool = False
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        """
+        Samples an action from the parametric continuous policy distribution at action time.
+        - If deterministic=False (exploration): samples action ~ Normal(mu, std),
+          and computes the exact action-time log_prob = dist.log_prob(action).sum(dim=-1, keepdim=True).
+        - If deterministic=True (evaluation): greedy action = mu,
+          log_prob = None (strictly excluded from on-policy exploration ratio calculations).
+        """
+        self.model.eval()
+        with torch.no_grad():
+            if state.dim() == 2:
+                state = state.unsqueeze(0)
+            action_mean, value = self.model(state)
+            action_std = torch.exp(torch.clamp(self.log_std, min=-2.0, max=0.5))
+            dist = torch.distributions.Normal(action_mean, action_std)
+            if deterministic:
+                action = action_mean
+                log_prob = None
+            else:
+                action = dist.sample()
+                log_prob = dist.log_prob(action).sum(dim=-1, keepdim=True)
+            return action, log_prob, value
+
     def train_step(
         self,
         batch_size: int = 64,
         epochs: int = 4,
         tensors: tuple = None,
+        rollout_buffer: RolloutBuffer = None,
         stored_old_log_probs: torch.Tensor = None,
-        require_stored_behavior_policy: bool = False
+        require_stored_behavior_policy: bool = False,
+        use_off_policy_correction: bool = False
     ):
         """Executes a single mathematically valid PPO training step with strict data validation."""
-        if tensors is not None:
+        if rollout_buffer is not None:
+            states, actions, rewards, next_states, dones, stored_old_log_probs = rollout_buffer.build_tensors(filter_deterministic=True)
+        elif tensors is not None:
             states, actions, rewards, next_states, dones = tensors
         else:
             batch = self.buffer.sample(batch_size)
@@ -168,6 +201,14 @@ class PPOTrainer:
             if stored_old_log_probs.shape[0] != states.shape[0]:
                 logger.error(f"PPO: Dimension mismatch for stored old log probs: {stored_old_log_probs.shape[0]} vs {states.shape[0]}.")
                 return False
+            # Reject dummy zeros (torch.zeros_like)
+            if (stored_old_log_probs == 0.0).all():
+                logger.error("PPO: Stored old-policy log probabilities are dummy zeros (torch.zeros_like rejected).")
+                return False
+            # Reject arbitrary constant values
+            if stored_old_log_probs.shape[0] > 1 and torch.all(stored_old_log_probs == stored_old_log_probs[0]):
+                logger.error("PPO: Stored old-policy log probabilities are arbitrary constant values. Rejected.")
+                return False
             old_log_probs = stored_old_log_probs
             with torch.no_grad():
                 old_action_preds, old_values = self.model(states)
@@ -213,6 +254,10 @@ class PPOTrainer:
             # Numerically stable probability ratio
             diff = torch.clamp(log_probs - old_log_probs, min=-10.0, max=10.0)
             ratio = torch.exp(diff)
+            
+            # Off-policy correction: Importance sampling truncation (V-trace style)
+            if use_off_policy_correction:
+                ratio = torch.clamp(ratio, max=1.0)
             
             # Clipped surrogate objective
             surr1 = ratio * actor_advantages
@@ -419,15 +464,37 @@ class PPOTrainer:
             eval_sample_count = len(states)
             del states, actions, rewards, next_states, dones
 
-            # Superiority criteria (Refined Elite Margin):
-            # 1. Composite score beats Champion by +0.05 margin, OR
-            # 2. Significant Critic MSE improvement (>= 10% error reduction) with resilient directional PnL (>= 90% of champ)
-            SUPERIORITY_MARGIN = 0.05
-            is_superior = (challenger_score >= champion_score + SUPERIORITY_MARGIN) or (
-                challenger_critic_mse <= (champ_critic_mse * 0.90) and challenger_sim_pnl >= (champ_sim_pnl * 0.90)
-            )
+            # Superiority criteria (Task 1.1: Strict Numerical Superiority):
+            # Challenger must strictly beat Champion on composite score AND not degrade trading PnL!
+            # Critic MSE improvement alone cannot authorize promotion if composite score or trading PnL is inferior.
+            SUPERIORITY_MARGIN = 0.01  # Predefined minimum improvement threshold
+            score_beaten = challenger_score >= (champion_score + SUPERIORITY_MARGIN)
+            pnl_preserved = challenger_sim_pnl >= champion_sim_pnl
+            is_superior = score_beaten and pnl_preserved
 
             eval_timestamp = time.time()
+            
+            # Compute cryptographic hash of the current champion checkpoint
+            import hashlib
+            champ_hash = ""
+            if os.path.exists(champion_path):
+                sha256 = hashlib.sha256()
+                with open(champion_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(65536), b""):
+                        sha256.update(chunk)
+                champ_hash = sha256.hexdigest()
+
+            # Read champion version from version.json
+            champ_version = "v1"
+            version_file = "models/production/version.json"
+            if os.path.exists(version_file):
+                try:
+                    with open(version_file, "r") as f:
+                        v_data = json.load(f)
+                        champ_version = v_data.get("version", "v1")
+                except Exception:
+                    pass
+
             metrics = {
                 "challenger_score": challenger_score,
                 "champion_score": champion_score,
@@ -440,8 +507,12 @@ class PPOTrainer:
                 "sample_size": eval_sample_count,
                 "eval_timestamp": eval_timestamp,
                 "eval_type": "chronological_tournament",
+                "data_split": "chronological_holdout",
                 "fee_hurdle": fee_hurdle,
-                "slippage_hurdle": slippage_hurdle
+                "slippage_hurdle": slippage_hurdle,
+                "champion_checkpoint_hash": champ_hash,
+                "champion_version": champ_version,
+                "evaluator_version": "v2_trusted"
             }
 
             if is_superior:
@@ -460,7 +531,7 @@ class PPOTrainer:
             else:
                 logger.warning(
                     f"⛔ TOURNAMENT DEFEAT: Challenger is INFERIOR to current live Champion! "
-                    f"Score: {challenger_score:.4f} < Champ: {champion_score:.4f} | "
+                    f"Score: {challenger_score:.4f} vs Champ: {champion_score:.4f} (Margin: {SUPERIORITY_MARGIN}) | "
                     f"Critic MSE: {challenger_critic_mse:.4f} vs {champ_critic_mse:.4f} | "
                     f"Sim PnL: {challenger_sim_pnl:.4f} vs {champ_sim_pnl:.4f}. REJECTING PUSH."
                 )
@@ -640,6 +711,10 @@ async def run_training_loop():
                         os.makedirs(cand_dir, exist_ok=True)
                         cand_path = os.path.join(cand_dir, f"{version_tag}.pt")
                         torch.save(model.state_dict(), cand_path)
+                        cand_hash = registry.compute_file_sha256(cand_path)
+                        eval_result["candidate_checkpoint_hash"] = cand_hash
+                        if "metrics" in eval_result and isinstance(eval_result["metrics"], dict):
+                            eval_result["metrics"]["candidate_checkpoint_hash"] = cand_hash
                         promoted = registry.promote_candidate(cand_path, version_tag=version_tag, metrics=eval_result)
                         if not promoted:
                             logger.error(f"Promotion gate rejected candidate {version_tag}.")

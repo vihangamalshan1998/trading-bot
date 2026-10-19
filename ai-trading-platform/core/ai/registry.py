@@ -1,4 +1,5 @@
 import os
+from typing import Tuple, Dict, Any, Optional
 import torch
 from core.database.session import SessionLocal
 from core.logging.logger import logger
@@ -202,20 +203,33 @@ class ModelRegistry:
         except Exception as e:
             logger.warning(f"Could not update tournament_history.json: {e}")
 
-    def promote_candidate(self, candidate_checkpoint_path: str, version_tag: str, metrics: dict = None) -> bool:
-        """
-        Promotes a validated candidate model to champion with strict gate checks,
-        concurrency protection, atomic replacement, and automatic rollback backup.
-        """
-        import shutil
-        import time
-        import json
-        import math
+    def compute_file_sha256(self, file_path: str) -> str:
+        """Computes SHA256 cryptographic hash of a file for immutable verification."""
+        import hashlib
+        if not os.path.exists(file_path):
+            return ""
+        sha256 = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                sha256.update(chunk)
+        return sha256.hexdigest()
 
-        # Step 1.2 & 1.3: Mandatory Evaluation Metrics Validation
+    def validate_evaluation_evidence(
+        self,
+        metrics: dict,
+        candidate_checkpoint_path: str,
+        current_champion_path: str
+    ) -> Tuple[bool, str]:
+        """
+        Task 1: Validates that promotion evidence is complete, finite, un-tampered,
+        fresh, bound to exact checkpoint hashes, and satisfies explicit numerical superiority.
+        Returns (is_valid, reason_code).
+        """
+        import math
+        import time
+
         if not metrics or not isinstance(metrics, dict):
-            logger.error("Cannot promote candidate: Evaluation metrics are missing or empty.")
-            return False
+            return False, "MISSING_OR_INVALID_METRICS_DICT"
 
         # Flatten nested metrics if provided under "metrics" key
         m = metrics.get("metrics", metrics) if isinstance(metrics.get("metrics"), dict) else metrics
@@ -223,55 +237,117 @@ class ModelRegistry:
         reason = metrics.get("reason") if "reason" in metrics else m.get("reason")
 
         if approved is not True:
-            logger.error(f"Cannot promote candidate: Candidate is not approved (approved={approved}, reason={reason}).")
-            return False
+            return False, f"CANDIDATE_NOT_APPROVED: approved={approved}"
 
         if not reason or not isinstance(reason, str):
-            logger.error("Cannot promote candidate: Missing required evaluation evidence 'reason'.")
-            return False
+            return False, "MISSING_REQUIRED_EVALUATION_REASON"
 
-        # Validate metrics are finite numbers where present
-        for m_key in ["challenger_score", "champion_score", "critic_loss", "entropy", "sample_size", "eval_timestamp"]:
-            val = m.get(m_key)
-            if val is not None and (math.isnan(val) or math.isinf(val)):
-                logger.error(f"Cannot promote candidate: Non-finite evaluation metric '{m_key}' = {val}.")
-                return False
+        # 1. Reject training-only evaluation
+        data_split = m.get("data_split") or m.get("eval_type")
+        if data_split == "train_only" or m.get("train_only") is True:
+            return False, "TRAIN_ONLY_EVALUATION_REJECTED"
 
-        # Require genuine benchmark comparison against champion
-        champ_score = m.get("champion_score")
-        chall_score = m.get("challenger_score")
-        if champ_score is None:
-            logger.error("Cannot promote candidate: Missing 'champion_score'. Candidate must be benchmarked against current champion.")
-            return False
-        if chall_score is None:
-            logger.error("Cannot promote candidate: Missing 'challenger_score'. Candidate must have valid evaluation score.")
-            return False
+        # 2. Reject non-finite metrics
+        required_numeric_keys = ["challenger_score", "champion_score"]
+        optional_numeric_keys = [
+            "challenger_sim_pnl", "champion_sim_pnl",
+            "challenger_critic_mse", "champion_critic_mse",
+            "critic_loss", "entropy", "sample_size", "eval_timestamp",
+            "fee_hurdle", "slippage_hurdle"
+        ]
+        for key in required_numeric_keys:
+            val = m.get(key)
+            if val is None:
+                return False, f"MISSING_REQUIRED_NUMERIC_METRIC_{key.upper()}"
+            if not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+                return False, f"NON_FINITE_OR_INVALID_TYPE_{key.upper()}"
 
-        # Reject fabricated metrics where challenger is inferior to champion
-        if chall_score < champ_score and "CRITIC_IMPROVEMENT" not in reason:
-            logger.error(f"Cannot promote candidate: Challenger score ({chall_score:.4f}) is inferior to champion score ({champ_score:.4f}). Fabricated metrics rejected.")
-            return False
+        for key in optional_numeric_keys:
+            val = m.get(key)
+            if val is not None:
+                if not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+                    return False, f"NON_FINITE_OR_INVALID_TYPE_{key.upper()}"
 
-        # Validate sample size
+        chall_score = float(m["challenger_score"])
+        champ_score = float(m["champion_score"])
+
+        # 3. Task 1.1: Remove inferior-candidate bypass completely!
+        # Numerical comparison is absolute: textual reason (e.g. CRITIC_IMPROVEMENT) can NEVER override a failed comparison!
+        if chall_score <= champ_score:
+            return False, f"INFERIOR_SCORE_REJECTED: challenger ({chall_score:.4f}) <= champion ({champ_score:.4f})"
+
+        # Critic loss improvement alone must never authorize promotion if trading criteria degrades
+        chall_pnl = m.get("challenger_sim_pnl")
+        champ_pnl = m.get("champion_sim_pnl")
+        if chall_pnl is not None and champ_pnl is not None:
+            if chall_pnl < champ_pnl:
+                return False, f"DEGRADED_TRADING_PERFORMANCE_REJECTED: chall_pnl ({chall_pnl:.4f}) < champ_pnl ({champ_pnl:.4f})"
+
+        # 4. Mandatory sample size validation
         sample_size = m.get("sample_size")
-        if sample_size is not None:
-            if not isinstance(sample_size, (int, float)) or sample_size < 30:
-                logger.error(f"Cannot promote candidate: Insufficient evaluation samples ({sample_size} < 30).")
-                return False
+        if sample_size is None:
+            return False, "MISSING_REQUIRED_SAMPLE_SIZE"
+        if not isinstance(sample_size, (int, float)) or sample_size < 30:
+            return False, f"INSUFFICIENT_SAMPLE_SIZE: {sample_size} < 30"
 
-        # Validate evaluation timestamp freshness (must be within last 24h and not in the future)
+        # 5. Mandatory evaluation timestamp freshness (within last 24h and not in future)
         eval_timestamp = m.get("eval_timestamp")
-        if eval_timestamp is not None:
-            now_t = time.time()
-            if eval_timestamp > now_t + 60 or (now_t - eval_timestamp > 86400):
-                logger.error(f"Cannot promote candidate: Stale or future evaluation timestamp ({eval_timestamp}).")
-                return False
+        if eval_timestamp is None:
+            return False, "MISSING_REQUIRED_EVAL_TIMESTAMP"
+        now_t = time.time()
+        if eval_timestamp > now_t + 60:
+            return False, f"FUTURE_EVAL_TIMESTAMP: {eval_timestamp} > {now_t + 60}"
+        if now_t - eval_timestamp > 86400:
+            return False, f"STALE_EVAL_TIMESTAMP: {eval_timestamp} older than 24h"
+
+        # 6. Checkpoint hash and champion version binding
+        if os.path.exists(candidate_checkpoint_path):
+            actual_cand_hash = self.compute_file_sha256(candidate_checkpoint_path)
+            claimed_cand_hash = m.get("candidate_checkpoint_hash")
+            if claimed_cand_hash and claimed_cand_hash != actual_cand_hash:
+                return False, f"CANDIDATE_HASH_MISMATCH: claimed {claimed_cand_hash} != actual {actual_cand_hash}"
+
+        if os.path.exists(current_champion_path):
+            actual_champ_hash = self.compute_file_sha256(current_champion_path)
+            claimed_champ_hash = m.get("champion_checkpoint_hash")
+            if claimed_champ_hash and claimed_champ_hash != actual_champ_hash:
+                return False, f"CHAMPION_HASH_MISMATCH: claimed {claimed_champ_hash} != actual {actual_champ_hash}"
+
+            claimed_champ_version = m.get("champion_version")
+            if claimed_champ_version and claimed_champ_version != self.get_current_version():
+                return False, f"CHAMPION_VERSION_MISMATCH: claimed {claimed_champ_version} != current {self.get_current_version()}"
+
+        return True, "EVALUATION_EVIDENCE_VALIDATED"
+
+    def promote_candidate(self, candidate_checkpoint_path: str, version_tag: str, metrics: dict = None) -> bool:
+        """
+        Promotes a validated candidate model to champion with strict fail-closed gate checks,
+        concurrency protection, atomic replacement, and transactional rollback.
+        """
+        import shutil
+        import time
+        import json
+
+        current_champion = os.path.join(self.model_dir, "model_v1.pt")
+        backup_champion = os.path.join(self.model_dir, "model_v1_backup.pt")
+        version_file = os.path.join(self.model_dir, "version.json")
+        backup_version = os.path.join(self.model_dir, "version_backup.json")
+
+        # Step 1: Validate evidence
+        valid_evidence, evidence_reason = self.validate_evaluation_evidence(
+            metrics=metrics,
+            candidate_checkpoint_path=candidate_checkpoint_path,
+            current_champion_path=current_champion
+        )
+        if not valid_evidence:
+            logger.error(f"Cannot promote candidate: Evaluation evidence rejected: {evidence_reason}.")
+            return False
 
         if not os.path.exists(candidate_checkpoint_path):
             logger.error(f"Cannot promote candidate: file {candidate_checkpoint_path} not found.")
             return False
 
-        # Step 1.2: Candidate weights & architecture verification before promotion
+        # Step 2: Candidate weights & architecture verification before promotion
         try:
             cand_state = torch.load(candidate_checkpoint_path, map_location="cpu")
             if not isinstance(cand_state, dict):
@@ -316,38 +392,52 @@ class ModelRegistry:
                 return False
 
         try:
-            current_champion = os.path.join(self.model_dir, "model_v1.pt")
-            backup_champion = os.path.join(self.model_dir, "model_v1_backup.pt")
-            
-            # Step 1.4: Backup current champion before replacement
+            # Recheck that current champion has not been swapped by concurrent process
+            if os.path.exists(current_champion) and metrics:
+                m = metrics.get("metrics", metrics) if isinstance(metrics.get("metrics"), dict) else metrics
+                claimed_champ_hash = m.get("champion_checkpoint_hash")
+                if claimed_champ_hash:
+                    cur_hash = self.compute_file_sha256(current_champion)
+                    if cur_hash != claimed_champ_hash:
+                        logger.error(f"Cannot promote candidate: Champion changed concurrently during evaluation ({cur_hash} != {claimed_champ_hash}).")
+                        return False
+
+            # Backup current champion and version metadata before replacement
             if os.path.exists(current_champion):
                 shutil.copy2(current_champion, backup_champion)
-                
+            if os.path.exists(version_file):
+                shutil.copy2(version_file, backup_version)
+
             # Atomic promotion: Copy to temp file, verify readability, then atomic os.replace
             temp_champion = os.path.join(self.model_dir, "model_v1.pt.tmp")
             shutil.copy2(candidate_checkpoint_path, temp_champion)
             _ = torch.load(temp_champion, map_location="cpu")
             os.replace(temp_champion, current_champion)
             self.current_version = version_tag
-            
+
             # Atomic version metadata write
-            version_file = os.path.join(self.model_dir, "version.json")
             temp_version = os.path.join(self.model_dir, "version.json.tmp")
-            try:
-                with open(temp_version, "w") as f:
-                    json.dump({
-                        "version": version_tag,
-                        "promoted_at": time.time(),
-                        "metrics": metrics,
-                        "has_backup": os.path.exists(backup_champion)
-                    }, f, indent=2)
-                os.replace(temp_version, version_file)
-            except Exception as e:
-                logger.warning(f"Could not write version.json: {e}")
-                
+            with open(temp_version, "w") as f:
+                json.dump({
+                    "version": version_tag,
+                    "promoted_at": time.time(),
+                    "metrics": metrics,
+                    "candidate_sha256": self.compute_file_sha256(current_champion),
+                    "has_backup": os.path.exists(backup_champion)
+                }, f, indent=2)
+            os.replace(temp_version, version_file)
+
             self.record_tournament_result(metrics, version_tag=version_tag)
             logger.info(f"🏆 Candidate {version_tag} PROMOTED to Production Champion!")
             return True
+        except Exception as e:
+            logger.error(f"Promotion failed unexpectedly: {e}. Executing immediate rollback...")
+            if os.path.exists(backup_champion):
+                shutil.copy2(backup_champion, current_champion)
+            if os.path.exists(backup_version):
+                shutil.copy2(backup_version, version_file)
+            self.current_version = self.get_current_version()
+            return False
         finally:
             if os.path.exists(lock_file):
                 try:
@@ -356,13 +446,20 @@ class ModelRegistry:
                     pass
 
     def rollback(self) -> bool:
-        """Restores the last known-good champion checkpoint from backup."""
+        """Restores the last known-good champion checkpoint and version metadata from backup."""
         import shutil
         backup_path = os.path.join(self.model_dir, "model_v1_backup.pt")
         target_path = os.path.join(self.model_dir, "model_v1.pt")
+        backup_version_path = os.path.join(self.model_dir, "version_backup.json")
+        target_version_path = os.path.join(self.model_dir, "version.json")
+
         if not os.path.exists(backup_path):
             logger.error("Rollback failed: No backup checkpoint found!")
             return False
+
         shutil.copy2(backup_path, target_path)
-        logger.info("Successfully rolled back to previous champion checkpoint!")
+        if os.path.exists(backup_version_path):
+            shutil.copy2(backup_version_path, target_version_path)
+            self.current_version = self.get_current_version()
+        logger.info("Successfully rolled back to previous champion checkpoint and version metadata!")
         return True

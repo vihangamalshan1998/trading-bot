@@ -206,7 +206,10 @@ def test_model_registry_promote_and_rollback(tmp_path):
         "reason": "SUPERIOR_TO_CHAMPION",
         "challenger_score": 0.15,
         "champion_score": 0.05,
-        "critic_loss": 0.01
+        "critic_loss": 0.01,
+        "sample_size": 100,
+        "eval_timestamp": time.time(),
+        "data_split": "chronological_holdout"
     }
     promoted = registry.promote_candidate(cand_path, version_tag="v2_promoted", metrics=valid_metrics)
     assert promoted

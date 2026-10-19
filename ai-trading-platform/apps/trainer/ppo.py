@@ -44,27 +44,31 @@ class PPOTrainer:
         values: torch.Tensor,
         next_values: torch.Tensor,
         dones: torch.Tensor,
-        gae_lambda: float = 0.95
+        gae_lambda: float = 0.95,
+        is_trajectory: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Computes Generalized Advantage Estimation (GAE) with recursive backward trajectory accumulation.
-        delta_t = reward_t + gamma * next_value_t * (1 - done_t) - value_t
-        advantage_t = delta_t + gamma * gae_lambda * (1 - done_t) * advantage_{t+1}
-        return_t = advantage_t + value_t
+        Computes Generalized Advantage Estimation (GAE).
+        For sequential trajectories (is_trajectory=True):
+            Recursively accumulates backward over the temporal trajectory:
+            delta_t = reward_t + gamma * next_value_t * (1 - done_t) - value_t
+            advantage_t = delta_t + gamma * gae_lambda * (1 - done_t) * advantage_{t+1}
+        For independent minibatch transitions (is_trajectory=False):
+            Computes exact single-step TD error to avoid falsely chaining independent transitions:
+            delta_i = reward_i + gamma * next_value_i * (1 - done_i) - value_i
         """
         if dones.dim() == 1:
             dones = dones.unsqueeze(-1)
 
         # Multi-step sequential trajectory handling (T, Batch, ...)
-        if rewards.dim() >= 2 and rewards.size(0) > 1:
+        if is_trajectory and rewards.dim() >= 2 and rewards.size(0) > 1:
             T = rewards.size(0)
             advantages = torch.zeros_like(rewards)
             last_gae = torch.zeros_like(rewards[-1])
             
-            # Recursive backward iteration over the trajectory
+            # Recursive backward iteration over the sequential trajectory
             for t in reversed(range(T)):
                 non_terminal = 1.0 - dones[t]
-                # Next value for step t is either next_values[t] or values[t+1]
                 n_val = next_values[t] if t == T - 1 else values[t + 1]
                 delta = rewards[t] + (self.gamma * n_val * non_terminal) - values[t]
                 last_gae = delta + (self.gamma * gae_lambda * non_terminal * last_gae)
@@ -73,7 +77,7 @@ class PPOTrainer:
             returns = advantages + values
             return advantages, returns
         else:
-            # 1-step transition handling
+            # Independent transition handling
             non_terminal = 1.0 - dones
             delta = rewards + (self.gamma * next_values * non_terminal) - values
             advantages = delta.clone()

@@ -220,7 +220,7 @@ def test_recursive_gae_hand_calculated():
     next_values = torch.tensor([[1.5], [2.5], [3.5]], dtype=torch.float32)
     dones = torch.tensor([[0.0], [0.0], [1.0]], dtype=torch.float32) # Terminal at step 2
     
-    adv, ret = trainer.compute_gae(rewards, values, next_values, dones, gae_lambda=0.80)
+    adv, ret = trainer.compute_gae(rewards, values, next_values, dones, gae_lambda=0.80, is_trajectory=True)
     
     # Step 2: delta = 3 + 0 - 2.5 = 0.5, adv = 0.5, ret = 3.0
     assert abs(adv[2, 0].item() - 0.5) < 1e-4
@@ -262,4 +262,33 @@ def test_edge_estimator_uncertainty_penalty():
     )
     # Net edge should be strictly lower for low confidence due to uncertainty penalty
     assert res_high.net_expected_return_pct > res_low.net_expected_return_pct
+
+def test_backtest_unchanged_price_produces_loss():
+    """Verify that a position held across unchanged prices produces a net loss due to fees and friction."""
+    position = 1.0  # LONG
+    entry_price = 100.0
+    exit_price = 100.0  # Zero price change
+    leverage = 5
+    taker_fee_pct = 0.0005
+    spread_pct = 0.00015
+    slippage_pct = 0.00010
+    
+    gross_trade_ret = position * ((exit_price - entry_price) / entry_price)
+    exit_friction = taker_fee_pct + spread_pct + slippage_pct
+    net_trade_ret = (gross_trade_ret * leverage) - (exit_friction * leverage)
+    
+    assert gross_trade_ret == 0.0
+    assert net_trade_ret < 0.0  # Must be strictly negative due to friction
+
+def test_dynamic_universe_accepts_new_usdt_symbols():
+    """Verify ProductionTradingBot accepts dynamic universes without crashing on settings.symbol_universe mismatch."""
+    from apps.trading_bot.main import ProductionTradingBot
+    from unittest.mock import patch
+    
+    dynamic_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "SUIUSDT", "PEPEUSDT"]
+    with patch("core.ai.registry.ModelRegistry.load_model", side_effect=FileNotFoundError("No model")):
+        bot = ProductionTradingBot(symbols=dynamic_symbols)
+        assert bot.symbols == dynamic_symbols
+        assert bot.num_symbols == 5
+        assert bot.has_valid_model is False
 

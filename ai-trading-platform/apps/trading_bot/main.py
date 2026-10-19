@@ -31,10 +31,10 @@ class ProductionTradingBot:
     """
     def __init__(self, symbols: list):
         self.symbols = symbols
-        self.num_symbols = len(symbols)
-        
-        if self.symbols != settings.symbol_universe:
-            raise RuntimeError(f"Symbols mismatch: {self.symbols} != {settings.symbol_universe}")
+        # Dynamic Symbol Validation: Ensure non-empty and all symbols are valid USDT perpetual contracts
+        if not self.symbols or not all(isinstance(s, str) and s.endswith("USDT") for s in self.symbols):
+            raise ValueError(f"Invalid symbol universe specification: {self.symbols}. All symbols must be valid USDT perpetuals.")
+        self.num_symbols = len(self.symbols)
             
         self.redis = redis_manager
         self.risk_manager = RiskManager()
@@ -592,8 +592,26 @@ class ProductionTradingBot:
                     self.model.eval()
                     logger.info("Hot reload complete.")
 
-                # 24-Hour Rolling Circuit Breaker Tracking (5% Daily Loss Kill Switch) & Profit Ratchet
                 now_t = time.time()
+                # 0.1 Dynamic Universe Synchronization: Integrate hot coins from UniverseScreener
+                if self.redis.redis and (now_t - getattr(self, "_last_universe_check", 0.0)) > 60.0:
+                    self._last_universe_check = now_t
+                    try:
+                        raw_u = await self.redis.redis.get("system:active_symbols")
+                        if raw_u:
+                            u_list = json.loads(raw_u.decode("utf-8") if isinstance(raw_u, bytes) else raw_u)
+                            if isinstance(u_list, list) and len(u_list) > 0:
+                                for s in u_list:
+                                    if s not in self.symbols and isinstance(s, str) and s.endswith("USDT"):
+                                        self.symbols.append(s)
+                                        self.num_symbols = len(self.symbols)
+                                        if s not in self.portfolio_state.positions:
+                                            self.portfolio_state.positions[s] = PositionState(symbol=s, quantity=0.0)
+                                        logger.info(f"🌐 DYNAMIC UNIVERSE: Successfully added hot coin {s} from screener.")
+                    except Exception as u_err:
+                        logger.debug(f"Dynamic universe check: {u_err}")
+
+                # 24-Hour Rolling Circuit Breaker Tracking (5% Daily Loss Kill Switch) & Profit Ratchet
                 current_eq = float(self.portfolio_state.equity)
                 if (now_t - self.daily_equity_reset_time) >= 86400.0 or self.daily_start_equity <= 0.0:
                     if current_eq > 0:

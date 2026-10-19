@@ -22,6 +22,7 @@ from core.ai.memory import EventMemoryBuffer
 from core.schemas.state_schema import MarketState, PortfolioState, PositionState, MacroState, OrderRequest
 from core.config.settings import settings
 from core.ai.institutional_alpha import InstitutionalAlphaEngine
+from core.risk.edge_estimator import EdgeEstimator
 
 class ProductionTradingBot:
     """
@@ -130,6 +131,9 @@ class ProductionTradingBot:
         self.loss_lockout_until = {sym: {"LONG": 0.0, "SHORT": 0.0} for sym in self.symbols}
         self.htf_regimes = {sym: {"trend": "NEUTRAL", "adx": 0.0, "ema20": 0.0, "ema50": 0.0, "last_updated": 0.0} for sym in self.symbols}
         self.alpha_engine = InstitutionalAlphaEngine(symbols=self.symbols)
+        self.edge_estimator = EdgeEstimator(min_net_edge_pct=0.08)
+        self.dynamic_active_symbols = list(self.symbols)
+        self.last_universe_check_time = 0.0
         
     async def listen_macro(self):
         await self.redis.connect()
@@ -725,6 +729,28 @@ class ProductionTradingBot:
                 # 1. Existing positions & active limit orders are evaluated FIRST to guarantee instant SL/TP/trailing execution.
                 # 2. Flat candidate symbols are sorted in descending order of Opportunity Score (Confidence × Expected Return),
                 #    ensuring high-momentum breakouts on altcoins (e.g. NEAR, AVAX, LINK) get first access to open portfolio slots.
+                # Phase 5: Dynamic Symbol Universe Sync from UniverseScreener
+                now_u = time.time()
+                if (now_u - self.last_universe_check_time) > 300.0 and self.redis.redis:
+                    self.last_universe_check_time = now_u
+                    try:
+                        raw_u = await self.redis.redis.get("system:active_symbols")
+                        if raw_u:
+                            parsed_u = json.loads(raw_u)
+                            if isinstance(parsed_u, list) and len(parsed_u) > 0:
+                                valid_dyn = [s for s in parsed_u if s in self.symbols]
+                                # Always retain any symbol with an active position or open order
+                                for s, p in self.portfolio_state.positions.items():
+                                    if abs(p.quantity) > 1e-5 and s not in valid_dyn:
+                                        valid_dyn.append(s)
+                                for s in self.active_orders:
+                                    if s not in valid_dyn:
+                                        valid_dyn.append(s)
+                                if valid_dyn:
+                                    self.dynamic_active_symbols = valid_dyn
+                    except Exception as e:
+                        logger.debug(f"Dynamic universe sync error: {e}")
+
                 active_symbols = []
                 flat_candidates = []
                 
@@ -1925,6 +1951,25 @@ class ProductionTradingBot:
                             dust_floor = max(10.0, min(50.0, current_eq * 0.05 * pos.leverage))
                             if (qty_raw * market.mid_price) < dust_floor:
                                 logger.info(f"[{sym}] Skipping micro-order: notional ${qty_raw * market.mid_price:.2f} < ${dust_floor:.2f} minimum.")
+                                continue
+                                
+                            # Phase 2: Pre-Trade Net-Edge Estimator (Ensures positive expectancy after fees, spread, and slippage)
+                            c5m_pred = float(precomputed_critics[sym][0]) if (sym in precomputed_critics and len(precomputed_critics[sym]) > 0) else 0.25
+                            active_regime = "NEUTRAL"
+                            if sym in self.htf_regimes:
+                                active_regime = self.htf_regimes[sym].get("trend", "NEUTRAL")
+                            edge_result = self.edge_estimator.estimate(
+                                symbol=sym,
+                                side=side,
+                                predicted_move_pct=c5m_pred,
+                                confidence=float(confidence),
+                                market=market,
+                                is_maker=True,
+                                order_size_notional=qty_raw * market.mid_price,
+                                regime=active_regime
+                            )
+                            if not edge_result.approved:
+                                logger.info(f"[{sym}] 🛑 NET-EDGE ESTIMATOR: Skipping {side}. {edge_result.reason_code} | Est Costs: {edge_result.estimated_costs_pct:.3f}%")
                                 continue
                         else:
                             # For CLOSE actions, we close the entire existing quantity, UNLESS it's a 50% partial TP!

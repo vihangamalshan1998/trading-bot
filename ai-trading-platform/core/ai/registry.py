@@ -187,3 +187,51 @@ class ModelRegistry:
                 json.dump(history, f, indent=2)
         except Exception as e:
             logger.warning(f"Could not update tournament_history.json: {e}")
+
+    def promote_candidate(self, candidate_checkpoint_path: str, version_tag: str, metrics: dict = None) -> bool:
+        """Promotes a validated candidate model to champion with automatic rollback backup."""
+        import shutil
+        import time
+        import json
+        if not os.path.exists(candidate_checkpoint_path):
+            logger.error(f"Cannot promote candidate: file {candidate_checkpoint_path} not found.")
+            return False
+            
+        current_champion = os.path.join(self.model_dir, "model_v1.pt")
+        backup_champion = os.path.join(self.model_dir, "model_v1_backup.pt")
+        
+        # Backup current champion before replacement
+        if os.path.exists(current_champion):
+            shutil.copy2(current_champion, backup_champion)
+            
+        # Promote candidate
+        shutil.copy2(candidate_checkpoint_path, current_champion)
+        self.current_version = version_tag
+        
+        version_file = os.path.join(self.model_dir, "version.json")
+        try:
+            with open(version_file, "w") as f:
+                json.dump({
+                    "version": version_tag,
+                    "promoted_at": time.time(),
+                    "metrics": metrics or {},
+                    "has_backup": os.path.exists(backup_champion)
+                }, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Could not write version.json: {e}")
+            
+        self.record_tournament_result(metrics or {}, version_tag=version_tag)
+        logger.info(f"🏆 Candidate {version_tag} PROMOTED to Production Champion!")
+        return True
+
+    def rollback(self) -> bool:
+        """Restores the last known-good champion checkpoint from backup."""
+        import shutil
+        backup_path = os.path.join(self.model_dir, "model_v1_backup.pt")
+        target_path = os.path.join(self.model_dir, "model_v1.pt")
+        if not os.path.exists(backup_path):
+            logger.error("Rollback failed: No backup checkpoint found!")
+            return False
+        shutil.copy2(backup_path, target_path)
+        logger.info("Successfully rolled back to previous champion checkpoint!")
+        return True

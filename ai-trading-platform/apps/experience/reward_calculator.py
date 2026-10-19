@@ -35,34 +35,55 @@ class RewardCalculator:
                     return 0 # Nothing to do
                     
                 for exp in ungraded:
-                    # 5-min, 1-hour, and 4-hour rewards
-                    t_start = exp.timestamp
-                    
-                    # FETCH ALL FUTURE ROWS ONCE (Up to 4 hours)
-                    future_rows = session.query(Experience.reward, Experience.timestamp).filter(
-                        Experience.timestamp >= t_start,
-                        Experience.timestamp <= t_start + 14400,
-                        Experience.symbol == exp.symbol
-                    ).order_by(Experience.timestamp.asc()).all()
-                    
-                    if not future_rows:
-                        exp.reward_5m = exp.reward_1h = exp.reward_4h = (exp.reward or 0.0)
-                        continue
+                    # Phase 1.B: Extract initial price and action direction
+                    p_start = exp.entry_price
+                    if not p_start and exp.market_state:
+                        p_start = exp.market_state.get("mid_price") or exp.market_state.get("last_price")
                         
-                    # CALCULATE IN FAST RAM INSTEAD OF 3 SQL QUERIES
-                    r_5m_sum = 0.0
-                    r_1h_sum = 0.0
-                    r_4h_sum = 0.0
-                    
-                    for r, t in future_rows:
-                        val = r or 0.0
-                        if t <= t_start + 300: r_5m_sum += val
-                        if t <= t_start + 3600: r_1h_sum += val
-                        if t <= t_start + 14400: r_4h_sum += val
+                    action_str = str(exp.action or "").upper()
+                    if "LONG" in action_str:
+                        direction = 1.0
+                    elif "SHORT" in action_str:
+                        direction = -1.0
+                    else:
+                        direction = 0.0
                         
-                    exp.reward_5m = r_5m_sum
-                    exp.reward_1h = r_1h_sum
-                    exp.reward_4h = r_4h_sum
+                    round_trip_fee_pct = (settings.maker_fee_pct + settings.taker_fee_pct) * 100.0  # e.g. 0.07%
+                    
+                    # Track closest future price for 5m, 1h, 4h
+                    p_5m = None
+                    p_1h = None
+                    p_4h = None
+                    
+                    for row in future_rows:
+                        t = row.timestamp
+                        f_price = row.entry_price
+                        if not f_price and row.market_state:
+                            f_price = row.market_state.get("mid_price") or row.market_state.get("last_price")
+                            
+                        if f_price:
+                            if t <= t_start + 300:
+                                p_5m = f_price
+                            if t <= t_start + 3600:
+                                p_1h = f_price
+                            if t <= t_start + 14400:
+                                p_4h = f_price
+                                
+                    def compute_horizon_outcome(p_future):
+                        if not p_start or not p_future or p_start <= 0:
+                            return 0.0
+                        price_delta_pct = ((p_future - p_start) / p_start) * 100.0
+                        if direction != 0.0:
+                            gross = price_delta_pct * direction
+                            net = gross - round_trip_fee_pct
+                            return float(net)
+                        else:
+                            # HOLD: 0.0 baseline, no arbitrary reward bonus
+                            return 0.0
+
+                    exp.reward_5m = compute_horizon_outcome(p_5m)
+                    exp.reward_1h = compute_horizon_outcome(p_1h)
+                    exp.reward_4h = compute_horizon_outcome(p_4h)
                     
                 session.commit()
                 return len(ungraded)

@@ -22,7 +22,12 @@ class PPOTrainer:
     """
     def __init__(self, model: SingleSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2, limit: int = 300):
         self.model = model
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-5)
+        self.log_std = nn.Parameter(torch.ones(4) * -0.5)
+        self.optimizer = optim.Adam(
+            list(self.model.parameters()) + [self.log_std],
+            lr=lr,
+            weight_decay=1e-5
+        )
         self.gamma = gamma
         self.clip_epsilon = clip_epsilon
         self.buffer = ReplayBuffer()
@@ -35,15 +40,14 @@ class PPOTrainer:
         
     def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        CRITICAL FIX: Since the database pre-calculates the exact Multi-Horizon sums (5m, 1h, 4h),
-        the rewards tensor IS the true return. We do not need recursive TD learning.
+        Calculates multi-horizon returns and advantages with proper baseline subtraction.
         """
         returns = rewards
         advantages = returns - values
         return advantages, returns
         
     def train_step(self, batch_size: int = 64, epochs: int = 4):
-        """Executes a single PPO training step."""
+        """Executes a single mathematically valid PPO training step."""
         batch = self.buffer.sample(batch_size)
         if len(batch) < batch_size:
             logger.warning(f"Not enough samples in replay buffer to train. Got {len(batch)}, needed {batch_size}")
@@ -53,16 +57,13 @@ class PPOTrainer:
         is_nan = any(torch.isnan(p).any() for p in self.model.parameters())
         if is_nan:
             logger.error("MODEL WEIGHTS ARE NAN!")
-            # Re-initialize model to recover
             self.model.apply(lambda m: hasattr(m, 'reset_parameters') and m.reset_parameters())
             logger.info("Model weights have been re-initialized.")
 
-            
         states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
         if len(states) == 0:
-            return
+            return False
             
-        # Absolute safety net: Clean any NaN values pulled from the MySQL database
         states = torch.nan_to_num(states, nan=0.0, posinf=1.0, neginf=-1.0)
         next_states = torch.nan_to_num(next_states, nan=0.0, posinf=1.0, neginf=-1.0)
         actions = torch.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0)
@@ -71,48 +72,41 @@ class PPOTrainer:
             
         self.model.train()
         
-        # 1. Get old log probabilities and values
+        # 1. Old Policy Evaluation with Continuous Gaussian Action Distribution
         with torch.no_grad():
             old_action_preds, old_values = self.model(states)
             _, next_values = self.model(next_states)
             
-            # Use MSE between action and predicted action as proxy for probability
-            old_log_probs = -((actions - old_action_preds) ** 2).mean(dim=-1, keepdim=True)
+            # Action distribution: Normal(mu, sigma)
+            action_std = torch.exp(torch.clamp(self.log_std, min=-2.0, max=0.5))
+            dist_old = torch.distributions.Normal(old_action_preds, action_std)
+            old_log_probs = dist_old.log_prob(actions).sum(dim=-1, keepdim=True)
             
-            # Scale rewards to prevent gradient explosion.
-            # Multi-horizon rewards are summed over hours (can reach 100+), so we need a larger divisor.
             safe_rewards = rewards / 200.0
-            
             advantages, returns = self.compute_gae(safe_rewards, old_values, next_values, dones)
-            
-            # Average advantages across the 3 horizons for the Actor
             actor_advantages = advantages.mean(dim=1, keepdim=True)
             
             adv_mean = actor_advantages.mean()
             adv_std = actor_advantages.std(unbiased=False)
             
-            # CRITICAL FIX: If all rewards are identical (e.g., all -0.02% fees),
-            # standard deviation is 0. Normalizing it zeroes out the advantages entirely,
-            # which deletes the Actor's ability to learn that the action was bad!
-            if actor_advantages.size(0) > 1 and adv_std > 1e-5:
-                actor_advantages = (actor_advantages - adv_mean) / (adv_std + 1e-8)
-            else:
-                # CRITICAL FIX: If std is zero, the actor gets no gradient and mode-collapses.
-                # Inject noise to force exploration!
-                actor_advantages = torch.randn_like(actor_advantages) * 0.1
+            # Phase 1.A: Never manufacture random advantages. If insufficient variance, skip update.
+            if actor_advantages.size(0) <= 1 or adv_std <= 1e-6:
+                logger.info(f"PPO: Insufficient reward variation in batch (adv_std={adv_std.item():.6f} <= 1e-6). Deferring update.")
+                return False
                 
-            # Final Safety Net against NaN values
+            actor_advantages = (actor_advantages - adv_mean) / (adv_std + 1e-8)
             actor_advantages = torch.nan_to_num(actor_advantages, nan=0.0)
             
         # 2. PPO Epochs
         for _ in range(epochs):
             action_preds, values = self.model(states)
             
-            # Simple Gaussian log prob proxy
-            log_probs = -((actions - action_preds) ** 2).mean(dim=-1, keepdim=True)
+            action_std = torch.exp(torch.clamp(self.log_std, min=-2.0, max=0.5))
+            dist = torch.distributions.Normal(action_preds, action_std)
+            log_probs = dist.log_prob(actions).sum(dim=-1, keepdim=True)
             
-            # CRITICAL FIX: Clamp the diff before exp() to prevent ratio from becoming Inf/NaN
-            diff = torch.clamp(log_probs - old_log_probs, min=-20.0, max=20.0)
+            # Numerically stable probability ratio
+            diff = torch.clamp(log_probs - old_log_probs, min=-10.0, max=10.0)
             ratio = torch.exp(diff)
             
             # Clipped surrogate objective
@@ -120,37 +114,22 @@ class PPOTrainer:
             surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * actor_advantages
             actor_loss = -torch.min(surr1, surr2).mean()
             
-            # Critic must learn all 3 horizons (MSE handles the shape automatically)
-            # Normalize returns to prevent Critic MSE from exploding when rewards are large
-            returns_normalized = (returns - returns.mean()) / (returns.std(unbiased=False) + 1e-8)
-            values_normalized = (values - returns.mean()) / (returns.std(unbiased=False) + 1e-8)
-            critic_loss = nn.MSELoss()(values_normalized, returns_normalized)
+            # Value loss (MSE across multi-horizon critic)
+            critic_loss = nn.MSELoss()(values, returns)
             
-            # Entropy Bonus (prevents Mode Collapse / 100% BUY situations)
-            if action_preds.size(0) > 1:
-                # CRITICAL FIX: PyTorch's std() has a derivative of NaN when the variance is exactly 0
-                # (division by zero in the square root). We MUST add epsilon BEFORE the square root.
-                # Also, add tiny noise to prevent d(var)/d(x) = 0 during absolute mode collapse
-                noise = torch.randn_like(action_preds) * 1e-5
-                var = (action_preds + noise).var(dim=0, unbiased=False)
-                entropy = torch.sqrt(var + 1e-8).mean()
-            else:
-                entropy = torch.tensor(0.0, device=action_preds.device)
-                
-            entropy = torch.nan_to_num(entropy, nan=0.0) # Absolute safety net
-            # BOOSTED: Increased from 0.01 to 0.035 to break stubborn mode collapse (prevents permanent 100% SHORT bias)
-            entropy_coef = 0.035 
+            # Analytical Gaussian distribution entropy
+            entropy = dist.entropy().sum(dim=-1).mean()
+            entropy_coef = 0.015
             
             loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
             
-            # Check for NaN in loss before backward
-            if torch.isnan(loss).any():
-                logger.error("Loss is NaN! Skipping step.")
+            if not torch.isfinite(loss):
+                logger.error("PPO Loss is NaN or Inf! Skipping step.")
                 break
                 
             self.optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
+            torch.nn.utils.clip_grad_norm_(list(self.model.parameters()) + [self.log_std], 0.5)
             self.optimizer.step()
             
         logger.info(f"PPO Training Step Complete | Loss: {loss.item():.4f} | Actor: {actor_loss.item():.4f} | Critic: {critic_loss.item():.4f} | Entropy: {entropy.item():.4f} | Rewards: {rewards[:, 0].mean().item():.4f} | Values: {values[:, 0].mean().item():.4f}")

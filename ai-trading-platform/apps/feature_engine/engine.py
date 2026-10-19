@@ -86,31 +86,57 @@ class FeatureEngine:
         seed = deltas[:period]
         up = seed[seed >= 0].sum() / period
         down = -seed[seed < 0].sum() / period
-        rs = up / down if down != 0 else 0
+        
+        # Correct handling for all-gain / all-loss windows
+        if down == 0 and up == 0:
+            return 50.0
+        elif down == 0:
+            rs = float("inf")
+            rsi_seed = 100.0
+        elif up == 0:
+            rs = 0.0
+            rsi_seed = 0.0
+        else:
+            rs = up / down
+            rsi_seed = 100.0 - (100.0 / (1.0 + rs))
+            
         rsi = np.zeros_like(data)
-        rsi[:period] = 100. - 100. / (1. + rs)
+        rsi[:period] = rsi_seed
         
         for i in range(period, len(data)):
             delta = deltas[i - 1]
             if delta > 0:
                 upval = delta
-                downval = 0.
+                downval = 0.0
             else:
-                upval = 0.
+                upval = 0.0
                 downval = -delta
                 
             up = (up * (period - 1) + upval) / period
             down = (down * (period - 1) + downval) / period
-            rs = up / down if down != 0 else 0
-            rsi[i] = 100. - 100. / (1. + rs)
-        return rsi[-1]
+            
+            if down == 0 and up == 0:
+                rsi[i] = 50.0
+            elif down == 0:
+                rsi[i] = 100.0
+            elif up == 0:
+                rsi[i] = 0.0
+            else:
+                rs = up / down
+                rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+                
+        return float(np.clip(rsi[-1], 0.0, 100.0))
         
     def _atr(self, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int=14) -> float:
-        if len(closes) < 2: return 0.0
-        tr = np.maximum(highs[1:] - lows[1:], 
-                        np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
-        if len(tr) < period: return np.mean(tr) if len(tr) > 0 else 0.0
-        return np.mean(tr[-period:])
+        if len(closes) < 2 or len(highs) < 2 or len(lows) < 2: return 0.0
+        # True Range: max(H-L, |H-C_prev|, |L-C_prev|)
+        h_l = highs[1:] - lows[1:]
+        h_cp = np.abs(highs[1:] - closes[:-1])
+        l_cp = np.abs(lows[1:] - closes[:-1])
+        tr = np.maximum(h_l, np.maximum(h_cp, l_cp))
+        if len(tr) == 0: return 0.0
+        if len(tr) < period: return float(np.mean(tr))
+        return float(np.mean(tr[-period:]))
 
     def compute_features(self) -> np.ndarray:
         """Returns a dense vector of computed features (Size 90 for God Mode)"""

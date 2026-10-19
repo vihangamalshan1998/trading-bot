@@ -89,22 +89,37 @@ tail -n 25 models/production/tournament_history.json
 
 ---
 
-## 4. Emergency Stop & Graceful Shutdown
+## 4. Emergency Stop, Passive Airbags & Graceful Shutdown
 
-### Emergency Stop (Instant Freeze of New Orders):
-To halt new trading without killing the process:
+### Emergency Stop & Market Flatten (Cancel All Orders & Close to Cash):
+To halt trading and immediately market-close all positions to USDT cash:
 ```bash
-# Via Redis kill switch
+# Primary Redis Key (Recommended)
+redis-cli set "system:kill_switch:active" "true"
+
+# Legacy Redis Key (Also supported)
 redis-cli set "kill_switch" "1"
 ```
-Or set `emergency_stop = True` in settings / dashboard. The bot will:
-1. Immediately cease all new order submissions.
-2. Maintain active trailing stop-loss and take-profit management on existing open positions.
+Or via **Telegram Command Center**: tap the inline button **🚨 EMERGENCY FLAT ALL** or send `/flat_all`.
+The bot will:
+1. Immediately cancel all resting limit orders on Binance.
+2. Market-close all active positions with `reduce_only=True` to 100% USDT Cash.
+3. Halt new order evaluations until resumed via `redis-cli set "system:kill_switch:active" "false"` or Telegram **▶️ Resume Bot**.
 
-### Panic Market Close (Flatten All Open Positions):
+### Temporary Trading Pause (1 Hour):
+To suspend new entries without closing open positions (preserving trailing stops):
 ```bash
-redis-cli set "panic_flatten" "1"
+# Via Telegram
+/pause
 ```
+Or via Redis: `redis-cli set "system:pause_until" "<future_unix_timestamp>"`.
+
+### Passive "Airbag" Safeguards (Zero Frequency Reduction):
+The platform runs 4 passive airbags that stay dormant during normal trading and deploy only during catastrophic events:
+1. **Airbag 1 (Loss Velocity Breaker)**: $\ge 3$ stop-losses in $< 120$s freezes all new entries for 15 minutes.
+2. **Airbag 2 (WebSocket Heartbeat Watchdog)**: If ticks stall for $> 5.0$s while resting orders exist, automatically cancels them to prevent stale fills.
+3. **Airbag 3 (Slippage Anomaly Guard)**: If executed fill price deviates $> 0.75\%$ from mid-price, quarantines the symbol for 15 minutes.
+4. **Airbag 4 (Margin Cushion Trim)**: If free margin ratio $< 15\%$, gracefully auto-trims 25% of the most underwater position to avoid exchange auto-liquidation.
 
 ### Graceful Process Shutdown:
 ```bash

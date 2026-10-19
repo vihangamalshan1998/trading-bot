@@ -462,6 +462,14 @@ class TelegramCommandCenter:
                                 formatted_text = telegram_notifier.format_economic_shield(payload)
                             elif alert_type == "LIQUIDATION_CASCADE":
                                 formatted_text = telegram_notifier.format_liquidation_cascade(payload)
+                            elif alert_type == "LOSS_VELOCITY_BREAKER":
+                                formatted_text = telegram_notifier.format_loss_velocity_breaker(payload)
+                            elif alert_type == "SLIPPAGE_ANOMALY":
+                                formatted_text = telegram_notifier.format_slippage_anomaly(payload)
+                            elif alert_type == "MARGIN_CUSHION_TRIM":
+                                formatted_text = telegram_notifier.format_margin_cushion_trim(payload)
+                            elif alert_type == "HEARTBEAT_STALL":
+                                formatted_text = telegram_notifier.format_heartbeat_stall(payload)
                                 
                             await self.send_message(formatted_text, reply_markup=self.get_main_keyboard())
                         except Exception as parse_err:

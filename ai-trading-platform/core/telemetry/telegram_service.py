@@ -186,5 +186,71 @@ class TelegramNotifier:
             f"🕒 <i>{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}</i>"
         )
 
+    @staticmethod
+    def format_loss_velocity_breaker(data: Dict[str, Any]) -> str:
+        cnt = data.get("loss_count", 3)
+        window = data.get("window_seconds", 120)
+        symbols = data.get("symbols", "PORTFOLIO")
+        mins = data.get("cooldown_minutes", 15)
+        return (
+            f"<b>🚨 AIRBAG ACTIVATED: LOSS VELOCITY BREAKER</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Trigger:</b> <b>{cnt} stop-losses in {window}s</b> ({symbols})\n"
+            f"• <b>Action:</b> <b>All new trade entries FROZEN for {mins} minutes</b>\n"
+            f"• <b>Open Positions:</b> Active trailing stops remain monitored\n"
+            f"• <b>Purpose:</b> Halt knife-catching during rapid market liquidation waterfall\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🛡️ <i>Capital preservation protocol engaged.</i>"
+        )
+
+    @staticmethod
+    def format_slippage_anomaly(data: Dict[str, Any]) -> str:
+        sym = data.get("symbol", "UNKNOWN")
+        slip = data.get("slippage_pct", 0.0)
+        mid_px = data.get("mid_price", 0.0)
+        fill_px = data.get("fill_price", 0.0)
+        mins = data.get("quarantine_minutes", 15)
+        return (
+            f"<b>⚠️ AIRBAG ACTIVATED: SLIPPAGE ANOMALY GUARD</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Symbol:</b> <code>{sym}</code>\n"
+            f"• <b>Slippage:</b> <b>{slip:.2f}%</b> (> 0.75% threshold!)\n"
+            f"• <b>Mid Price:</b> <code>${mid_px:,.4f}</code> ➔ <b>Fill:</b> <code>${fill_px:,.4f}</code>\n"
+            f"• <b>Action:</b> <b>{sym} quarantined for {mins} minutes</b>\n"
+            f"• <b>Purpose:</b> Avoid repeatedly filling into thin/vacuous orderbooks\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 <i>{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}</i>"
+        )
+
+    @staticmethod
+    def format_margin_cushion_trim(data: Dict[str, Any]) -> str:
+        sym = data.get("trimmed_symbol", "UNKNOWN")
+        qty = data.get("trimmed_qty", 0.0)
+        margin_pct = data.get("free_margin_ratio", 0.0)
+        return (
+            f"<b>🛡️ AIRBAG ACTIVATED: MARGIN CUSHION AUTO-TRIM</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Free Margin Ratio:</b> <b>{margin_pct:.1f}%</b> (< 15.0% critical threshold!)\n"
+            f"• <b>Deleveraging Trim:</b> Market-closed 25% of {sym} (Qty: {qty})\n"
+            f"• <b>Purpose:</b> Restored margin buffer to prevent Binance auto-liquidation\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 <i>{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}</i>"
+        )
+
+    @staticmethod
+    def format_heartbeat_stall(data: Dict[str, Any]) -> str:
+        dur = data.get("stall_duration", 0.0)
+        cancelled = data.get("cancelled_count", 0)
+        return (
+            f"<b>🔌 AIRBAG ACTIVATED: WEBSOCKET HEARTBEAT WATCHDOG</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Tick Stall Duration:</b> <b>{dur:.1f}s without tick</b> (> 5.0s threshold)\n"
+            f"• <b>Safety Action:</b> Cancelled {cancelled} resting limit orders on Binance\n"
+            f"• <b>Purpose:</b> Prevent stale orderbook fills during exchange connection gap\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 <i>{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}</i>"
+        )
+
 # Global Singleton Instance
 telegram_notifier = TelegramNotifier()
+

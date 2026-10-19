@@ -144,6 +144,11 @@ class ProductionTradingBot:
         self.global_liq_state = {}
         self.pause_until = 0.0
 
+        # Passive Airbag Safeguards State (Zero effect on normal trading frequency)
+        self.recent_losses_history: collections.deque = collections.deque(maxlen=30)
+        self.last_market_tick_time = time.time()
+        self.last_margin_trim_time = 0.0
+
     def is_valid_contract(self, sym: str) -> bool:
         """
         Validates symbol against actual Binance USDT-M exchange metadata.
@@ -282,6 +287,7 @@ class ProductionTradingBot:
                     # Parse into Canonical MarketState
                     m_state = MarketState(**payload)
                     self.market_states[symbol] = m_state
+                    self.last_market_tick_time = time.time()
                     
                     # Institutional Upgrade 1: BTC Flash-Crash Shield update
                     if symbol == "BTCUSDT":
@@ -573,6 +579,66 @@ class ProductionTradingBot:
                     self.portfolio_state.wallet_balance = float(usdt.get("balance", 0.0))
                     self.portfolio_state.equity = float(usdt.get("crossWalletBalance", self.portfolio_state.wallet_balance)) + float(usdt.get("crossUnPnl", 0.0))
                     self.portfolio_state.free_margin = float(usdt.get("availableBalance", self.portfolio_state.wallet_balance))
+                    
+                    # Passive Airbag 4: Maintenance Margin Cushion (Anti-Exchange Liquidation Auto-Trim)
+                    now_t = time.time()
+                    if (self.portfolio_state.equity > 0 and 
+                        (self.portfolio_state.free_margin / self.portfolio_state.equity) < 0.15 and 
+                        (now_t - self.last_margin_trim_time) > 60.0 and
+                        not self.emergency_stop and not self.dry_run and 
+                        (settings.allow_testnet or settings.allow_live_trading)):
+                        
+                        active_pos_list = [
+                            (s, p) for s, p in self.portfolio_state.positions.items() 
+                            if abs(p.quantity) > 0.0001
+                        ]
+                        if active_pos_list:
+                            def _calc_underwater_roi(item):
+                                sym_name, pos_obj = item
+                                m = self.market_states.get(sym_name)
+                                px = m.mid_price if m else pos_obj.entry_price
+                                if pos_obj.entry_price > 0:
+                                    return ((px - pos_obj.entry_price) / pos_obj.entry_price) * (1 if pos_obj.quantity > 0 else -1)
+                                return 0.0
+
+                            worst_sym, worst_pos = min(active_pos_list, key=_calc_underwater_roi)
+                            m_st = self.market_states.get(worst_sym)
+                            sym_cfg = registry.get_symbol(worst_sym)
+                            if m_st and sym_cfg:
+                                trim_qty = abs(worst_pos.quantity) * 0.25
+                                trim_qty_str = sym_cfg.format_quantity(trim_qty)
+                                if float(trim_qty_str) > 0 and (float(trim_qty_str) * m_st.mid_price) >= sym_cfg.min_notional:
+                                    trim_side = "SELL" if worst_pos.quantity > 0 else "BUY"
+                                    free_pct = (self.portfolio_state.free_margin / self.portfolio_state.equity) * 100
+                                    logger.critical(
+                                        f"🚨 AIRBAG 4 ACTIVATED: CRITICAL MARGIN RATIO ({free_pct:.1f}% free margin < 15%)! "
+                                        f"Executing auto-deleveraging trim: {trim_side} {trim_qty_str} {worst_sym} to restore margin cushion before Binance liquidation."
+                                    )
+                                    try:
+                                        await self.binance.create_order(
+                                            symbol=worst_sym,
+                                            side=trim_side,
+                                            quantity=float(trim_qty_str),
+                                            client_order_id=f"airbag4_{uuid.uuid4().hex[:8]}",
+                                            order_type="MARKET",
+                                            reduce_only=True
+                                        )
+                                        self.last_margin_trim_time = now_t
+                                        signed_trim = float(trim_qty_str) if trim_side == "BUY" else -float(trim_qty_str)
+                                        worst_pos.quantity += signed_trim
+                                        asyncio.create_task(
+                                            telegram_notifier.broadcast_alert(
+                                                "MARGIN_CUSHION_TRIM",
+                                                worst_sym,
+                                                {
+                                                    "free_margin_ratio": free_pct,
+                                                    "trimmed_symbol": worst_sym,
+                                                    "trimmed_qty": trim_qty_str
+                                                }
+                                            )
+                                        )
+                                    except Exception as trim_err:
+                                        logger.error(f"Failed to execute Airbag 4 margin trim: {trim_err}")
                     
                     # Update live positions
                     live_positions = await self.binance.get_positions()
@@ -2325,6 +2391,32 @@ class ProductionTradingBot:
                                         avg_fill = cum_quote / exec_qty
                                     order_exec_price = avg_fill if avg_fill > 0 else (float(limit_price_str) if not is_market_exit else market.mid_price)
 
+                                    # Passive Airbag 3: Real-Time Execution Slippage Anomaly Guard
+                                    if market.mid_price > 0 and avg_fill > 0:
+                                        slippage_pct = abs(avg_fill - market.mid_price) / market.mid_price
+                                        if slippage_pct > 0.0075:  # > 0.75% abnormal slippage (liquidity hole)
+                                            quarantine_secs = 900.0  # 15 minutes
+                                            self.loss_lockout_until[sym]["LONG"] = max(self.loss_lockout_until[sym].get("LONG", 0.0), time.time() + quarantine_secs)
+                                            self.loss_lockout_until[sym]["SHORT"] = max(self.loss_lockout_until[sym].get("SHORT", 0.0), time.time() + quarantine_secs)
+                                            logger.critical(
+                                                f"[{sym}] ⚠️ AIRBAG 3 ACTIVATED: SLIPPAGE ANOMALY GUARD! "
+                                                f"Fill Price ${avg_fill:,.4f} deviated {slippage_pct*100:.2f}% from Mid ${market.mid_price:,.4f} (> 0.75% threshold)! "
+                                                f"Quarantining {sym} for 15 minutes to allow orderbook depth to normalize."
+                                            )
+                                            asyncio.create_task(
+                                                telegram_notifier.broadcast_alert(
+                                                    "SLIPPAGE_ANOMALY",
+                                                    sym,
+                                                    {
+                                                        "symbol": sym,
+                                                        "slippage_pct": slippage_pct * 100,
+                                                        "mid_price": market.mid_price,
+                                                        "fill_price": avg_fill,
+                                                        "quarantine_minutes": 15
+                                                    }
+                                                )
+                                            )
+
                                     # Prepare Trade History Record
                                     record_side = f"PARTIAL_{side}" if partial_tp_triggered else side
                                     trade_record = {
@@ -2527,6 +2619,35 @@ class ProductionTradingBot:
                                         # --- INSTITUTIONAL PENALTY BOX & CONSECUTIVE LOSS TRACKER ---
                                         closed_dir = "LONG" if "CLOSE_LONG" in side else "SHORT"
                                         if pnl < -1.0: # Real loss (exceeding minor fee noise)
+                                            now_t = time.time()
+                                            self.recent_losses_history.append((now_t, sym, pnl))
+                                            
+                                            # Passive Airbag 1: Portfolio-Wide Loss Velocity Breaker
+                                            recent_losses = [entry for entry in self.recent_losses_history if (now_t - entry[0]) <= 120.0]
+                                            if len(recent_losses) >= 3:
+                                                cooldown_secs = 900.0  # 15 minutes
+                                                self.pause_until = max(self.pause_until, now_t + cooldown_secs)
+                                                sym_list = ", ".join(set(e[1] for e in recent_losses))
+                                                logger.critical(
+                                                    f"🚨 AIRBAG 1 ACTIVATED: LOSS VELOCITY BREAKER! "
+                                                    f"{len(recent_losses)} stop-losses in {int(now_t - recent_losses[0][0])}s ({sym_list})! "
+                                                    f"Freezing all new trade entries for {int(cooldown_secs/60)} minutes to protect portfolio capital."
+                                                )
+                                                if self.redis.redis:
+                                                    asyncio.create_task(self.redis.redis.set("system:pause_until", str(self.pause_until)))
+                                                asyncio.create_task(
+                                                    telegram_notifier.broadcast_alert(
+                                                        "LOSS_VELOCITY_BREAKER",
+                                                        "",
+                                                        {
+                                                            "loss_count": len(recent_losses),
+                                                            "window_seconds": 120,
+                                                            "symbols": sym_list,
+                                                            "cooldown_minutes": int(cooldown_secs / 60)
+                                                        }
+                                                    )
+                                                )
+
                                             self.consecutive_losses[sym] = self.consecutive_losses.get(sym, 0) + 1
                                             loss_cnt = self.consecutive_losses[sym]
                                             
@@ -2654,6 +2775,8 @@ class ProductionTradingBot:
             try:
                 if self.redis.redis:
                     ks = await self.redis.redis.get("system:kill_switch:active")
+                    if not ks:
+                        ks = await self.redis.redis.get("kill_switch")
                     val = (ks.decode("utf-8") if isinstance(ks, bytes) else str(ks or "")).strip().lower()
                     if val in ["true", "1", "yes"]:
                         if not self.emergency_stop:
@@ -2678,6 +2801,43 @@ class ProductionTradingBot:
                         self.pause_until = 0.0
             except Exception as e:
                 logger.error(f"Error in monitor_kill_switch: {e}")
+            await asyncio.sleep(2.0)
+
+    async def monitor_heartbeat_watchdog(self):
+        """Passive Airbag 2: Monitors tick freshness. If WebSockets stall while resting limit orders exist, cancel them."""
+        logger.info("Starting WebSocket Heartbeat & Resting Order Watchdog...")
+        while self.running:
+            try:
+                now_t = time.time()
+                stall_duration = now_t - self.last_market_tick_time
+                if stall_duration > 5.0 and self.active_orders:
+                    order_count = len(self.active_orders)
+                    logger.warning(
+                        f"🚨 AIRBAG 2 ACTIVATED: WEBSOCKET HEARTBEAT STALL ({stall_duration:.1f}s > 5.0s)! "
+                        f"Cancelling {order_count} resting limit orders to avoid stale orderbook fills."
+                    )
+                    for sym, order_info in list(self.active_orders.items()):
+                        try:
+                            if (self.trading_enabled and not self.dry_run and 
+                                (settings.allow_testnet or settings.allow_live_trading)):
+                                await self.binance.cancel_order(sym, order_info.get("order_id"))
+                                logger.info(f"[{sym}] Safe cancelled resting order {order_info.get('order_id')} due to WebSocket stall.")
+                        except Exception as cancel_e:
+                            logger.debug(f"[{sym}] Watchdog cancel error: {cancel_e}")
+                        self.active_orders.pop(sym, None)
+                    
+                    asyncio.create_task(
+                        telegram_notifier.broadcast_alert(
+                            "HEARTBEAT_STALL",
+                            "",
+                            {
+                                "stall_duration": stall_duration,
+                                "cancelled_count": order_count
+                            }
+                        )
+                    )
+            except Exception as e:
+                logger.error(f"Error in monitor_heartbeat_watchdog: {e}")
             await asyncio.sleep(2.0)
 
     async def panic_liquidate(self):
@@ -2878,7 +3038,8 @@ class ProductionTradingBot:
             asyncio.create_task(self.update_htf_regimes_loop()),
             asyncio.create_task(self.listen_liquidation_cascade()),
             asyncio.create_task(self.beta_hedging_loop()),
-            asyncio.create_task(self.listen_macro_shield_loop())
+            asyncio.create_task(self.listen_macro_shield_loop()),
+            asyncio.create_task(self.monitor_heartbeat_watchdog())
         ]
         for sym in list(self.symbols):
             t_m = asyncio.create_task(self.listen_market(sym))

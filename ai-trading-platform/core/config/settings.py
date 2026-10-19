@@ -111,6 +111,13 @@ class Settings(BaseSettings):
         ]
     )
 
+    # Excluded from active entry (thin testnet book depth / fee preservation)
+    excluded_trading_symbols: list[str] = Field(
+        default_factory=lambda: [
+            "SUIUSDT",
+        ]
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

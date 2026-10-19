@@ -735,6 +735,10 @@ class ProductionTradingBot:
                     has_active_pos = pos is not None and abs(pos.quantity) > 1e-5
                     has_pending_order = sym in self.active_orders
                     
+                    # Skip excluded coins (e.g. SUI with thin testnet orderbook) unless an active trade is open
+                    if sym in getattr(settings, 'excluded_trading_symbols', []) and not has_active_pos and not has_pending_order:
+                        continue
+                    
                     if has_active_pos or has_pending_order:
                         active_symbols.append(sym)
                     else:
@@ -843,48 +847,51 @@ class ProductionTradingBot:
                                     actual_pos = matching[0] if matching else None
                                     actual_qty = abs(float(actual_pos.get('positionAmt', 0.0))) if actual_pos else 0.0
                                     
-                                    if actual_qty > 0 and actual_qty < (0.25 * qty):
-                                        logger.warning(f"[{sym}] 🧹 MICRO-STUB DETECTED: Only {actual_qty:.4f} filled out of {qty:.4f} ({actual_qty/qty*100:.1f}%). Market-closing dust stub immediately to eliminate asymmetric risk!")
-                                        close_side = "SELL" if "LONG" in side else "BUY"
-                                        sym_config = registry.get_symbol(sym)
-                                        stub_qty_str = sym_config.format_quantity(actual_qty)
-                                        if float(stub_qty_str) > 0:
-                                            await self.binance.create_order(
-                                                symbol=sym,
-                                                side=close_side,
-                                                quantity=float(stub_qty_str),
-                                                client_order_id=f"ai_stub_{uuid.uuid4().hex[:10]}",
-                                                order_type="MARKET",
-                                                reduce_only=True
-                                            )
-                                        self.last_close_time[sym] = time.time()
-                                        self.portfolio_state.positions[sym].quantity = 0.0
-                                        self.portfolio_state.positions[sym].entry_price = 0.0
-                                        self.position_entry_times[sym] = 0.0
-                                        
-                                        # Transparent Telemetry: Record in dashboard history so it never vanishes without a trace!
-                                        if self.redis.redis:
-                                            stub_record = {
-                                                "timestamp": time.time(),
-                                                "symbol": sym,
-                                                "side": f"DUST_CLEAN_{side}",
-                                                "quantity": float(stub_qty_str),
-                                                "price": float(actual_pos.get('entryPrice', 0.0)),
-                                                "confidence": 0.0,
-                                                "order_id": f"ai_stub_{sym}",
-                                                "entry_price": float(actual_pos.get('entryPrice', 0.0)),
-                                                "gross_pnl": 0.0,
-                                                "fees_paid": 0.0,
-                                                "realized_pnl": 0.0,
-                                                "roi_pct": 0.0
-                                            }
-                                            await self.redis.redis.lpush("dashboard:trade_history", json.dumps(stub_record))
-                                            await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
-                                    elif actual_qty >= (0.25 * qty):
-                                        logger.info(f"[{sym}] Substantial partial fill confirmed ({actual_qty:.4f} / {qty:.4f}, {actual_qty/qty*100:.1f}%). Letting position ride!")
-                                        self.portfolio_state.positions[sym].quantity = actual_qty if "LONG" in side else -actual_qty
-                                        self.portfolio_state.positions[sym].entry_price = float(actual_pos.get('entryPrice', 0.0))
-                                        self.position_entry_times[sym] = time.time()
+                                    if actual_qty > 0:
+                                        entry_px_val = float(actual_pos.get('entryPrice', 0.0)) or market.mid_price
+                                        notional_filled = actual_qty * entry_px_val
+                                        if notional_filled >= 25.0:
+                                            logger.info(f"[{sym}] Substantial partial fill confirmed (${notional_filled:.2f} notional >= $25.00). Letting position ride cleanly to preserve fees!")
+                                            self.portfolio_state.positions[sym].quantity = actual_qty if "LONG" in side else -actual_qty
+                                            self.portfolio_state.positions[sym].entry_price = entry_px_val
+                                            self.position_entry_times[sym] = time.time()
+                                        else:
+                                            logger.warning(f"[{sym}] 🧹 MICRO-STUB DETECTED: Tiny fill (${notional_filled:.2f} < $25.00 min notional). Market-closing dust stub immediately to eliminate asymmetric risk!")
+                                            close_side = "SELL" if "LONG" in side else "BUY"
+                                            sym_config = registry.get_symbol(sym)
+                                            stub_qty_str = sym_config.format_quantity(actual_qty)
+                                            if float(stub_qty_str) > 0:
+                                                await self.binance.create_order(
+                                                    symbol=sym,
+                                                    side=close_side,
+                                                    quantity=float(stub_qty_str),
+                                                    client_order_id=f"ai_stub_{uuid.uuid4().hex[:10]}",
+                                                    order_type="MARKET",
+                                                    reduce_only=True
+                                                )
+                                            self.last_close_time[sym] = time.time() + 900.0  # 15m cooldown to prevent fee churn
+                                            self.portfolio_state.positions[sym].quantity = 0.0
+                                            self.portfolio_state.positions[sym].entry_price = 0.0
+                                            self.position_entry_times[sym] = 0.0
+                                            
+                                            # Transparent Telemetry: Record in dashboard history so it never vanishes without a trace!
+                                            if self.redis.redis:
+                                                stub_record = {
+                                                    "timestamp": time.time(),
+                                                    "symbol": sym,
+                                                    "side": f"DUST_CLEAN_{side}",
+                                                    "quantity": float(stub_qty_str),
+                                                    "price": entry_px_val,
+                                                    "confidence": 0.0,
+                                                    "order_id": f"ai_stub_{sym}",
+                                                    "entry_price": entry_px_val,
+                                                    "gross_pnl": 0.0,
+                                                    "fees_paid": 0.0,
+                                                    "realized_pnl": 0.0,
+                                                    "roi_pct": 0.0
+                                                }
+                                                await self.redis.redis.lpush("dashboard:trade_history", json.dumps(stub_record))
+                                                await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                 except Exception as e:
                                     logger.warning(f"[{sym}] Could not verify micro-stub on Binance: {e}")
 
@@ -1838,7 +1845,9 @@ class ProductionTradingBot:
                             side = "CLOSE_SHORT"
                         # When already in a Short, hold the position. Never generate OPEN_SHORT to add contracts!
                     else:
-                        if action_val < -0.20:
+                        if sym in getattr(settings, 'excluded_trading_symbols', []):
+                            side = "HOLD"
+                        elif action_val < -0.20:
                             side = "OPEN_SHORT"
                         elif action_val > 0.20:
                             side = "OPEN_LONG"

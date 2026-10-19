@@ -121,6 +121,38 @@ class Settings(BaseSettings):
         ]
     )
 
+    # ============================================================
+    # Institutional Upgrade 1: Macro & Flash-Crash Shield
+    # ============================================================
+    macro_flash_crash_threshold_pct: float = Field(default=0.025, gt=0.0, le=0.20)  # 2.5% drop in 5m
+    macro_flash_crash_lockout_seconds: float = Field(default=1800.0, gt=0.0)        # 30-minute lockout
+    macro_flash_crash_trailing_retention: float = Field(default=0.90, ge=0.5, le=1.0) # Ratchet trailing retention
+    economic_shield_enabled: bool = Field(default=True)
+    economic_shield_buffer_minutes: float = Field(default=15.0, ge=1.0, le=120.0)   # 15 mins before & after news
+
+    # ============================================================
+    # Institutional Upgrade 2: Multi-Exchange Liquidation Cascade Hunter
+    # ============================================================
+    liquidation_cascade_hunter_enabled: bool = Field(default=True)
+    liquidation_cascade_threshold_usd: float = Field(default=20_000_000.0, gt=0.0)      # $20M aggregated cascade
+    liquidation_cascade_alt_threshold_usd: float = Field(default=1_500_000.0, gt=0.0)   # $1.5M for single alt
+    liquidation_exhaustion_decay_pct: float = Field(default=0.75, ge=0.1, le=0.99)      # 75% liquidation velocity decay
+
+    # ============================================================
+    # Institutional Upgrade 3: Market-Beta Hedger (Delta-Neutral)
+    # ============================================================
+    beta_hedging_enabled: bool = Field(default=True)
+    beta_hedge_ratio: float = Field(default=1.0, ge=0.0, le=2.0)                        # 1.0 = 100% delta-neutral
+    beta_hedge_rebalance_threshold_usd: float = Field(default=250.0, gt=0.0)            # $250 minimum rebalance delta
+    beta_hedge_symbol: str = Field(default="BTCUSDT")
+
+    # ============================================================
+    # Institutional Upgrade 4: Interactive Telegram Command Center
+    # ============================================================
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
+    telegram_enabled: bool = Field(default=False)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

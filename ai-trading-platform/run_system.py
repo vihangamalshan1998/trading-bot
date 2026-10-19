@@ -33,6 +33,14 @@ def main():
         bot_proc = start_process("Trading Bot", [sys.executable, "-m", "apps.trading_bot.main"])
         processes.append(("Trading Bot", bot_proc))
         
+        # 6. Multi-Exchange Liquidation Cascade Hunter
+        liq_proc = start_process("Liquidation Hunter", [sys.executable, "-m", "apps.crypto_data.liquidation_hunter"])
+        processes.append(("Liquidation Hunter", liq_proc))
+        
+        # 7. Interactive Telegram Command Center
+        telegram_proc = start_process("Telegram Command Center", [sys.executable, "-m", "apps.telegram_bot.service"])
+        processes.append(("Telegram Command Center", telegram_proc))
+        
         # Monitor Loop
         while True:
             for name, proc in processes:

@@ -10,6 +10,7 @@ from core.schemas.state_schema import (
     MacroState,
     RiskDecision,
 )
+from core.risk.macro_crash_shield import macro_crash_shield
 
 
 class RiskManager:
@@ -246,8 +247,21 @@ class RiskManager:
             return self._reject("INVALID_ACTION")
             
         # ========================================================
-        # 6.5 Macro Override
+        # 6.5 Macro & Flash-Crash Shield Overrides
         # ========================================================
+        # 1. Economic Event Shield (CPI / FOMC / NFP / Core PCE)
+        is_econ, econ_reason, _ = macro_crash_shield.is_economic_freeze_active()
+        if is_econ:
+            logger.warning(f"RISK MANAGER: {econ_reason}")
+            return self._reject("ECONOMIC_EVENT_SHIELD_ACTIVE")
+
+        # 2. BTC Sympathy Crash Guard (Pauses Altcoin Longs when BTC drops >= 2.5% in 5m)
+        if action == "OPEN_LONG":
+            crash_allowed, crash_reason = macro_crash_shield.is_altcoin_long_allowed(order_request.symbol)
+            if not crash_allowed:
+                logger.warning(f"RISK MANAGER: {crash_reason}")
+                return self._reject("BTC_SYMPATHY_CRASH_GUARD")
+
         if macro_state is not None:
             sentiment = getattr(macro_state, "sentiment_score", 0.0)
             if sentiment < self.bearish_macro_threshold and action == "OPEN_LONG":

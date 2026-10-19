@@ -23,6 +23,10 @@ from core.schemas.state_schema import MarketState, PortfolioState, PositionState
 from core.config.settings import settings
 from core.ai.institutional_alpha import InstitutionalAlphaEngine
 from core.risk.edge_estimator import EdgeEstimator
+from core.risk.macro_crash_shield import macro_crash_shield
+from core.ai.liquidation_cascade_hunter import liquidation_hunter, LiquidationSignal
+from core.risk.beta_hedger import beta_hedger
+from core.telemetry.telegram_service import telegram_notifier
 
 class ProductionTradingBot:
     """
@@ -135,6 +139,10 @@ class ProductionTradingBot:
         self.dynamic_active_symbols = set(self.symbols)
         self.last_universe_check_time = 0.0
         self._symbol_tasks: Dict[str, list] = {}
+        
+        # Institutional Upgrades State
+        self.global_liq_state = {}
+        self.pause_until = 0.0
 
     def is_valid_contract(self, sym: str) -> bool:
         """
@@ -272,7 +280,26 @@ class ProductionTradingBot:
                     if float(payload.get("mid_price", 0.0)) <= 0.0:
                         continue # Wait until market collector has real price data
                     # Parse into Canonical MarketState
-                    self.market_states[symbol] = MarketState(**payload)
+                    m_state = MarketState(**payload)
+                    self.market_states[symbol] = m_state
+                    
+                    # Institutional Upgrade 1: BTC Flash-Crash Shield update
+                    if symbol == "BTCUSDT":
+                        crash_now, drop_pct = macro_crash_shield.update_btc_price(m_state.mid_price, m_state.timestamp)
+                        if crash_now:
+                            peak_px = max([p for t, p in macro_crash_shield.btc_price_history])
+                            asyncio.create_task(
+                                telegram_notifier.broadcast_alert(
+                                    "FLASH_CRASH",
+                                    "",
+                                    {
+                                        "pct_drop": drop_pct,
+                                        "peak_price": peak_px,
+                                        "current_price": m_state.mid_price,
+                                        "lockout_minutes": int(settings.macro_flash_crash_lockout_seconds / 60)
+                                    }
+                                )
+                            )
                 except Exception as e:
                     logger.error(f"Error parsing market state for {symbol}: {e}")
                     
@@ -1154,6 +1181,13 @@ class ProductionTradingBot:
                                 t2_retention = float(np.clip(0.75 - vol_factor, 0.65, 0.82))
                                 t3_retention = float(np.clip(0.85 - (vol_factor * 0.5), 0.80, 0.90))
 
+                                # Institutional Upgrade 1: Ratchet trailing retention when BTC Flash-Crash Shield is active
+                                flash_retention = macro_crash_shield.get_trailing_retention_override()
+                                if flash_retention is not None:
+                                    t1_retention = max(t1_retention, flash_retention)
+                                    t2_retention = max(t2_retention, flash_retention)
+                                    t3_retention = max(t3_retention, flash_retention)
+
                                 # Tier 1: Micro-Swing Impulse Protection (Requires >= +8.0% peak to ensure fees & slippage are cleanly beaten)
                                 if 0.08 <= prev_peak < 0.15:
                                     trailing_floor = max(0.04, prev_peak * t1_retention) # Guarantee at least +4.0% net gain above fees
@@ -1217,6 +1251,24 @@ class ProductionTradingBot:
                     lead_lag_mult = 1.00
                     liq_mult = 1.00
                     
+                    # Institutional Upgrade 4: Telegram Pause Guard
+                    if not exit_override and pos.quantity == 0 and time.time() < self.pause_until:
+                        rem_p = (self.pause_until - time.time()) / 60.0
+                        logger.info(f"[{sym}] SKIPPING OPEN: Trading temporarily paused via Telegram ({rem_p:.1f}m remaining).")
+                        continue
+
+                    # Institutional Upgrade 2: Multi-Exchange Liquidation Cascade Hunter (Bottom-Wick Sniper)
+                    if not exit_override and pos.quantity == 0:
+                        liq_sig = liquidation_hunter.evaluate_exhaustion_wick(sym, market, self.global_liq_state)
+                        if liq_sig:
+                            action_val = 0.85
+                            confidence = liq_sig.confidence
+                            target_size = 0.50
+                            logger.info(f"[{sym}] 🎯 LIQUIDATION CASCADE HUNTER SNIPER: {liq_sig.reason}")
+                            asyncio.create_task(
+                                telegram_notifier.broadcast_alert("LIQUIDATION_CASCADE", "", liq_sig.to_dict())
+                            )
+
                     # 2. Institutional Hysteresis Deadband
                     # Entries from flat require |action_val| > 0.20
                     # Reversals/Exits against an established position require passing a wider barrier (|action_val| > 0.35)
@@ -2362,6 +2414,45 @@ class ProductionTradingBot:
                                         await self.redis.redis.lpush("dashboard:trade_history", json.dumps(trade_record))
                                         await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                         
+                                        # Institutional Upgrade 4: Telegram Exit Alert
+                                        holding_mins = (time.time() - self.position_entry_times.get(sym, time.time())) / 60.0
+                                        asyncio.create_task(
+                                            telegram_notifier.broadcast_alert(
+                                                "TRADE_EXIT",
+                                                "",
+                                                {
+                                                    "symbol": sym,
+                                                    "side": record_side,
+                                                    "price": order_exec_price,
+                                                    "entry_price": entry_px,
+                                                    "realized_pnl": trade_record.get("realized_pnl", 0.0),
+                                                    "roi_pct": trade_record.get("roi_pct", 0.0),
+                                                    "fees": trade_record.get("fees_paid", 0.0),
+                                                    "reason": exit_reason if 'exit_reason' in locals() else "AI Close",
+                                                    "holding_minutes": max(0.1, holding_mins)
+                                                }
+                                            )
+                                        )
+                                    elif "OPEN" in side:
+                                        # Institutional Upgrade 4: Telegram Entry Alert
+                                        asyncio.create_task(
+                                            telegram_notifier.broadcast_alert(
+                                                "TRADE_ENTRY",
+                                                "",
+                                                {
+                                                    "symbol": sym,
+                                                    "side": side,
+                                                    "price": order_exec_price,
+                                                    "quantity": float(qty_str),
+                                                    "leverage": settings.max_leverage,
+                                                    "confidence": float(confidence),
+                                                    "reason": "Institutional Alpha Signal",
+                                                    "stop_loss": order_exec_price * (0.9925 if "LONG" in side else 1.0075),
+                                                    "take_profit": order_exec_price * (1.0175 if "LONG" in side else 0.9825)
+                                                }
+                                            )
+                                        )
+                                        
                                     # Only track pending LIMIT orders (market closes fill immediately)
                                     if not is_market_exit:
                                         self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time(), 'trade_record': trade_record}
@@ -2577,6 +2668,14 @@ class ProductionTradingBot:
                             self.emergency_stop = False
                             self.trading_enabled = settings.trading_enabled
                             settings.emergency_stop = False
+                            
+                    # Monitor Telegram temporary pause timer
+                    pause_val = await self.redis.redis.get("system:pause_until")
+                    if pause_val:
+                        p_ts = float(pause_val.decode("utf-8") if isinstance(pause_val, bytes) else pause_val)
+                        self.pause_until = p_ts
+                    else:
+                        self.pause_until = 0.0
             except Exception as e:
                 logger.error(f"Error in monitor_kill_switch: {e}")
             await asyncio.sleep(2.0)
@@ -2616,6 +2715,116 @@ class ProductionTradingBot:
                             logger.error(f"Failed to execute panic liquidation for {sym}: {order_e}")
         except Exception as e:
             logger.error(f"Error during panic liquidation: {e}")
+
+    async def listen_liquidation_cascade(self):
+        """Institutional Upgrade 2: Subscribes to multi-exchange liquidation streams."""
+        await self.redis.connect()
+        if not self.redis.redis:
+            return
+        pubsub = self.redis.redis.pubsub()
+        await pubsub.subscribe("liquidation:cascade:global")
+        for sym in self.symbols:
+            await pubsub.subscribe(f"liquidation:cascade:{sym}")
+            
+        logger.info("Subscribed to multi-exchange liquidation cascade channels.")
+        async for message in pubsub.listen():
+            if not self.running:
+                break
+            if message["type"] == "message":
+                try:
+                    ch = message["channel"]
+                    channel = ch.decode("utf-8") if isinstance(ch, bytes) else str(ch)
+                    raw_data = message["data"]
+                    data_str = raw_data.decode("utf-8") if isinstance(raw_data, bytes) else str(raw_data)
+                    data = json.loads(data_str)
+                    
+                    if channel == "liquidation:cascade:global":
+                        self.global_liq_state = data
+                    elif channel.startswith("liquidation:cascade:"):
+                        sym = channel.split(":")[-1]
+                        liquidation_hunter.update_liquidation_state(sym, data)
+                except Exception as e:
+                    logger.debug(f"Error parsing liquidation stream: {e}")
+
+    async def beta_hedging_loop(self):
+        """Institutional Upgrade 3: Periodically calculates portfolio market delta and executes dynamic micro-hedges on BTC."""
+        logger.info("Starting Market-Beta Hedger background loop...")
+        while self.running:
+            try:
+                if settings.beta_hedging_enabled and self.market_states:
+                    # Evaluate rebalance
+                    rebalance_order = beta_hedger.evaluate_rebalance(self.portfolio_state, self.market_states)
+                    
+                    # Save delta metrics to Redis for Telegram and Dashboard
+                    delta_info = beta_hedger.calculate_portfolio_delta(self.portfolio_state, self.market_states)
+                    if self.redis.redis:
+                        await self.redis.redis.set("system:beta_hedge:state", json.dumps(delta_info))
+                        
+                    if rebalance_order:
+                        b_side = rebalance_order["side"]  # BUY or SELL
+                        b_qty = float(rebalance_order["quantity"])
+                        sym_config = registry.get_symbol("BTCUSDT")
+                        if sym_config:
+                            qty_str = sym_config.format_quantity(b_qty)
+                            if float(qty_str) > 0:
+                                logger.info(f"🛡️ EXECUTING BETA HEDGE ORDER: {b_side} {qty_str} BTCUSDT (Notional: ${rebalance_order['notional_usd']:,.2f})")
+                                if (self.trading_enabled and 
+                                    not self.emergency_stop and 
+                                    not settings.emergency_stop and 
+                                    not self.dry_run and 
+                                    (settings.allow_testnet or settings.allow_live_trading)):
+                                    client_order_id = f"hedge_{uuid.uuid4().hex[:10]}"
+                                    try:
+                                        await self.binance.set_leverage("BTCUSDT", settings.max_leverage)
+                                        await self.binance.create_order(
+                                            symbol="BTCUSDT",
+                                            side=b_side,
+                                            quantity=float(qty_str),
+                                            client_order_id=client_order_id,
+                                            order_type="MARKET"
+                                        )
+                                        logger.info(f"✅ Market-Beta Hedge Order Executed: {b_side} {qty_str} BTCUSDT")
+                                    except Exception as hedge_e:
+                                        logger.error(f"Failed to execute BTC hedge order on Binance: {hedge_e}")
+                                else:
+                                    logger.info(f"[SIMULATION] Market-Beta Hedge simulated: {b_side} {qty_str} BTCUSDT")
+                                    signed_qty = float(qty_str) if b_side == "BUY" else -float(qty_str)
+                                    if "BTCUSDT" in self.portfolio_state.positions:
+                                        self.portfolio_state.positions["BTCUSDT"].quantity += signed_qty
+                                        self.portfolio_state.positions["BTCUSDT"].current_price = delta_info["btc_price"]
+            except Exception as e:
+                logger.error(f"Error in beta_hedging_loop: {e}")
+            await asyncio.sleep(15.0)
+
+    async def listen_macro_shield_loop(self):
+        """Institutional Upgrade 1: Monitors upcoming economic releases and logs/alerts before high-impact events."""
+        logger.info("Starting Macro & Economic Event Shield monitor loop...")
+        last_alerted_event = None
+        while self.running:
+            try:
+                next_event = macro_crash_shield.get_next_economic_event()
+                if next_event:
+                    mins_until = next_event.get("minutes_until", 999.0)
+                    if 0 <= mins_until <= 15.0 and last_alerted_event != next_event["name"]:
+                        last_alerted_event = next_event["name"]
+                        logger.warning(
+                            f"🏛️ ECONOMIC EVENT SHIELD: {next_event['name']} in {mins_until:.1f} mins! "
+                            f"Pausing new order executions to avoid spread blowout."
+                        )
+                        asyncio.create_task(
+                            telegram_notifier.broadcast_alert(
+                                "ECONOMIC_SHIELD",
+                                "",
+                                {
+                                    "name": next_event["name"],
+                                    "status": "IMMINENT RELEASE (Execution Paused)",
+                                    "time_desc": f"Releasing in {mins_until:.1f} mins"
+                                }
+                            )
+                        )
+            except Exception as e:
+                logger.error(f"Error in listen_macro_shield_loop: {e}")
+            await asyncio.sleep(30.0)
 
     async def start(self):
         self.running = True
@@ -2666,7 +2875,10 @@ class ProductionTradingBot:
             asyncio.create_task(self.inference_loop()),
             asyncio.create_task(self.sync_dashboard()),
             asyncio.create_task(self.monitor_kill_switch()),
-            asyncio.create_task(self.update_htf_regimes_loop())
+            asyncio.create_task(self.update_htf_regimes_loop()),
+            asyncio.create_task(self.listen_liquidation_cascade()),
+            asyncio.create_task(self.beta_hedging_loop()),
+            asyncio.create_task(self.listen_macro_shield_loop())
         ]
         for sym in list(self.symbols):
             t_m = asyncio.create_task(self.listen_market(sym))

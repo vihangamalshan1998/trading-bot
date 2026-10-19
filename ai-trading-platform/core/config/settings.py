@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     max_position_margin_pct: float = Field(default=0.25, gt=0, le=1.0)  # Max 25% of equity margin per coin (up to 25% on majors, 20% on alts)
     min_close_confidence: float = Field(default=0.60, ge=0, le=1.0)     # Avoid closing on noise
     min_open_expected_return_pct: float = Field(default=0.22, ge=0)     # 0.22% min predicted move (ensures net profit after fees & spread)
+    min_net_edge_hurdle_pct: float = Field(default=0.08, ge=0.0)        # 0.08% min net edge after fees, spread, slippage, and uncertainty penalty
     
     # Institutional Session Confidence Matrix (Middle Ground Calibration)
     conf_hurdle_ny_peak: float = Field(default=0.62, ge=0.0, le=1.0)   # US New York Peak Trend (13:30 - 21:00 UTC)

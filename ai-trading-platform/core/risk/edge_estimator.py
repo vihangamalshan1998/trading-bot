@@ -28,10 +28,11 @@ class EdgeEstimator:
     """
     def __init__(
         self,
-        min_net_edge_pct: float = 0.08,  # Default minimum net edge after all friction
+        min_net_edge_pct: float = None,  # Default minimum net edge after all friction
         default_horizon_seconds: float = 300.0,
     ):
-        self.min_net_edge_pct = min_net_edge_pct
+        # Phase 5: Evidence-based configurable hurdle from settings (default 0.08%)
+        self.min_net_edge_pct = min_net_edge_pct if min_net_edge_pct is not None else getattr(settings, "min_net_edge_hurdle_pct", 0.08)
         self.default_horizon_seconds = default_horizon_seconds
 
     def estimate(
@@ -100,8 +101,10 @@ class EdgeEstimator:
         # 6. Total Friction Costs
         total_costs = entry_fee + exit_fee + half_spread_pct + slippage_pct + funding_pct
 
-        # 7. Net Expected Return
-        net_return = gross_return - total_costs
+        # 7. Net Expected Return with Uncertainty Penalty (Lower Confidence Bound)
+        # Accounts for model epistemic uncertainty (1.0 - confidence)
+        uncertainty_penalty = uncertainty * 0.04
+        net_return = gross_return - total_costs - uncertainty_penalty
 
         # 8. Regime-calibrated required hurdle
         required_hurdle = self.min_net_edge_pct

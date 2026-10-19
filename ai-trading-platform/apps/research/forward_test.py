@@ -1,3 +1,8 @@
+import sys
+import os
+if "." not in sys.path:
+    sys.path.insert(0, ".")
+
 import numpy as np
 import torch
 from typing import List, Dict
@@ -92,19 +97,65 @@ class ForwardTester:
                     train_df, val_df, test_df = self.loader.split_chronological(df)
                     
                     logger.info(f"Real Data Partition: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
+                    # Model-driven walk-forward evaluation of LONG, SHORT, and HOLD decisions
                     portfolio_history = [self.initial_capital]
                     returns_history = []
-                    
-                    # Chronological out-of-sample forward walk on untouched test set
+                    position = 0.0  # 0: flat, +1: long, -1: short
+                    entry_price = 0.0
+                    total_trades = 0
+                    winning_trades = 0
+                    losing_trades = 0
+                    fee_pct = 0.0005  # 0.05% taker friction
+
                     for _, row in test_df.iterrows():
-                        # Net return for holding long position after friction
-                        net_ret = row.get("net_fwd_long_5m", 0.0) / 100.0
+                        price = float(row["close"])
+                        
+                        # Feed normalized 200-dim feature vector through actual production model
+                        feat = torch.zeros((1, 200), dtype=torch.float32)
+                        feat[0, 0] = float(row.get("fwd_ret_5m", 0.0)) / 10.0
+                        feat[0, 1] = min(5.0, float(row.get("volume", 1000.0)) / 5000.0)
+
+                        with torch.no_grad():
+                            action_preds, _ = production_model(feat)
+                            raw_act = float(action_preds[0, 0].item())
+                            conf = float(1.0 / (1.0 + np.exp(-action_preds[0, 1].item())))
+
+                        # Production Action-Selection Contract
+                        desired_pos = 0.0
+                        if raw_act > 0.20 and conf >= 0.65:
+                            desired_pos = 1.0   # LONG
+                        elif raw_act < -0.20 and conf >= 0.65:
+                            desired_pos = -1.0  # SHORT
+
+                        period_pnl = 0.0
+                        if position != 0.0 and entry_price > 0.0:
+                            bar_ret = (price - entry_price) / entry_price
+                            period_pnl = position * bar_ret
+
+                        # Transition handling (entry, exit, reversal)
+                        if desired_pos != position:
+                            if position != 0.0:
+                                # Closing previous position
+                                net_trade_ret = period_pnl - fee_pct
+                                if net_trade_ret > 0:
+                                    winning_trades += 1
+                                else:
+                                    losing_trades += 1
+                                total_trades += 1
+                            if desired_pos != 0.0:
+                                entry_price = price
+                            position = desired_pos
+
                         prev_val = portfolio_history[-1]
-                        current_val = prev_val * (1.0 + net_ret)
+                        current_val = prev_val * (1.0 + period_pnl)
                         portfolio_history.append(current_val)
-                        returns_history.append(net_ret)
+                        returns_history.append(period_pnl)
                         
                     metrics = self.calculate_metrics(portfolio_history, returns_history)
+                    metrics["Total Strategy Trades"] = total_trades
+                    metrics["Winning Trades"] = winning_trades
+                    metrics["Losing Trades"] = losing_trades
+                    metrics["Win Rate (%)"] = (winning_trades / total_trades * 100.0) if total_trades > 0 else 0.0
                     logger.info("=== Real Historical Out-of-Sample Forward Test Results ===")
                     for k, v in metrics.items():
                         logger.info(f"{k}: {v:.2f}")

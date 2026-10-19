@@ -205,3 +205,61 @@ def test_untrained_model_execution_prohibited():
     with patch("core.ai.registry.ModelRegistry.load_model", side_effect=FileNotFoundError("No checkpoint")):
         bot = ProductionTradingBot(symbols=settings.symbol_universe)
         assert bot.has_valid_model is False # Must remain False to prevent rogue order execution
+
+def test_recursive_gae_hand_calculated():
+    """Verify recursive GAE with hand-calculated 3-step trajectory and terminal boundary."""
+    from apps.trainer.ppo import PPOTrainer
+    from apps.research.model import SingleSymbolActorCritic
+    
+    model = SingleSymbolActorCritic(input_dim=200)
+    trainer = PPOTrainer(model=model, limit=10, gamma=0.90)
+    
+    # T = 3 trajectory
+    rewards = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float32)
+    values = torch.tensor([[0.5], [1.5], [2.5]], dtype=torch.float32)
+    next_values = torch.tensor([[1.5], [2.5], [3.5]], dtype=torch.float32)
+    dones = torch.tensor([[0.0], [0.0], [1.0]], dtype=torch.float32) # Terminal at step 2
+    
+    adv, ret = trainer.compute_gae(rewards, values, next_values, dones, gae_lambda=0.80)
+    
+    # Step 2: delta = 3 + 0 - 2.5 = 0.5, adv = 0.5, ret = 3.0
+    assert abs(adv[2, 0].item() - 0.5) < 1e-4
+    assert abs(ret[2, 0].item() - 3.0) < 1e-4
+    
+    # Step 1: delta = 2 + 0.9 * 2.5 - 1.5 = 2.75, adv = 2.75 + (0.72 * 0.5) = 3.11, ret = 4.61
+    assert abs(adv[1, 0].item() - 3.11) < 1e-4
+    assert abs(ret[1, 0].item() - 4.61) < 1e-4
+    
+    # Step 0: delta = 1 + 0.9 * 1.5 - 0.5 = 1.85, adv = 1.85 + (0.72 * 3.11) = 4.0892, ret = 4.5892
+    assert abs(adv[0, 0].item() - 4.0892) < 1e-4
+    assert abs(ret[0, 0].item() - 4.5892) < 1e-4
+
+def test_edge_estimator_uncertainty_penalty():
+    """Verify uncertainty penalty reduces net edge for low-confidence setups."""
+    estimator = EdgeEstimator(min_net_edge_pct=0.05)
+    market = MarketState(
+        symbol="BTCUSDT",
+        timestamp=time.time(),
+        bid=100.0,
+        ask=100.02,
+        mid_price=100.01,
+        last_price=100.01,
+        spread=0.02,
+        order_book_imbalance=0.0,
+        volume=1000.0,
+        vwap=100.01,
+        volatility=0.01,
+        funding_rate=0.0001,
+        features=[0.0] * 90
+    )
+    # High confidence (0.95 -> uncertainty = 0.05)
+    res_high = estimator.estimate(
+        symbol="BTCUSDT", side="OPEN_LONG", predicted_move_pct=0.30, confidence=0.95, market=market, is_maker=True
+    )
+    # Low confidence (0.50 -> uncertainty = 0.50)
+    res_low = estimator.estimate(
+        symbol="BTCUSDT", side="OPEN_LONG", predicted_move_pct=0.30, confidence=0.50, market=market, is_maker=True
+    )
+    # Net edge should be strictly lower for low confidence due to uncertainty penalty
+    assert res_high.net_expected_return_pct > res_low.net_expected_return_pct
+

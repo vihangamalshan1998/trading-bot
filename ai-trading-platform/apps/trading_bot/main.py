@@ -699,15 +699,14 @@ class ProductionTradingBot:
                                     
                                     # Never auto-reconcile if a close just happened, order is in-flight, or it's sub-$10 micro-dust
                                     if not recent_close and not inflight_order and entry_px > 0 and notional >= 10.0:
-                                        raw_history = await self.redis.redis.lrange("dashboard:trade_history", 0, 19)
+                                        raw_history = await self.redis.redis.lrange("dashboard:trade_history", 0, 49)
                                         has_open_record = False
                                         for item in raw_history:
                                             try:
                                                 th = json.loads(item)
-                                                if th.get("symbol") == sym:
-                                                    if "OPEN" in th.get("side", ""):
-                                                        has_open_record = True
-                                                    break  # Most recent trade for this symbol found
+                                                if th.get("symbol") == sym and "OPEN" in th.get("side", ""):
+                                                    has_open_record = True
+                                                    break
                                             except Exception:
                                                 pass
                                         
@@ -1013,6 +1012,29 @@ class ProductionTradingBot:
                                 await self.redis.redis.lpush("dashboard:trade_history", json.dumps(self.active_orders[sym]['trade_record']))
                                 await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                 
+                                # Send Telegram alert on confirmed LIMIT close fill
+                                rec_side = self.active_orders[sym]['trade_record'].get('side', '')
+                                if "CLOSE" in rec_side:
+                                    tr = self.active_orders[sym]['trade_record']
+                                    holding_mins = (time.time() - self.position_entry_times.get(sym, time.time())) / 60.0
+                                    asyncio.create_task(
+                                        telegram_notifier.broadcast_alert(
+                                            "TRADE_EXIT",
+                                            "",
+                                            {
+                                                "symbol": sym,
+                                                "side": tr.get("side", ""),
+                                                "price": tr.get("price", 0.0),
+                                                "entry_price": tr.get("entry_price", 0.0),
+                                                "realized_pnl": tr.get("realized_pnl", 0.0),
+                                                "roi_pct": tr.get("roi_pct", 0.0),
+                                                "fees": tr.get("fees_paid", 0.0),
+                                                "reason": "Maker Limit Exit (Filled)",
+                                                "holding_minutes": max(0.1, holding_mins)
+                                            }
+                                        )
+                                    )
+                                
                             # Publish experience to Redis ONLY WHEN CONFIRMED FILLED!
                             if 'experience_payload' in self.active_orders[sym]:
                                 await redis_manager.publish_binary(
@@ -1048,11 +1070,27 @@ class ProductionTradingBot:
                                     logger.info(f"[{sym}] ⏰ MAKER EXIT TIMEOUT. Executing immediate MARKET CLOSE fallback to secure exit!")
                                     close_binance_side = "BUY" if "SHORT" in side else "SELL"
                                     try:
-                                        await self.binance.create_order(sym, close_binance_side, qty, f"ai_mkt_fb_{uuid.uuid4().hex[:8]}", order_type="MARKET", reduce_only=True)
-                                        self.last_close_time[sym] = time.time()
-                                        self.portfolio_state.positions[sym].quantity = 0.0
-                                        self.portfolio_state.positions[sym].entry_price = 0.0
-                                        self.position_entry_times[sym] = 0.0
+                                        sym_config = registry.get_symbol(sym)
+                                        fmt_qty = float(sym_config.format_quantity(qty))
+                                        if fmt_qty > 0:
+                                            fb_order = await self.binance.create_order(
+                                                sym, close_binance_side, fmt_qty, 
+                                                f"ai_mkt_fb_{uuid.uuid4().hex[:8]}", 
+                                                order_type="MARKET", reduce_only=True
+                                            )
+                                            self.last_close_time[sym] = time.time()
+                                            self.portfolio_state.positions[sym].quantity = 0.0
+                                            self.portfolio_state.positions[sym].entry_price = 0.0
+                                            self.position_entry_times[sym] = 0.0
+                                            
+                                            # Record the confirmed fallback market exit in dashboard history
+                                            if self.redis.redis and 'trade_record' in self.active_orders[sym]:
+                                                fb_rec = dict(self.active_orders[sym]['trade_record'])
+                                                fb_rec['timestamp'] = time.time()
+                                                fb_rec['quantity'] = fmt_qty
+                                                fb_rec['order_id'] = fb_order.get('orderId', fb_rec.get('order_id'))
+                                                await self.redis.redis.lpush("dashboard:trade_history", json.dumps(fb_rec))
+                                                await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                     except Exception as fb_err:
                                         logger.warning(f"[{sym}] Fallback market exit error: {fb_err}")
                                 else:
@@ -2502,7 +2540,9 @@ class ProductionTradingBot:
                                             except Exception as audit_err:
                                                 logger.warning(f"[{sym}] Income audit skipped: {audit_err}")
                                         
-                                    if self.redis.redis and (exit_override or is_closing):
+                                    # Only log completed trade and alert Telegram immediately if this was an immediate MARKET order.
+                                    # Pending MAKER LIMIT orders are logged ONLY when confirmed filled (or on market fallback timeout).
+                                    if self.redis.redis and (exit_override or is_closing) and is_market_exit:
                                         await self.redis.redis.lpush("dashboard:trade_history", json.dumps(trade_record))
                                         await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                         

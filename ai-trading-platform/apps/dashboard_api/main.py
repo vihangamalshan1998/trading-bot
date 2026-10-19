@@ -29,9 +29,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+async def hydrate_macro_from_cache():
+    """Hydrates in-memory system_stats from persistent Redis cache if available"""
+    if redis_manager.redis:
+        try:
+            cached = await redis_manager.redis.get("dashboard:macro_state")
+            if cached:
+                macro_data = json.loads(cached)
+                system_stats["latest_sentiment"] = float(macro_data.get("sentiment_score", 0.0))
+                system_stats["latest_regime"] = float(macro_data.get("regime", 0.0))
+                system_stats["latest_headlines"] = macro_data.get("headlines", [])
+                system_stats["news_count"] = int(macro_data.get("news_count", len(system_stats["latest_headlines"])))
+        except Exception:
+            pass
+
 @app.on_event("startup")
 async def startup():
     await redis_manager.connect()
+    await hydrate_macro_from_cache()
     asyncio.create_task(listen_redis_events())
 
 async def listen_redis_events():
@@ -54,10 +69,11 @@ async def listen_redis_events():
                     if len(training_metrics) > 50:
                         training_metrics.pop(0)
                 elif channel == "macro:state:global":
-                    system_stats["news_count"] += 1
-                    system_stats["latest_sentiment"] = data.get("sentiment_score", 0.0)
-                    system_stats["latest_regime"] = data.get("regime", 0.0)
-                    system_stats["latest_headlines"] = data.get("headlines", [])
+                    headlines = data.get("headlines", [])
+                    system_stats["latest_sentiment"] = float(data.get("sentiment_score", 0.0))
+                    system_stats["latest_regime"] = float(data.get("regime", 0.0))
+                    system_stats["latest_headlines"] = headlines
+                    system_stats["news_count"] = int(data.get("news_count") or len(headlines) or (system_stats["news_count"] + 1))
                 elif channel == "training:model_update":
                     system_stats["model_update_count"] += 1
                     system_stats["last_model_update_time"] = data.get("timestamp")
@@ -73,6 +89,9 @@ from core.database.models.ai import Experience
 
 @app.get("/api/system_stats")
 async def get_system_stats_api():
+    if not system_stats.get("latest_headlines") or system_stats.get("news_count", 0) == 0:
+        await hydrate_macro_from_cache()
+
     try:
         with SessionLocal() as session:
             count = session.query(Experience).count()

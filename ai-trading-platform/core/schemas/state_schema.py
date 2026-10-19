@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 import math
 
@@ -91,7 +91,7 @@ class MacroState(BaseModel):
     ndx_momentum: float = 0.0
     defi_tvl_momentum: float = 0.0
     fear_greed_index: float = 0.5
-    headlines: list[str] = Field(default_factory=list)
+    headlines: list[Any] = Field(default_factory=list)
 
     @field_validator('*', mode='before')
     @classmethod

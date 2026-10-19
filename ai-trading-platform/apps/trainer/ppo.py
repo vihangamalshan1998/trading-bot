@@ -469,7 +469,7 @@ class PPOTrainer:
             # Critic MSE improvement alone cannot authorize promotion if composite score or trading PnL is inferior.
             SUPERIORITY_MARGIN = 0.01  # Predefined minimum improvement threshold
             score_beaten = challenger_score >= (champion_score + SUPERIORITY_MARGIN)
-            pnl_preserved = challenger_sim_pnl >= champion_sim_pnl
+            pnl_preserved = challenger_sim_pnl >= champ_sim_pnl
             is_superior = score_beaten and pnl_preserved
 
             eval_timestamp = time.time()

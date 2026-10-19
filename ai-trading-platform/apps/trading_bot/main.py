@@ -137,14 +137,55 @@ class ProductionTradingBot:
         self._symbol_tasks: Dict[str, list] = {}
 
     def is_valid_contract(self, sym: str) -> bool:
-        """Validates symbol against Binance supported USDT-M perpetual contracts."""
+        """
+        Validates symbol against actual Binance USDT-M exchange metadata.
+        Strict verification:
+        1. String structure (non-empty string, ends with USDT, min length).
+        2. Configured exclusion check (respects settings.excluded_trading_symbols).
+        3. Exchange metadata verification (PERPETUAL contract, quoteAsset == USDT, status ENABLED/TRADING).
+        Fails closed (returns False) if validation cannot be confirmed.
+        """
         if not isinstance(sym, str) or not sym.endswith("USDT") or len(sym) < 6:
             return False
-        if registry._symbols and sym in registry._symbols:
+
+        # Respect configured exclusions (e.g. SUIUSDT excluded from new entries)
+        excluded = getattr(settings, "excluded_trading_symbols", [])
+        if sym in excluded:
+            logger.info(f"[{sym}] CONTRACT VALIDATION: Symbol is in excluded_trading_symbols.")
+            return False
+
+        # If exchange registry is populated, enforce strict exchange metadata verification
+        if registry._symbols:
+            cfg = registry.get_symbol(sym)
+            if not cfg:
+                logger.warning(f"[{sym}] CONTRACT VALIDATION: Symbol not found in Binance Futures exchange metadata.")
+                return False
+            if cfg.status != "ENABLED" or not cfg.trading_enabled:
+                logger.warning(f"[{sym}] CONTRACT VALIDATION: Contract status '{cfg.status}' is not tradable.")
+                return False
+            if cfg.quote_asset != "USDT":
+                logger.warning(f"[{sym}] CONTRACT VALIDATION: Quote asset '{cfg.quote_asset}' != 'USDT'.")
+                return False
+            if cfg.market_type != "FUTURES":
+                logger.warning(f"[{sym}] CONTRACT VALIDATION: Market type '{cfg.market_type}' != 'FUTURES'.")
+                return False
             return True
+
+        # Fallback before network initialization: only allow explicit symbol universe
         if sym in settings.symbol_universe:
             return True
-        return True
+
+        # Fail closed
+        return False
+
+    async def refresh_contract_metadata_if_needed(self):
+        """Safely refreshes exchange contract metadata from Binance if empty or requested."""
+        try:
+            if not registry._symbols:
+                logger.info("Refreshing Binance Futures contract metadata...")
+                await registry.initialize_from_exchange(self.binance)
+        except Exception as e:
+            logger.error(f"Failed to refresh Binance contract metadata: {e}")
 
     def register_symbol(self, sym: str) -> bool:
         """

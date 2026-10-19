@@ -252,15 +252,17 @@ class PPOTrainer:
             logger.error("Candidate evaluation FAILED: Challenger model weights contain NaN.")
             return {"approved": False, "reason": "NAN_WEIGHTS"}
 
+        min_eval_samples = 30
         batch = self.buffer.sample(sample_size)
-        if len(batch) == 0:
-            logger.warning("Candidate evaluation bypassed: Replay buffer empty.")
-            return {"approved": True, "reason": "EMPTY_SAMPLE_BYPASS", "critic_loss": 0.0, "entropy": 0.0}
+        if len(batch) < min_eval_samples:
+            logger.warning(f"Candidate evaluation REJECTED: Replay buffer has insufficient samples ({len(batch)} < {min_eval_samples}).")
+            return {"approved": False, "reason": "INSUFFICIENT_SAMPLE_SIZE", "critic_loss": 0.0, "entropy": 0.0}
 
         try:
             states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
-            if len(states) == 0:
-                return {"approved": True, "reason": "EMPTY_TENSORS_BYPASS", "critic_loss": 0.0, "entropy": 0.0}
+            if len(states) < min_eval_samples:
+                logger.warning(f"Candidate evaluation REJECTED: Insufficient valid sequence tensors ({len(states)} < {min_eval_samples}).")
+                return {"approved": False, "reason": "INSUFFICIENT_TENSORS", "critic_loss": 0.0, "entropy": 0.0}
 
             states = torch.nan_to_num(states, nan=0.0, posinf=1.0, neginf=-1.0)
             rewards = torch.nan_to_num(rewards, nan=0.0, posinf=1.0, neginf=-1.0)

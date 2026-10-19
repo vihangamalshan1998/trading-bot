@@ -392,4 +392,61 @@ def test_feature_engine_exact_90_dims_and_production_vector():
     state_vector = [0.0] * 10 + [0.0] * 10 + list(market_feats) + [0.0] * 20 + [0.0] * 70
     assert len(state_vector) == 200
 
+def test_genuine_contract_validation_fail_closed():
+    """Verify is_valid_contract fails closed for non-USDT, excluded, or unlisted contracts."""
+    from apps.trading_bot.main import ProductionTradingBot
+    from core.exchange.symbol_registry import registry, SymbolConfig
+    from unittest.mock import patch
+
+    with patch("core.ai.registry.ModelRegistry.load_model", side_effect=FileNotFoundError("No model")):
+        bot = ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
+        
+        # 1. Non-USDT rejected
+        assert bot.is_valid_contract("BTCBUSD") is False
+        assert bot.is_valid_contract("INVALID") is False
+        assert bot.is_valid_contract(12345) is False
+        
+        # 2. Configured exclusion rejected (e.g. SUIUSDT)
+        assert bot.is_valid_contract("SUIUSDT") is False
+        
+        # 3. With populated exchange registry:
+        # Mock exchange registry with BTCUSDT (ENABLED) and SHIBUSDT (DISABLED)
+        btc_cfg = SymbolConfig("BTCUSDT", "BTC", "USDT")
+        btc_cfg.status = "ENABLED"
+        btc_cfg.trading_enabled = True
+        registry.add_symbol(btc_cfg)
+        
+        dis_cfg = SymbolConfig("SHIBUSDT", "SHIB", "USDT")
+        dis_cfg.status = "DELISTED"
+        dis_cfg.trading_enabled = False
+        registry.add_symbol(dis_cfg)
+        
+        # BTCUSDT is enabled and valid
+        assert bot.is_valid_contract("BTCUSDT") is True
+        # SHIBUSDT is delisted
+        assert bot.is_valid_contract("SHIBUSDT") is False
+        # UNKNOWNUSDT not in exchange metadata -> fail closed!
+        assert bot.is_valid_contract("UNKNOWNUSDT") is False
+
+def test_candidate_evaluation_rejects_insufficient_samples():
+    """Verify candidate evaluation fails closed and rejects promotion when samples < 30."""
+    from apps.trainer.ppo import PPOTrainer
+    from apps.research.model import SingleSymbolActorCritic
+    from unittest.mock import patch
+    
+    model = SingleSymbolActorCritic(input_dim=200)
+    trainer = PPOTrainer(model=model, limit=10)
+    
+    # Mock buffer.sample returning empty or insufficient list
+    with patch.object(trainer.buffer, "sample", return_value=[]):
+        res = trainer.evaluate_candidate(sample_size=64)
+        assert res["approved"] is False
+        assert res["reason"] == "INSUFFICIENT_SAMPLE_SIZE"
+        
+    with patch.object(trainer.buffer, "sample", return_value=[object()] * 10):
+        res = trainer.evaluate_candidate(sample_size=64)
+        assert res["approved"] is False
+        assert res["reason"] == "INSUFFICIENT_SAMPLE_SIZE"
+
+
 

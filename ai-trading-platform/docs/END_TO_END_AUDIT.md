@@ -4,7 +4,7 @@
 **Execution Environment**: Binance Futures Testnet (USDT-M Perpetual Futures)  
 **Initial Universe**: 18-Symbol Multi-Asset Tier (BTC, ETH, SOL, BNB, XRP, LINK, ADA, AVAX, NEAR, LTC, SUI, DOGE, RENDER, 1000PEPE, APT, TAO, WIF, INJ)  
 **Audit Standard**: Hedge-Fund Quantitative Verification & Algorithmic Safety Gates  
-**Status**: Fully Audited, Repaired, and Mathematically Verified (45/45 Tests Passed)
+**Status**: Fully Audited, Repaired, and Mathematically Verified (47/47 Tests Passed)
 
 ---
 
@@ -60,6 +60,20 @@ Every identified defect has been resolved directly within the existing architect
 * **Fix Implemented**: Added a pure NumPy statistical fallback calculating sample skewness and kurtosis directly.
 * **Verification**: Tested in `test_feature_engine_exact_90_dims_and_production_vector`.
 
+### Defect 7: Permissive is_valid_contract() Fallback
+* **File & Function**: [`apps/trading_bot/main.py`](file:///d:/laragon/www/Traning-bot/ai-trading-platform/apps/trading_bot/main.py) — `is_valid_contract()`
+* **Severity**: **HIGH (Exchange Integration / Contract Safety)**
+* **Root Cause**: A permissive `return True` fallback permitted any arbitrary string ending with `"USDT"` to be accepted as a tradable contract even if it was delisted, disabled, or non-existent in Binance exchange metadata.
+* **Fix Implemented**: Replaced with strict validation against Binance USDT-M exchange metadata (`registry.get_symbol()`), enforcing `status == "ENABLED"`, `trading_enabled == True`, `quote_asset == "USDT"`, `market_type == "FUTURES"`, and honoring `excluded_trading_symbols`. Fails closed if metadata cannot be confirmed.
+* **Verification**: Tested in `test_genuine_contract_validation_fail_closed`.
+
+### Defect 8: Unverified Candidate Approval on Empty Samples
+* **File & Function**: [`apps/trainer/ppo.py`](file:///d:/laragon/www/Traning-bot/ai-trading-platform/apps/trainer/ppo.py) — `evaluate_candidate()`
+* **Severity**: **CRITICAL (Model Governance / Algorithmic Safety)**
+* **Root Cause**: If the replay buffer sample was empty (`len(batch) == 0` or `len(states) == 0`), the tournament evaluation returned `approved: True` with an `EMPTY_SAMPLE_BYPASS` reason, which could permit an unverified candidate model to be promoted to champion.
+* **Fix Implemented**: Replaced bypass with strict fail-closed rejection requiring a minimum sample size (`min_eval_samples = 30`). Returns `approved: False` and `reason: INSUFFICIENT_SAMPLE_SIZE`.
+* **Verification**: Tested in `test_candidate_evaluation_rejects_insufficient_samples`.
+
 ---
 
 ## 3. Canonical 200-Dimensional Observation Schema
@@ -112,13 +126,13 @@ All automated test suites were executed on the active Python 3.14 virtual enviro
 ```
 
 ### Test Results Breakdown:
-* **`tests/test_performance_intelligence_upgrade.py`**: **17 Passed** (RSI, ATR, Edge Estimator, Gaussian PPO, Model Registry promote/rollback, Net Expectancy, Negative Prediction Reject, Chronological Splits, Anti-Rogue Execution, Recursive GAE, Uncertainty Penalty, Friction Loss, Dynamic Universe, Independent GAE, Terminal Transitions, Position Preservation, 90-dim Feature Engine).
+* **`tests/test_performance_intelligence_upgrade.py`**: **19 Passed** (RSI, ATR, Edge Estimator, Gaussian PPO, Model Registry promote/rollback, Net Expectancy, Negative Prediction Reject, Chronological Splits, Anti-Rogue Execution, Recursive GAE, Uncertainty Penalty, Friction Loss, Dynamic Universe, Independent GAE, Terminal Transitions, Position Preservation, 90-dim Feature Engine, Genuine Contract Validation Fail-Closed, Candidate Evaluation Minimum Sample Size).
 * **`tests/test_risk_manager.py`**: **17 Passed** (Safety defaults, Config overrides, Trading disabled, Emergency stop, Stale data, Invalid price/qty, Max order size, Max leverage, Position clamping/rejection, Exposure limits, Max open positions, Daily loss, Drawdown, Correlated exposure).
 * **`tests/test_model.py`**: **5 Passed** (Production model loading, Checkpoint refusal on missing, Anti-random execution fallback, Architecture validation, Symbol order validation).
 * **`tests/test_state.py`**: **5 Passed** (Market state, Portfolio state, 200-dim validation, NaN rejection, Inf rejection).
 * **`tests/test_mid_price.py`**: **1 Passed** (Mid-price calculation validation).
 
-**Total Test Result**: **45 passed, 0 failed in 11.93s (100% Pass Rate)**.
+**Total Test Result**: **47 passed, 0 failed in 11.41s (100% Pass Rate)**.
 
 ---
 

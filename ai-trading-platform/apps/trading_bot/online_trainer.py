@@ -13,10 +13,11 @@ from core.config.settings import settings
 
 class OnlineTrainer:
     """
-    Phase 4: Real Online Trainer without Dummy Losses.
-    Continuously samples from the ReplayBuffer and updates a CANDIDATE model.
-    Matches the exact SingleSymbolActorCritic(input_dim=200) production architecture.
-    Never mutates the active champion weights directly.
+    Candidate Online Learner: Off-Policy Continuous TD Actor-Critic (TD-AC).
+    - Uses Multi-Horizon Value Bellman updates (Critic: MSE on 5m, 1h, 4h horizons)
+    - Uses Advantage-directed Policy Loss with imitation regularization from verified profitable actions
+    - Never mutates the active champion model directly; updates are saved as versioned candidate checkpoints
+    - Note: Full On-Policy PPO with Gaussian trajectories is implemented in apps/trainer/ppo.py
     """
     def __init__(self, symbols: list):
         self.symbols = symbols

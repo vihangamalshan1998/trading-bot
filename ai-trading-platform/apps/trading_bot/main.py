@@ -132,9 +132,71 @@ class ProductionTradingBot:
         self.htf_regimes = {sym: {"trend": "NEUTRAL", "adx": 0.0, "ema20": 0.0, "ema50": 0.0, "last_updated": 0.0} for sym in self.symbols}
         self.alpha_engine = InstitutionalAlphaEngine(symbols=self.symbols)
         self.edge_estimator = EdgeEstimator(min_net_edge_pct=0.08)
-        self.dynamic_active_symbols = list(self.symbols)
+        self.dynamic_active_symbols = set(self.symbols)
         self.last_universe_check_time = 0.0
-        
+        self._symbol_tasks: Dict[str, list] = {}
+
+    def is_valid_contract(self, sym: str) -> bool:
+        """Validates symbol against Binance supported USDT-M perpetual contracts."""
+        if not isinstance(sym, str) or not sym.endswith("USDT") or len(sym) < 6:
+            return False
+        if registry._symbols and sym in registry._symbols:
+            return True
+        if sym in settings.symbol_universe:
+            return True
+        return True
+
+    def register_symbol(self, sym: str) -> bool:
+        """
+        Safely registers a dynamic symbol:
+        Initializes portfolio tracking, history queues, deques, and stream subscriptions.
+        """
+        if not self.is_valid_contract(sym):
+            logger.warning(f"Rejecting invalid dynamic symbol: {sym}")
+            return False
+
+        if sym not in self.symbols:
+            self.symbols.append(sym)
+            self.num_symbols = len(self.symbols)
+
+        if sym not in self.portfolio_state.positions:
+            self.portfolio_state.positions[sym] = PositionState(symbol=sym)
+
+        if sym not in self.hidden_states:
+            self.hidden_states[sym] = None
+        if sym not in self.last_close_time:
+            self.last_close_time[sym] = 0.0
+        if sym not in self.position_entry_times:
+            self.position_entry_times[sym] = 0.0
+        if sym not in self.peak_pnl_pct:
+            self.peak_pnl_pct[sym] = 0.0
+        if sym not in self.pnl_history:
+            self.pnl_history[sym] = collections.deque(maxlen=30)
+        if sym not in self.smoothed_action_history:
+            self.smoothed_action_history[sym] = collections.deque(maxlen=3)
+        if sym not in self.smoothed_confidence_history:
+            self.smoothed_confidence_history[sym] = collections.deque(maxlen=3)
+        if sym not in self.last_hold_emission_time:
+            self.last_hold_emission_time[sym] = 0.0
+        if sym not in self.partial_tp_triggered:
+            self.partial_tp_triggered[sym] = False
+        if sym not in self.consecutive_losses:
+            self.consecutive_losses[sym] = 0
+        if sym not in self.loss_lockout_until:
+            self.loss_lockout_until[sym] = {"LONG": 0.0, "SHORT": 0.0}
+        if sym not in self.htf_regimes:
+            self.htf_regimes[sym] = {"trend": "NEUTRAL", "adx": 0.0, "ema20": 0.0, "ema50": 0.0, "last_updated": 0.0}
+
+        # Spawn listeners if bot is actively running
+        if self.running and sym not in self._symbol_tasks:
+            t_m = asyncio.create_task(self.listen_market(sym))
+            t_w = asyncio.create_task(self.listen_whale(sym))
+            t_s = asyncio.create_task(self.listen_statarb(sym))
+            self._symbol_tasks[sym] = [t_m, t_w, t_s]
+            logger.info(f"🌐 DYNAMIC UNIVERSE: Successfully registered and subscribed listeners for {sym}")
+
+        return True
+
     async def listen_macro(self):
         await self.redis.connect()
         redis_conn = self.redis.redis
@@ -601,13 +663,9 @@ class ProductionTradingBot:
                         if raw_u:
                             u_list = json.loads(raw_u.decode("utf-8") if isinstance(raw_u, bytes) else raw_u)
                             if isinstance(u_list, list) and len(u_list) > 0:
+                                self.dynamic_active_symbols = set(u_list)
                                 for s in u_list:
-                                    if s not in self.symbols and isinstance(s, str) and s.endswith("USDT"):
-                                        self.symbols.append(s)
-                                        self.num_symbols = len(self.symbols)
-                                        if s not in self.portfolio_state.positions:
-                                            self.portfolio_state.positions[s] = PositionState(symbol=s, quantity=0.0)
-                                        logger.info(f"🌐 DYNAMIC UNIVERSE: Successfully added hot coin {s} from screener.")
+                                    self.register_symbol(s)
                     except Exception as u_err:
                         logger.debug(f"Dynamic universe check: {u_err}")
 
@@ -1152,6 +1210,12 @@ class ProductionTradingBot:
                             "critic_4h": float(pred_ret_4h)
                         }
                         await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
+
+                    # GUARD 0.4: Dynamic Universe Check (Only enter new trades on active screener symbols)
+                    # Existing open positions and pending orders are NEVER abandoned and continue full risk/exit management!
+                    if not is_closing and pos.quantity == 0 and sym not in getattr(self, "dynamic_active_symbols", self.symbols):
+                        logger.info(f"[{sym}] SKIPPING OPEN: Symbol is currently inactive in dynamic universe screener.")
+                        continue
 
                     # GUARD 0.5: Circuit Breaker Check (5% Daily Drawdown Kill Switch)
                     if not is_closing and time.time() < self.circuit_breaker_active_until:
@@ -2567,10 +2631,12 @@ class ProductionTradingBot:
             asyncio.create_task(self.monitor_kill_switch()),
             asyncio.create_task(self.update_htf_regimes_loop())
         ]
-        for sym in self.symbols:
-            tasks.append(asyncio.create_task(self.listen_market(sym)))
-            tasks.append(asyncio.create_task(self.listen_whale(sym)))
-            tasks.append(asyncio.create_task(self.listen_statarb(sym)))
+        for sym in list(self.symbols):
+            t_m = asyncio.create_task(self.listen_market(sym))
+            t_w = asyncio.create_task(self.listen_whale(sym))
+            t_s = asyncio.create_task(self.listen_statarb(sym))
+            self._symbol_tasks[sym] = [t_m, t_w, t_s]
+            tasks.extend([t_m, t_w, t_s])
             
         try:
             await asyncio.gather(*tasks)

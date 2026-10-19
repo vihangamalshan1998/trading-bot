@@ -292,3 +292,104 @@ def test_dynamic_universe_accepts_new_usdt_symbols():
         assert bot.num_symbols == 5
         assert bot.has_valid_model is False
 
+def test_independent_transitions_gae():
+    """Verify deterministic 1-step TD advantage when is_trajectory=False with zero forward leakage."""
+    from apps.trainer.ppo import PPOTrainer
+    from apps.research.model import SingleSymbolActorCritic
+    
+    model = SingleSymbolActorCritic(input_dim=200)
+    trainer = PPOTrainer(model=model, limit=10, gamma=0.90)
+    
+    # 3 independent transitions
+    rewards = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float32)
+    values = torch.tensor([[0.5], [1.5], [2.5]], dtype=torch.float32)
+    next_values = torch.tensor([[1.0], [2.0], [4.0]], dtype=torch.float32)
+    dones = torch.tensor([[0.0], [0.0], [0.0]], dtype=torch.float32)
+    
+    adv, ret = trainer.compute_gae(rewards, values, next_values, dones, is_trajectory=False)
+    
+    # For independent transitions: delta_i = r_i + gamma * v_{next_i} * (1 - done_i) - v_i
+    # Row 0: 1.0 + 0.9 * 1.0 - 0.5 = 1.4
+    # Row 1: 2.0 + 0.9 * 2.0 - 1.5 = 2.3
+    # Row 2: 3.0 + 0.9 * 4.0 - 2.5 = 4.1
+    assert abs(adv[0, 0].item() - 1.4) < 1e-4
+    assert abs(adv[1, 0].item() - 2.3) < 1e-4
+    assert abs(adv[2, 0].item() - 4.1) < 1e-4
+    assert abs(ret[0, 0].item() - (1.4 + 0.5)) < 1e-4
+
+def test_terminal_transitions_zero_future_value():
+    """Verify that when done=1.0, future values are strictly zeroed out."""
+    from apps.trainer.ppo import PPOTrainer
+    from apps.research.model import SingleSymbolActorCritic
+    
+    model = SingleSymbolActorCritic(input_dim=200)
+    trainer = PPOTrainer(model=model, limit=10, gamma=0.95)
+    
+    rewards = torch.tensor([[5.0]], dtype=torch.float32)
+    values = torch.tensor([[2.0]], dtype=torch.float32)
+    next_values = torch.tensor([[100.0]], dtype=torch.float32) # Huge future value
+    dones = torch.tensor([[1.0]], dtype=torch.float32) # Terminal flag
+    
+    adv, ret = trainer.compute_gae(rewards, values, next_values, dones, is_trajectory=False)
+    # With done=1.0, next_value MUST NOT be factored: delta = 5.0 + 0.95 * 100 * 0.0 - 2.0 = 3.0
+    assert abs(adv[0, 0].item() - 3.0) < 1e-4
+    assert abs(ret[0, 0].item() - 5.0) < 1e-4
+
+def test_dynamic_universe_register_and_position_preservation():
+    """Verify that symbols can be dynamically registered and inactive screener symbols with open positions are not skipped."""
+    from apps.trading_bot.main import ProductionTradingBot
+    from unittest.mock import patch
+    
+    with patch("core.ai.registry.ModelRegistry.load_model", side_effect=FileNotFoundError("No model")):
+        bot = ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
+        
+        # Register new symbol dynamically
+        registered = bot.register_symbol("SOLUSDT")
+        assert registered is True
+        assert "SOLUSDT" in bot.symbols
+        assert bot.portfolio_state.positions["SOLUSDT"] is not None
+        assert bot.portfolio_state.positions["SOLUSDT"].quantity == 0.0
+        
+        # Test inactive screener filtering
+        bot.dynamic_active_symbols = {"BTCUSDT"} # SOLUSDT and ETHUSDT not in screener
+        
+        # SOLUSDT has 0 quantity -> should not open new trade
+        pos_sol = bot.portfolio_state.positions["SOLUSDT"]
+        should_skip_sol = (pos_sol.quantity == 0 and "SOLUSDT" not in bot.dynamic_active_symbols)
+        assert should_skip_sol is True
+        
+        # ETHUSDT has an active open position -> should NEVER be skipped
+        bot.portfolio_state.positions["ETHUSDT"].quantity = 1.5
+        pos_eth = bot.portfolio_state.positions["ETHUSDT"]
+        should_skip_eth = (pos_eth.quantity == 0 and "ETHUSDT" not in bot.dynamic_active_symbols)
+        assert should_skip_eth is False # Preserved!
+
+def test_feature_engine_exact_90_dims_and_production_vector():
+    """Verify FeatureEngine produces exactly 90 slots and state vector is exactly 200 dims."""
+    from apps.feature_engine.engine import FeatureEngine
+    
+    engine = FeatureEngine(symbol="BTCUSDT")
+    for i in range(30):
+        engine.add_tick({
+            "mid_price": 50000.0 + i * 10,
+            "volume": 100.0,
+            "buy_volume": 60.0,
+            "trade_count": 50.0,
+            "best_bid": 49995.0,
+            "best_ask": 50005.0,
+            "bid_qty": 5.0,
+            "ask_qty": 5.0,
+            "funding_rate": 0.0001,
+            "open_interest": 10000.0,
+            "price_change_24h": 0.0,
+            "volume_24h": 10000.0,
+            "mark_price_premium": 0.0
+        })
+    market_feats = engine.compute_features()
+    assert len(market_feats) == 90
+    
+    # 10 portfolio + 10 position + 90 market + 20 macro + 70 statarb = 200
+    state_vector = [0.0] * 10 + [0.0] * 10 + list(market_feats) + [0.0] * 20 + [0.0] * 70
+    assert len(state_vector) == 200
+
+

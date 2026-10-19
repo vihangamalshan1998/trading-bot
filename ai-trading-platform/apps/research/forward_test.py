@@ -4,6 +4,7 @@ if "." not in sys.path:
     sys.path.insert(0, ".")
 
 import numpy as np
+import pandas as pd
 import torch
 from typing import List, Dict
 from core.logging.logger import logger
@@ -72,7 +73,7 @@ class ForwardTester:
         }
 
     def run(self):
-        logger.info("=== Starting Forward Walk Simulation ===")
+        logger.info("=== Starting Production-Equivalent Forward Walk Simulation ===")
         
         # Check if actual production checkpoint is available
         checkpoint_path = "models/production/model_v1.pt"
@@ -90,133 +91,259 @@ class ForwardTester:
         production_model.eval()
 
         if self.use_real_data:
+            from apps.feature_engine.engine import FeatureEngine
+            
             logger.info("Fetching real Binance USDT-M Futures candles for leak-free forward walk...")
-            df = self.loader.fetch_klines("BTCUSDT", interval="5m", limit=500)
-            if df.empty or len(df) < 100:
+            df = self.loader.fetch_klines("BTCUSDT", interval="5m", limit=1000)
+            if df.empty or len(df) < 300:
                 raise ValueError("Insufficient real Binance historical candle data for forward testing.")
                 
             # Chronological partitioning: 70% Train, 15% Val, 15% Untouched Test
             train_df, val_df, test_df = self.loader.split_chronological(df)
             logger.info(f"Chronological Real Data Partition: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
             
-            # Leak-Free Model-Driven Walk-Forward Backtest
-            portfolio_equity = float(self.initial_capital)
-            portfolio_history = [portfolio_equity]
-            returns_history = []
+            # Initialize production FeatureEngine for BTCUSDT
+            feature_engine = FeatureEngine(symbol="BTCUSDT")
             
-            position = 0.0          # Current position (-1.0 to +1.0)
+            # Warm up feature engine with train + validation bars chronologically so indicators (EMA, RSI, MACD) are fully settled
+            logger.info("Warming up FeatureEngine across historical train/val bars...")
+            warmup_df = pd.concat([train_df, val_df], ignore_index=True)
+            for _, w_row in warmup_df.iterrows():
+                p = float(w_row["close"])
+                v = float(w_row.get("volume", 100.0))
+                feature_engine.add_tick({
+                    "mid_price": p,
+                    "volume": v,
+                    "buy_volume": float(w_row.get("taker_buy_base", v * 0.5)),
+                    "trade_count": float(w_row.get("trades", 50.0)),
+                    "best_bid": p * (1.0 - 0.0001),
+                    "best_ask": p * (1.0 + 0.0001),
+                    "bid_qty": 5.0,
+                    "ask_qty": 5.0,
+                    "funding_rate": 0.0001,
+                    "open_interest": 10000.0,
+                    "price_change_24h": 0.0,
+                    "volume_24h": 10000.0,
+                    "mark_price_premium": 0.0
+                })
+            
+            # Financial Portfolio & Margin Accounting State
+            wallet_balance = float(self.initial_capital)
+            equity = wallet_balance
+            peak_equity = wallet_balance
+            
+            position = 0.0          # Current position direction (-1.0 to +1.0)
             entry_price = 0.0       # Entry fill price
-            trade_notional = 0.0    # Position notional
+            trade_notional = 0.0    # Position notional ($)
+            used_margin = 0.0       # Margin allocated ($)
             leverage = 5            # 5x leverage
+            maintenance_margin_rate = 0.05 # 5% maintenance margin
             
-            # Realistic Execution Costs
-            maker_fee_pct = 0.0002  # 0.02% maker entry
-            taker_fee_pct = 0.0005  # 0.05% taker exit
-            spread_pct = 0.00015    # 0.015% half-spread
-            slippage_pct = 0.00010  # 0.010% slippage
+            # Institutional Execution Frictions (Binance VIP-0 / Standard Futures)
+            maker_fee_pct = 0.0002   # 0.02% maker fee
+            taker_fee_pct = 0.0005   # 0.05% taker fee
+            half_spread_pct = 0.00015 # 0.015% half-spread
+            slippage_pct = 0.00010   # 0.010% slippage
+            funding_rate_8h = 0.0001 # 0.01% standard 8-hour funding rate
+            
             total_fees_paid = 0.0
-            
             trade_pnls = []
             total_trades = 0
             winning_trades = 0
             losing_trades = 0
             
-            # Sliding window of past prices for leak-free feature construction
-            past_closes = []
-            past_volumes = []
+            portfolio_history = [wallet_balance]
+            returns_history = []
             
-            for idx, row in test_df.iterrows():
-                cur_price = float(row["close"])
-                cur_vol = float(row.get("volume", 1000.0))
-                past_closes.append(cur_price)
-                past_volumes.append(cur_vol)
+            # Pending Order from previous bar's decision to execute at subsequent attainable price (next bar's open)
+            pending_order = None # {"desired_pos": float, "decision_bar": int}
+            
+            test_rows = test_df.reset_index(drop=True)
+            num_test_bars = len(test_rows)
+            
+            for i in range(num_test_bars):
+                row = test_rows.iloc[i]
+                cur_open = float(row["open"])
+                cur_high = float(row["high"])
+                cur_low = float(row["low"])
+                cur_close = float(row["close"])
+                cur_vol = float(row.get("volume", 100.0))
                 
-                # Priority 1: Zero Future Leakage.
-                # Compute features strictly on PAST prices (t <= current bar)
-                feat = torch.zeros((1, 200), dtype=torch.float32)
-                
-                if len(past_closes) >= 2:
-                    past_ret_1bar = (past_closes[-1] - past_closes[-2]) / past_closes[-2]
-                    feat[0, 0] = float(np.clip(past_ret_1bar * 100.0, -5.0, 5.0))
-                if len(past_closes) >= 4:
-                    past_ret_3bar = (past_closes[-1] - past_closes[-4]) / past_closes[-4]
-                    feat[0, 1] = float(np.clip(past_ret_3bar * 100.0, -10.0, 10.0))
-                if len(past_volumes) >= 5:
-                    mean_vol = np.mean(past_volumes[-5:])
-                    vol_ratio = cur_vol / max(mean_vol, 1.0)
-                    feat[0, 2] = float(np.clip(vol_ratio, 0.0, 5.0))
+                # -------------------------------------------------------------
+                # 1. Execute Pending Order at Subsequent Attainable Price (Bar Open)
+                # -------------------------------------------------------------
+                if pending_order is not None:
+                    desired_pos = pending_order["desired_pos"]
                     
-                # Position awareness in feature vector
-                feat[0, 10] = position
-                feat[0, 11] = (cur_price - entry_price) / entry_price if entry_price > 0 else 0.0
-
-                # Model inference using production SingleSymbolActorCritic
+                    if desired_pos != position:
+                        # A. Close existing position if any
+                        if position != 0.0 and trade_notional > 0.0:
+                            # Taker exit execution price including spread and slippage
+                            if position > 0:
+                                exit_exec_px = cur_open * (1.0 - half_spread_pct - slippage_pct)
+                            else:
+                                exit_exec_px = cur_open * (1.0 + half_spread_pct + slippage_pct)
+                                
+                            gross_trade_pnl = position * ((exit_exec_px - entry_price) / entry_price) * trade_notional
+                            exit_fee = trade_notional * taker_fee_pct
+                            net_trade_pnl = gross_trade_pnl - exit_fee
+                            
+                            wallet_balance += net_trade_pnl
+                            total_fees_paid += exit_fee
+                            trade_pnls.append(net_trade_pnl / used_margin if used_margin > 0 else 0.0)
+                            total_trades += 1
+                            if net_trade_pnl > 0:
+                                winning_trades += 1
+                            else:
+                                losing_trades += 1
+                                
+                            position = 0.0
+                            entry_price = 0.0
+                            trade_notional = 0.0
+                            used_margin = 0.0
+                            
+                        # B. Open new position if desired_pos != 0
+                        if desired_pos != 0.0 and wallet_balance > 100.0:
+                            # Maker entry execution price
+                            if desired_pos > 0:
+                                entry_exec_px = cur_open * (1.0 + half_spread_pct)
+                            else:
+                                entry_exec_px = cur_open * (1.0 - half_spread_pct)
+                                
+                            used_margin = wallet_balance * 0.20 # 20% margin budget
+                            trade_notional = used_margin * leverage
+                            entry_fee = trade_notional * maker_fee_pct
+                            
+                            wallet_balance -= entry_fee
+                            total_fees_paid += entry_fee
+                            
+                            position = desired_pos
+                            entry_price = entry_exec_px
+                            
+                    pending_order = None # Order filled
+                    
+                # -------------------------------------------------------------
+                # 2. Mark Open Position to Market on Every Bar (Close Price)
+                # -------------------------------------------------------------
+                unrealized_pnl = 0.0
+                if position != 0.0 and entry_price > 0.0 and trade_notional > 0.0:
+                    unrealized_pnl = position * ((cur_close - entry_price) / entry_price) * trade_notional
+                    
+                    # 8-Hour Funding Rate Deduction (every 96 5m bars)
+                    if (i + 1) % 96 == 0:
+                        funding_cost = trade_notional * funding_rate_8h
+                        wallet_balance -= funding_cost
+                        total_fees_paid += funding_cost
+                        
+                    # Maintenance Margin / Liquidation Check
+                    maintenance_margin = trade_notional * maintenance_margin_rate
+                    current_equity = wallet_balance + unrealized_pnl
+                    if current_equity <= maintenance_margin:
+                        # Liquidation triggered!
+                        logger.warning(f"Bar {i}: LIQUIDATION TRIGGERED on {position} position! Equity ${current_equity:.2f} <= Maintenance ${maintenance_margin:.2f}")
+                        wallet_balance = max(10.0, current_equity - (trade_notional * 0.01)) # Liquidation penalty
+                        position = 0.0
+                        entry_price = 0.0
+                        trade_notional = 0.0
+                        used_margin = 0.0
+                        unrealized_pnl = 0.0
+                        total_trades += 1
+                        losing_trades += 1
+                        trade_pnls.append(-1.0)
+                
+                # Marked-to-market equity update
+                equity = wallet_balance + unrealized_pnl
+                if equity > peak_equity:
+                    peak_equity = equity
+                    
+                prev_hist_val = portfolio_history[-1]
+                portfolio_history.append(equity)
+                ret_val = (equity - prev_hist_val) / prev_hist_val if prev_hist_val > 0 else 0.0
+                returns_history.append(ret_val)
+                
+                # -------------------------------------------------------------
+                # 3. Production Feature Builder: Feed Completed Bar into FeatureEngine
+                # -------------------------------------------------------------
+                feature_engine.add_tick({
+                    "mid_price": cur_close,
+                    "volume": cur_vol,
+                    "buy_volume": float(row.get("taker_buy_base", cur_vol * 0.5)),
+                    "trade_count": float(row.get("trades", 50.0)),
+                    "best_bid": cur_close * (1.0 - 0.0001),
+                    "best_ask": cur_close * (1.0 + 0.0001),
+                    "bid_qty": 5.0,
+                    "ask_qty": 5.0,
+                    "funding_rate": 0.0001,
+                    "open_interest": 10000.0,
+                    "price_change_24h": 0.0,
+                    "volume_24h": 10000.0,
+                    "mark_price_premium": 0.0
+                })
+                market_features = feature_engine.compute_features() # Exactly 90 slots!
+                
+                # Construct Full Production 200-Dim State Vector
+                # A. Portfolio & Risk (10 slots)
+                free_margin = max(0.0, wallet_balance - used_margin)
+                margin_util = used_margin / equity if equity > 0 else 0.0
+                account_dd = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+                win_rate_val = (winning_trades / total_trades) if total_trades > 0 else 0.0
+                
+                portfolio_block = [
+                    wallet_balance, equity, free_margin, margin_util,
+                    trade_notional, 1.0 if position != 0 else 0.0,
+                    win_rate_val, account_dd, 0.0, 0.0
+                ]
+                
+                # B. Position Awareness (10 slots)
+                current_pnl_pct = (unrealized_pnl / used_margin) if used_margin > 0 else 0.0
+                dist_to_liq = 0.80 if position != 0 else 0.0
+                position_block = [
+                    position, entry_price, leverage / 50.0, current_pnl_pct,
+                    dist_to_liq, max(0.0, current_pnl_pct), min(0.0, current_pnl_pct),
+                    0.0, 0.0, 0.0
+                ]
+                
+                # C. Macro & Cyclical Time (20 slots)
+                bar_time = row["open_time"]
+                minute_of_day = getattr(bar_time, "hour", 12) * 60 + getattr(bar_time, "minute", 0)
+                time_sin = np.sin(2 * np.pi * minute_of_day / 1440.0)
+                time_cos = np.cos(2 * np.pi * minute_of_day / 1440.0)
+                day_w = getattr(bar_time, "dayofweek", 2)
+                day_sin = np.sin(2 * np.pi * day_w / 7.0)
+                day_cos = np.cos(2 * np.pi * day_w / 7.0)
+                macro_block = [time_sin, time_cos, day_sin, day_cos] + [0.0] * 16
+                
+                # D. Whale & StatArb (70 slots)
+                whale_statarb_block = [0.0] * 70
+                
+                full_state = portfolio_block + position_block + list(market_features) + macro_block + whale_statarb_block
+                state_tensor = torch.tensor(full_state, dtype=torch.float32).unsqueeze(0)
+                
+                if state_tensor.shape[1] != 200:
+                    raise ValueError(f"State dimension mismatch! Expected 200, got {state_tensor.shape[1]}")
+                    
+                # -------------------------------------------------------------
+                # 4. Production Model Inference (Decision made at Bar Close)
+                # -------------------------------------------------------------
                 with torch.no_grad():
-                    action_preds, critics = production_model(feat)
+                    action_preds, critics = production_model(state_tensor)
                     raw_act = float(action_preds[0, 0].item())
                     conf = float(1.0 / (1.0 + np.exp(-action_preds[0, 1].item())))
                     pred_edge = float(critics[0, 0].item()) if critics is not None and critics.numel() > 0 else 0.0
 
-                # Production Action Contract:
-                # Requires directional action conviction (|raw_act| > 0.20) and confidence (>= 0.65)
-                desired_pos = 0.0
+                # Production Action Contract: Conviction (|act| > 0.20) and Confidence (>= 0.65)
+                next_desired_pos = 0.0
                 if raw_act > 0.20 and conf >= 0.65:
-                    desired_pos = 1.0   # LONG
+                    next_desired_pos = 1.0   # LONG
                 elif raw_act < -0.20 and conf >= 0.65:
-                    desired_pos = -1.0  # SHORT
+                    next_desired_pos = -1.0  # SHORT
+                else:
+                    # In hysteresis, if already in a trade, hold unless exit condition or reversal
+                    next_desired_pos = position
 
-                # Calculate bar-by-bar unrealized PnL if holding a position
-                bar_ret = 0.0
-                if position != 0.0 and entry_price > 0.0 and len(past_closes) >= 2:
-                    prev_bar_price = past_closes[-2]
-                    bar_price_delta = (cur_price - prev_bar_price) / prev_bar_price
-                    bar_ret = position * bar_price_delta * leverage
-
-                # Order Execution & State Transitions
-                if desired_pos != position:
-                    # 1. Close existing position if any
-                    if position != 0.0:
-                        # Full round-trip trade PnL
-                        gross_trade_ret = position * ((cur_price - entry_price) / entry_price)
-                        # Exit friction: taker fee + half spread + slippage
-                        exit_friction = taker_fee_pct + spread_pct + slippage_pct
-                        net_trade_ret = (gross_trade_ret * leverage) - (exit_friction * leverage)
-                        
-                        trade_dollar_pnl = trade_notional * (gross_trade_ret - exit_friction)
-                        portfolio_equity += trade_dollar_pnl
-                        total_fees_paid += trade_notional * exit_friction
-                        
-                        trade_pnls.append(net_trade_ret)
-                        total_trades += 1
-                        if net_trade_ret > 0:
-                            winning_trades += 1
-                        else:
-                            losing_trades += 1
-
-                    # 2. Open new position if desired_pos != 0
-                    if desired_pos != 0.0:
-                        # Allocate 20% margin with leverage
-                        margin_budget = portfolio_equity * 0.20
-                        trade_notional = margin_budget * leverage
-                        entry_friction = maker_fee_pct + spread_pct
-                        
-                        # Deduct entry friction immediately from equity
-                        entry_fee_dollars = trade_notional * entry_friction
-                        portfolio_equity -= entry_fee_dollars
-                        total_fees_paid += entry_fee_dollars
-                        
-                        entry_price = cur_price
-                        position = desired_pos
-                    else:
-                        position = 0.0
-                        entry_price = 0.0
-                        trade_notional = 0.0
-
-                prev_val = portfolio_history[-1]
-                current_val = max(100.0, portfolio_equity) # Floor to prevent negative balance
-                period_return = (current_val - prev_val) / prev_val if prev_val > 0 else 0.0
-                portfolio_history.append(current_val)
-                returns_history.append(period_return)
+                # Schedule execution for subsequent attainable price (bar i+1 open)
+                if i + 1 < num_test_bars and next_desired_pos != position:
+                    pending_order = {"desired_pos": next_desired_pos, "decision_bar": i}
 
             metrics = self.calculate_metrics(portfolio_history, returns_history)
             metrics["Total Strategy Trades"] = total_trades
@@ -230,7 +357,7 @@ class ForwardTester:
             metrics["Profit Factor"] = (gross_profit / gross_loss) if gross_loss > 0 else (99.0 if gross_profit > 0 else 1.0)
             metrics["Net Expectancy Per Trade (%)"] = np.mean(trade_pnls) * 100.0 if trade_pnls else 0.0
 
-            logger.info("=== Leak-Free Real Historical Out-of-Sample Forward Test Results ===")
+            logger.info("=== Leak-Free Production-Equivalent Historical Out-of-Sample Results ===")
             for k, v in metrics.items():
                 logger.info(f"{k}: {v:.2f}")
             return metrics

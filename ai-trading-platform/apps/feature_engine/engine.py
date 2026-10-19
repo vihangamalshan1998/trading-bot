@@ -206,9 +206,18 @@ class FeatureEngine:
                 with np.errstate(divide='ignore', invalid='ignore'):
                     acf_matrix = np.corrcoef(returns[:-1], returns[1:])
                     acf = acf_matrix[0, 1] if len(returns) > 2 and not np.isnan(acf_matrix[0, 1]) else 0.0
-                from scipy.stats import skew as scipy_skew, kurtosis as scipy_kurt
-                skew = scipy_skew(returns)
-                kurt = scipy_kurt(returns)
+                try:
+                    from scipy.stats import skew as scipy_skew, kurtosis as scipy_kurt
+                    skew = float(scipy_skew(returns))
+                    kurt = float(scipy_kurt(returns))
+                except ImportError:
+                    mean_r = np.mean(returns)
+                    std_r = np.std(returns)
+                    if std_r > 1e-8:
+                        skew = float(np.mean(((returns - mean_r) / std_r) ** 3))
+                        kurt = float(np.mean(((returns - mean_r) / std_r) ** 4) - 3.0)
+                    else:
+                        skew, kurt = 0.0, 0.0
         
         # 4. Technical Indicators (1-min downsample) [35 slots]
         m1_closes = prices[len(prices)%60::60] if len(prices) >= 60 else prices

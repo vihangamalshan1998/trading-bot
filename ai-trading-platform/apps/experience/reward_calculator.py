@@ -48,11 +48,11 @@ class RewardCalculator:
                         if p_val and float(p_val) > 0:
                             p_start = float(p_val)
 
-                    if not p_start:
-                        # Cannot grade without an initial reference price
-                        exp.reward_5m = 0.0
-                        exp.reward_1h = 0.0
-                        exp.reward_4h = 0.0
+                    if not p_start or p_start <= 0:
+                        # Cannot grade without an initial reference price; flag as None rather than misleading 0.0
+                        exp.reward_5m = None
+                        exp.reward_1h = None
+                        exp.reward_4h = None
                         continue
 
                     action_str = str(exp.action or "").upper()
@@ -63,7 +63,7 @@ class RewardCalculator:
                     else:
                         direction = 0.0
 
-                    # Configurable round-trip trading cost assumption
+                    # Configurable round-trip trading cost assumption (in percent)
                     round_trip_fee_pct = (settings.maker_fee_pct + settings.taker_fee_pct) * 100.0  # e.g. 0.07%
 
                     # Fetch future observations for this symbol up to 4.5 hours ahead
@@ -97,46 +97,51 @@ class RewardCalculator:
                     p_5m, p_1h, p_4h = None, None, None
                     best_diff_5m, best_diff_1h, best_diff_4h = float("inf"), float("inf"), float("inf")
 
+                    # Strict lower and upper timestamp bounds per horizon
+                    # 5m: target ± tolerance [t-60, t+120]
+                    # 1h: target ± tolerance [t-150, t+600]
+                    # 4h: target ± tolerance [t-300, t+1200]
                     for row in future_rows:
                         t = row.timestamp
                         f_price = extract_price(row)
                         if not f_price:
                             continue
 
-                        # 5m horizon (closest at or after target, within 180s tolerance)
-                        diff_5m = abs(t - t_5m_target)
-                        if diff_5m < best_diff_5m and (t >= t_5m_target - 60):
-                            best_diff_5m = diff_5m
-                            p_5m = f_price
+                        # 5m horizon: lower and upper tolerance
+                        if (t_5m_target - 60) <= t <= (t_5m_target + 120):
+                            diff_5m = abs(t - t_5m_target)
+                            if diff_5m < best_diff_5m:
+                                best_diff_5m = diff_5m
+                                p_5m = f_price
 
-                        # 1h horizon (closest at or after target, within 600s tolerance)
-                        diff_1h = abs(t - t_1h_target)
-                        if diff_1h < best_diff_1h and (t >= t_1h_target - 150):
-                            best_diff_1h = diff_1h
-                            p_1h = f_price
+                        # 1h horizon: lower and upper tolerance
+                        if (t_1h_target - 150) <= t <= (t_1h_target + 600):
+                            diff_1h = abs(t - t_1h_target)
+                            if diff_1h < best_diff_1h:
+                                best_diff_1h = diff_1h
+                                p_1h = f_price
 
-                        # 4h horizon (closest at or after target, within 1200s tolerance)
-                        diff_4h = abs(t - t_4h_target)
-                        if diff_4h < best_diff_4h and (t >= t_4h_target - 300):
-                            best_diff_4h = diff_4h
-                            p_4h = f_price
+                        # 4h horizon: lower and upper tolerance
+                        if (t_4h_target - 300) <= t <= (t_4h_target + 1200):
+                            diff_4h = abs(t - t_4h_target)
+                            if diff_4h < best_diff_4h:
+                                best_diff_4h = diff_4h
+                                p_4h = f_price
 
                     def compute_outcome(p_future):
                         if not p_future or p_future <= 0:
-                            return 0.0
+                            return None
                         delta_pct = ((p_future - p_start) / p_start) * 100.0
                         if direction != 0.0:
                             net = (delta_pct * direction) - round_trip_fee_pct
                             return float(net)
                         else:
+                            # Flat / HOLD action has 0.0% PnL and pays no trading fees
                             return 0.0
 
-                    if p_5m:
-                        exp.reward_5m = compute_outcome(p_5m)
-                    if p_1h:
-                        exp.reward_1h = compute_outcome(p_1h)
-                    if p_4h:
-                        exp.reward_4h = compute_outcome(p_4h)
+                    exp.reward_5m = compute_outcome(p_5m) if p_5m is not None else None
+                    exp.reward_1h = compute_outcome(p_1h) if p_1h is not None else None
+                    exp.reward_4h = compute_outcome(p_4h) if p_4h is not None else None
                     
                 session.commit()
                 return len(ungraded)

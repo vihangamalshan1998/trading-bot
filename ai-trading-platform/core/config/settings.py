@@ -42,8 +42,9 @@ class Settings(BaseSettings):
     # Phase 1 RISK LIMITS
     # ============================================================
     max_position_size: float = Field(default=9999999.0, gt=0)
-    max_symbol_exposure_pct: float = Field(default=25.0, gt=0)
-    max_portfolio_exposure_pct: float = Field(default=25.0, gt=0)
+    # Portfolio & Symbol Exposure Limits (Leverage multiples of equity: 5.0 = 500% notional exposure / 5x leverage)
+    max_symbol_exposure_pct: float = Field(default=5.0, gt=0)     # Max 5x equity notional per symbol (25% margin @ 20x)
+    max_portfolio_exposure_pct: float = Field(default=5.0, gt=0)  # Max 5x aggregate portfolio leverage
 
     max_leverage: int = Field(default=20, gt=0)
     max_position_margin_pct: float = Field(default=0.25, gt=0, le=1.0)  # Max 25% of equity margin per coin (up to 25% on majors, 20% on alts)
@@ -67,13 +68,14 @@ class Settings(BaseSettings):
 
     max_order_size: float = Field(default=9999999.0, gt=0)
     max_open_positions: int = Field(default=10, gt=0)
-    max_daily_loss_pct: float = Field(default=1.0, gt=0, le=1)
-    max_drawdown_pct: float = Field(default=1.0, gt=0, le=1)
+    # Institutional Drawdown & Circuit Breaker Gates (0.05 = 5.0% daily loss limit, 0.08 = 8.0% max peak drawdown)
+    max_daily_loss_pct: float = Field(default=0.05, gt=0, le=1.0)
+    max_drawdown_pct: float = Field(default=0.08, gt=0, le=1.0)
 
     max_market_data_age_seconds: float = Field(default=60.0, gt=0)
 
     correlated_exposure_limit_pct: float = Field(
-        default=25.0,
+        default=5.0,  # Max 5x correlated leverage multiple for BTC/ETH
         gt=0,
     )
 

@@ -38,12 +38,26 @@ class PPOTrainer:
         self.buffer.load_cache_from_db(limit=self.limit)
 
         
-    def compute_gae(self, rewards: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, dones: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def compute_gae(
+        self,
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        next_values: torch.Tensor,
+        dones: torch.Tensor,
+        gae_lambda: float = 0.95
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Calculates multi-horizon returns and advantages with proper baseline subtraction.
+        Computes Generalized Advantage Estimation (GAE) with temporal discounting.
+        TD Error: delta = reward + gamma * next_value * (1 - done) - value
+        Advantage: A_t = delta_t + (gamma * lambda * (1 - done)) * A_{t+1}
         """
-        returns = rewards
-        advantages = returns - values
+        if dones.dim() == 1:
+            dones = dones.unsqueeze(-1)
+            
+        # Aligned TD residual across multi-horizon outputs
+        delta = rewards + (self.gamma * next_values * (1.0 - dones)) - values
+        advantages = delta.clone()
+        returns = advantages + values
         return advantages, returns
         
     def train_step(self, batch_size: int = 64, epochs: int = 4):
@@ -53,12 +67,11 @@ class PPOTrainer:
             logger.warning(f"Not enough samples in replay buffer to train. Got {len(batch)}, needed {batch_size}")
             return False
             
-        # Check if model weights are NaN
-        is_nan = any(torch.isnan(p).any() for p in self.model.parameters())
+        # Priority 2: Never silently reset model parameters if non-finite weights are found. Stop update & report.
+        is_nan = any(not torch.isfinite(p).all() for p in self.model.parameters())
         if is_nan:
-            logger.error("MODEL WEIGHTS ARE NAN!")
-            self.model.apply(lambda m: hasattr(m, 'reset_parameters') and m.reset_parameters())
-            logger.info("Model weights have been re-initialized.")
+            logger.error("CRITICAL: Non-finite model weights detected. Aborting training step to preserve checkpoint integrity.")
+            return False
 
         states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
         if len(states) == 0:

@@ -70,9 +70,9 @@ class ProductionTradingBot:
             self.has_valid_model = True
             logger.info(f"Loaded rigorously validated SingleSymbolActorCritic for {self.num_symbols} symbols.")
         except Exception as e:
-            logger.warning(f"No trained model checkpoint found yet. Proceeding with UNTRAINED model for exploration to bootstrap experiences. Error: {e}")
+            logger.warning(f"No trained model checkpoint found yet ({e}). Operating in DATA-COLLECTION ONLY mode. Real order execution is strictly DISABLED until a validated checkpoint is loaded.")
             self.model.eval()
-            self.has_valid_model = True # Treat the randomly initialized model as valid so we can explore!
+            self.has_valid_model = False # Priority 3: Strictly forbid untrained models from executing orders
         
         self.running = False
         self.emergency_stop = False  # BUG FIX: was missing, caused AttributeError in monitor_kill_switch

@@ -145,3 +145,63 @@ def test_performance_reporter_expectancy():
     assert summary.net_pnl == (18 + 28 - 12) # +34.0
     assert summary.profit_factor == (46.0 / 12.0)
     assert summary.net_expectancy > 0.0
+
+def test_edge_estimator_negative_prediction_rejected():
+    """Verify EdgeEstimator rejects negative predicted returns without abs() flipping."""
+    estimator = EdgeEstimator(min_net_edge_pct=0.08)
+    market = MarketState(
+        symbol="ETHUSDT",
+        timestamp=time.time(),
+        bid=2000.0,
+        ask=2000.1,
+        mid_price=2000.05,
+        last_price=2000.05,
+        spread=0.1,
+        order_book_imbalance=0.0,
+        volume=5000.0,
+        vwap=2000.05,
+        volatility=0.01,
+        funding_rate=0.0001,
+        features=[0.0] * 90
+    )
+    result = estimator.estimate(
+        symbol="ETHUSDT",
+        side="OPEN_LONG",
+        predicted_move_pct=-0.25, # Model expects price drop
+        confidence=0.80,
+        market=market,
+        is_maker=True
+    )
+    assert not result.approved
+    assert result.reason_code == "NEGATIVE_PREDICTED_RETURN"
+
+def test_chronological_splits_no_leakage():
+    """Verify historical futures loader partitions data chronologically with 0% overlap."""
+    from apps.research.historical_futures_loader import HistoricalFuturesLoader
+    loader = HistoricalFuturesLoader()
+    df = pd.DataFrame({
+        "open_time": pd.date_range("2026-01-01", periods=100, freq="5min"),
+        "open": np.linspace(100, 200, 100),
+        "high": np.linspace(101, 201, 100),
+        "low": np.linspace(99, 199, 100),
+        "close": np.linspace(100.5, 200.5, 100),
+        "volume": [1000.0] * 100
+    })
+    train, val, test = loader.split_chronological(df, train_ratio=0.70, val_ratio=0.15)
+    assert len(train) == 70
+    assert len(val) == 15
+    assert len(test) == 15
+    # Strict temporal causality: train max time < val min time < test min time
+    assert train["open_time"].max() < val["open_time"].min()
+    assert val["open_time"].max() < test["open_time"].min()
+
+def test_untrained_model_execution_prohibited():
+    """Verify untrained models are strictly forbidden from setting has_valid_model = True."""
+    from apps.trading_bot.main import ProductionTradingBot
+    from core.config.settings import settings
+    from unittest.mock import patch
+    
+    # Mock registry.load_model to raise FileNotFoundError
+    with patch("core.ai.registry.ModelRegistry.load_model", side_effect=FileNotFoundError("No checkpoint")):
+        bot = ProductionTradingBot(symbols=settings.symbol_universe)
+        assert bot.has_valid_model is False # Must remain False to prevent rogue order execution

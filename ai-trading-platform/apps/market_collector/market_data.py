@@ -312,17 +312,21 @@ class BinanceWebSocketCollector:
         self._running = False
 
 async def run_collector():
+    from apps.market_collector.universe_screener import UniverseScreener
     symbols = settings.symbol_universe
     collector = BinanceWebSocketCollector(symbols)
+    screener = UniverseScreener(target_symbol_count=10, poll_interval_seconds=1800)
     
     try:
-        # Run both the WebSocket listener and the REST poller concurrently
+        # Run the WebSocket listener, REST poller, and dynamic Universe Screener concurrently
         await asyncio.gather(
             collector.listen(),
-            collector.poll_rest_data()
+            collector.poll_rest_data(),
+            screener.start()
         )
     except asyncio.CancelledError:
         collector.stop()
+        screener.stop()
 
 if __name__ == "__main__":
     set_log_file("logs/market_collector.log")

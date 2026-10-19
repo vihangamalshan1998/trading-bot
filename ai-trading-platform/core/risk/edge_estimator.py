@@ -49,8 +49,26 @@ class EdgeEstimator:
         Computes the complete cost structure and net edge for an order.
         """
         # 1. Expected Gross Return
-        gross_return = abs(predicted_move_pct)
+        gross_return = float(predicted_move_pct)
         uncertainty = max(0.0, 1.0 - confidence)
+
+        if gross_return <= 0.0:
+            return EdgeResult(
+                symbol=symbol,
+                side=side,
+                gross_expected_return_pct=gross_return,
+                estimated_costs_pct=0.0,
+                net_expected_return_pct=gross_return,
+                entry_fee_pct=0.0,
+                exit_fee_pct=0.0,
+                half_spread_pct=0.0,
+                slippage_pct=0.0,
+                funding_pct=0.0,
+                uncertainty=uncertainty,
+                horizon_seconds=self.default_horizon_seconds,
+                approved=False,
+                reason_code="NEGATIVE_PREDICTED_RETURN",
+            )
 
         # 2. Commissions (Maker 0.02% vs Taker 0.05%)
         entry_fee = (settings.maker_fee_pct if is_maker else settings.taker_fee_pct) * 100.0

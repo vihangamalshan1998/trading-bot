@@ -8,14 +8,15 @@ import os
 from core.logging.logger import logger
 from core.ai.replay_buffer import ReplayBuffer
 from core.ai.registry import ModelRegistry
-from apps.research.model import MultiSymbolActorCritic
+from apps.research.model import SingleSymbolActorCritic
 from core.config.settings import settings
 
 class OnlineTrainer:
     """
     Phase 4: Real Online Trainer without Dummy Losses.
-    Continuously samples from the ReplayBuffer (MySQL) and updates a CANDIDATE model.
-    Never mutates the active production weights directly.
+    Continuously samples from the ReplayBuffer and updates a CANDIDATE model.
+    Matches the exact SingleSymbolActorCritic(input_dim=200) production architecture.
+    Never mutates the active champion weights directly.
     """
     def __init__(self, symbols: list):
         self.symbols = symbols
@@ -23,13 +24,13 @@ class OnlineTrainer:
         self.replay_buffer = ReplayBuffer(capacity_cache=100000)
         self.registry = ModelRegistry()
         
-        # We start by copying the current production weights into our Candidate
-        self.candidate_model = MultiSymbolActorCritic(num_symbols=self.num_symbols, macro_dim=8)
+        # Priority 8: Ensure candidate architecture matches production SingleSymbolActorCritic
+        self.candidate_model = SingleSymbolActorCritic(input_dim=200)
         try:
-            self.candidate_model = self.registry.load_model(self.candidate_model) # Loads active
-            logger.info("Loaded Active production model as the base for Candidate Training.")
-        except Exception:
-            logger.warning("No active production model found. Starting Candidate from random initialization.")
+            self.candidate_model = self.registry.load_model(self.candidate_model) # Loads active champion as base
+            logger.info("Loaded active champion SingleSymbolActorCritic as the base for Candidate Training.")
+        except Exception as e:
+            logger.warning(f"No active production model found ({e}). Initializing candidate as clean baseline.")
             
         self.candidate_model.train()
         self.optimizer = optim.Adam(self.candidate_model.parameters(), lr=1e-4)
@@ -94,18 +95,14 @@ class OnlineTrainer:
                 if self.current_step % 100 == 0:
                     logger.info(f"Trainer Step {self.current_step} | Loss: {loss.item():.4f} (Actor: {actor_loss.item():.4f}, Critic: {critic_loss.item():.4f})")
                     
-                # Periodically save a candidate checkpoint
+                # Periodically save a candidate checkpoint for out-of-sample evaluation
                 if self.current_step % self.sync_interval_steps == 0:
+                    cand_dir = "models/candidates"
+                    os.makedirs(cand_dir, exist_ok=True)
                     version_id = f"candidate_v_{int(time.time())}"
-                    metrics = {"loss": float(loss.item()), "steps": self.current_step}
-                    
-                    self.registry.save_model(
-                        model=self.candidate_model, 
-                        version_id=version_id, 
-                        architecture=self.candidate_model.__class__.__name__, 
-                        metrics=metrics
-                    )
-                    logger.info(f"Saved Candidate Checkpoint: {version_id}. Awaiting evaluation/promotion.")
+                    cand_path = os.path.join(cand_dir, f"{version_id}.pt")
+                    torch.save(self.candidate_model.state_dict(), cand_path)
+                    logger.info(f"Saved Candidate Checkpoint: {cand_path} [Loss: {loss.item():.4f}]. Awaiting out-of-sample showdown before promotion.")
                     
             except Exception as e:
                 logger.error(f"Error in training loop: {e}")

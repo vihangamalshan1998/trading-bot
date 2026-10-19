@@ -303,13 +303,13 @@ class PPOTrainer:
             champion_available = os.path.exists(champion_path)
             
             if not champion_available:
-                logger.info(f"Initial baseline brain established. Approved without tournament benchmark. (Score: {challenger_score:.4f})")
+                logger.error("Candidate evaluation FAILED: Production champion checkpoint (models/production/model_v1.pt) is missing. Failing closed to prevent unbenchmarked promotion.")
                 del states, actions, rewards, next_states, dones
                 return {
-                    "approved": True,
-                    "reason": "INITIAL_BASELINE",
+                    "approved": False,
+                    "reason": "MISSING_CHAMPION_CHECKPOINT",
                     "challenger_score": challenger_score,
-                    "champion_score": 0.0,
+                    "champion_score": None,
                     "critic_loss": challenger_critic_mse,
                     "entropy": challenger_entropy
                 }
@@ -331,10 +331,16 @@ class PPOTrainer:
 
                 del champion_model, champ_actions, champ_values
             except Exception as champ_e:
-                logger.warning(f"Could not benchmark Champion model ({champ_e}). Proceeding with Challenger metrics.")
-                champion_score = challenger_score - 0.01
-                champ_critic_mse = challenger_critic_mse + 0.01
-                champ_sim_pnl = challenger_sim_pnl
+                logger.error(f"Candidate evaluation FAILED: Corrupt, incompatible, or unloadable champion model ({champ_e}). Failing closed without fabricating benchmark scores.")
+                del states, actions, rewards, next_states, dones
+                return {
+                    "approved": False,
+                    "reason": f"CHAMPION_LOAD_FAILURE: {champ_e}",
+                    "challenger_score": challenger_score,
+                    "champion_score": None,
+                    "critic_loss": challenger_critic_mse,
+                    "entropy": challenger_entropy
+                }
 
             del states, actions, rewards, next_states, dones
 

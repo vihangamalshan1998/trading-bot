@@ -448,5 +448,72 @@ def test_candidate_evaluation_rejects_insufficient_samples():
         assert res["approved"] is False
         assert res["reason"] == "INSUFFICIENT_SAMPLE_SIZE"
 
+def test_missing_and_corrupt_champion_fails_closed(tmp_path):
+    """Verify evaluate_candidate fails closed on missing champion or corrupt champion."""
+    from apps.trainer.ppo import PPOTrainer
+    from apps.research.model import SingleSymbolActorCritic
+    from unittest.mock import patch
+    
+    model = SingleSymbolActorCritic(input_dim=200)
+    trainer = PPOTrainer(model=model, limit=10)
+    
+    mock_batch = [object()] * 35
+    mock_tensors = (
+        torch.zeros((35, 300, 200)),
+        torch.zeros((35, 300, 4)),
+        torch.zeros((35, 3)),
+        torch.zeros((35, 300, 200)),
+        torch.zeros((35, 300, 1))
+    )
+    
+    with patch.object(trainer.buffer, "sample", return_value=mock_batch), \
+         patch.object(trainer.buffer, "build_tensors", return_value=mock_tensors):
+         
+        # 1. Missing champion: os.path.exists returns False
+        with patch("os.path.exists", return_value=False):
+            res = trainer.evaluate_candidate(sample_size=64)
+            assert res["approved"] is False
+            assert res["reason"] == "MISSING_CHAMPION_CHECKPOINT"
+            
+        # 2. Corrupt champion: torch.load raises an error
+        with patch("os.path.exists", return_value=True), \
+             patch("torch.load", side_effect=RuntimeError("Corrupt checkpoint")):
+            res = trainer.evaluate_candidate(sample_size=64)
+            assert res["approved"] is False
+            assert "CHAMPION_LOAD_FAILURE" in res["reason"]
+
+def test_atomic_promotion_rejects_unapproved_or_nan_candidate(tmp_path):
+    """Verify promote_candidate rejects unapproved evaluation metrics and NaN weights."""
+    from core.ai.registry import ModelRegistry
+    from apps.research.model import SingleSymbolActorCritic
+    
+    registry = ModelRegistry(model_dir=str(tmp_path))
+    model = SingleSymbolActorCritic(input_dim=200)
+    
+    # Save valid baseline
+    registry.save_model(model, version_tag="base_v1")
+    
+    cand_path = os.path.join(str(tmp_path), "cand_test.pt")
+    torch.save(model.state_dict(), cand_path)
+    
+    # 1. Candidate with approved=False in metrics must be rejected
+    rejected_metrics = {"approved": False, "reason": "INFERIOR_TO_CHAMPION"}
+    success = registry.promote_candidate(cand_path, version_tag="v_rejected", metrics=rejected_metrics)
+    assert success is False
+    assert registry.current_version != "v_rejected"
+    
+    # 2. Candidate with NaN weights must be rejected
+    nan_cand_path = os.path.join(str(tmp_path), "cand_nan.pt")
+    nan_state = model.state_dict()
+    for k in nan_state:
+        nan_state[k] = torch.full_like(nan_state[k], float("nan"))
+        break
+    torch.save(nan_state, nan_cand_path)
+    
+    success_nan = registry.promote_candidate(nan_cand_path, version_tag="v_nan")
+    assert success_nan is False
+    assert registry.current_version != "v_nan"
+
+
 
 

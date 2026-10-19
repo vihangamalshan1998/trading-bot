@@ -189,34 +189,59 @@ class ModelRegistry:
             logger.warning(f"Could not update tournament_history.json: {e}")
 
     def promote_candidate(self, candidate_checkpoint_path: str, version_tag: str, metrics: dict = None) -> bool:
-        """Promotes a validated candidate model to champion with automatic rollback backup."""
+        """Promotes a validated candidate model to champion with atomic replacement and automatic rollback backup."""
         import shutil
         import time
         import json
+
+        # 1. Gate check: If metrics are provided, ensure candidate was explicitly approved
+        if metrics is not None and metrics.get("approved") is False:
+            logger.error(f"Cannot promote candidate: Evaluation decision is rejected (reason: {metrics.get('reason')}).")
+            return False
+
         if not os.path.exists(candidate_checkpoint_path):
             logger.error(f"Cannot promote candidate: file {candidate_checkpoint_path} not found.")
+            return False
+
+        # 2. Candidate integrity verification before promotion
+        try:
+            cand_state = torch.load(candidate_checkpoint_path, map_location="cpu")
+            if not isinstance(cand_state, dict):
+                logger.error("Cannot promote candidate: Invalid state_dict format.")
+                return False
+            for k, v in cand_state.items():
+                if torch.is_tensor(v) and (torch.isnan(v).any() or torch.isinf(v).any()):
+                    logger.error(f"Cannot promote candidate: NaN/Inf weights detected in {k}.")
+                    return False
+        except Exception as e:
+            logger.error(f"Cannot promote candidate: Failed to load and validate checkpoint: {e}")
             return False
             
         current_champion = os.path.join(self.model_dir, "model_v1.pt")
         backup_champion = os.path.join(self.model_dir, "model_v1_backup.pt")
         
-        # Backup current champion before replacement
+        # 3. Backup current champion before replacement
         if os.path.exists(current_champion):
             shutil.copy2(current_champion, backup_champion)
             
-        # Promote candidate
-        shutil.copy2(candidate_checkpoint_path, current_champion)
+        # 4. Atomic promotion: Copy to temp file, then atomic os.replace
+        temp_champion = os.path.join(self.model_dir, "model_v1.pt.tmp")
+        shutil.copy2(candidate_checkpoint_path, temp_champion)
+        os.replace(temp_champion, current_champion)
         self.current_version = version_tag
         
+        # 5. Atomic version metadata write
         version_file = os.path.join(self.model_dir, "version.json")
+        temp_version = os.path.join(self.model_dir, "version.json.tmp")
         try:
-            with open(version_file, "w") as f:
+            with open(temp_version, "w") as f:
                 json.dump({
                     "version": version_tag,
                     "promoted_at": time.time(),
                     "metrics": metrics or {},
                     "has_backup": os.path.exists(backup_champion)
                 }, f, indent=2)
+            os.replace(temp_version, version_file)
         except Exception as e:
             logger.warning(f"Could not write version.json: {e}")
             

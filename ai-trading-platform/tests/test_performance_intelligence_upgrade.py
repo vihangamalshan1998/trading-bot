@@ -118,8 +118,15 @@ def test_model_registry_promote_and_rollback(tmp_path):
     cand_path = os.path.join(str(tmp_path), "cand_v2.pt")
     torch.save(model_cand.state_dict(), cand_path)
     
-    # Promote candidate
-    promoted = registry.promote_candidate(cand_path, version_tag="v2_promoted")
+    # Promote candidate with valid approved metrics
+    valid_metrics = {
+        "approved": True,
+        "reason": "SUPERIOR_TO_CHAMPION",
+        "challenger_score": 0.15,
+        "champion_score": 0.05,
+        "critic_loss": 0.01
+    }
+    promoted = registry.promote_candidate(cand_path, version_tag="v2_promoted", metrics=valid_metrics)
     assert promoted
     assert registry.current_version == "v2_promoted"
     assert os.path.exists(os.path.join(str(tmp_path), "model_v1_backup.pt"))
@@ -338,7 +345,14 @@ def test_terminal_transitions_zero_future_value():
 def test_dynamic_universe_register_and_position_preservation():
     """Verify that symbols can be dynamically registered and inactive screener symbols with open positions are not skipped."""
     from apps.trading_bot.main import ProductionTradingBot
+    from core.exchange.symbol_registry import registry, SymbolConfig
     from unittest.mock import patch
+    
+    # Ensure SOLUSDT exists in exchange registry for contract validation
+    sol_cfg = SymbolConfig("SOLUSDT", "SOL", "USDT")
+    sol_cfg.status = "ENABLED"
+    sol_cfg.trading_enabled = True
+    registry.add_symbol(sol_cfg)
     
     with patch("core.ai.registry.ModelRegistry.load_model", side_effect=FileNotFoundError("No model")):
         bot = ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT"])
@@ -409,7 +423,11 @@ def test_genuine_contract_validation_fail_closed():
         # 2. Configured exclusion rejected (e.g. SUIUSDT)
         assert bot.is_valid_contract("SUIUSDT") is False
         
-        # 3. With populated exchange registry:
+        # 3. Empty exchange registry -> fails closed even for configured symbols!
+        registry._symbols = {}
+        assert bot.is_valid_contract("BTCUSDT") is False
+        
+        # 4. With populated exchange registry:
         # Mock exchange registry with BTCUSDT (ENABLED) and SHIBUSDT (DISABLED)
         btc_cfg = SymbolConfig("BTCUSDT", "BTC", "USDT")
         btc_cfg.status = "ENABLED"
@@ -502,7 +520,24 @@ def test_atomic_promotion_rejects_unapproved_or_nan_candidate(tmp_path):
     assert success is False
     assert registry.current_version != "v_rejected"
     
-    # 2. Candidate with NaN weights must be rejected
+    # 2. Missing metrics or empty metrics must be rejected
+    assert registry.promote_candidate(cand_path, version_tag="v_none", metrics=None) is False
+    assert registry.promote_candidate(cand_path, version_tag="v_empty", metrics={}) is False
+    
+    # 3. Non-boolean True approval (e.g. string "true" or 1) must be rejected
+    assert registry.promote_candidate(cand_path, version_tag="v_str", metrics={"approved": "true", "reason": "TEST"}) is False
+    assert registry.promote_candidate(cand_path, version_tag="v_int", metrics={"approved": 1, "reason": "TEST"}) is False
+    
+    # 4. Missing required 'reason' evidence must be rejected
+    assert registry.promote_candidate(cand_path, version_tag="v_no_reason", metrics={"approved": True}) is False
+    
+    # 5. Non-finite metrics (NaN or Inf) must be rejected
+    nan_metric = {"approved": True, "reason": "TEST", "challenger_score": float("nan")}
+    assert registry.promote_candidate(cand_path, version_tag="v_nan_metric", metrics=nan_metric) is False
+    inf_metric = {"approved": True, "reason": "TEST", "challenger_score": float("inf")}
+    assert registry.promote_candidate(cand_path, version_tag="v_inf_metric", metrics=inf_metric) is False
+
+    # 6. Candidate with NaN weights must be rejected
     nan_cand_path = os.path.join(str(tmp_path), "cand_nan.pt")
     nan_state = model.state_dict()
     for k in nan_state:
@@ -510,9 +545,36 @@ def test_atomic_promotion_rejects_unapproved_or_nan_candidate(tmp_path):
         break
     torch.save(nan_state, nan_cand_path)
     
-    success_nan = registry.promote_candidate(nan_cand_path, version_tag="v_nan")
+    success_nan = registry.promote_candidate(nan_cand_path, version_tag="v_nan", metrics={"approved": True, "reason": "TEST"})
     assert success_nan is False
     assert registry.current_version != "v_nan"
+
+    # 7. Candidate with architecture mismatch must be rejected
+    import torch.nn as nn
+    class IncompatibleModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = nn.Linear(50, 2)
+        def forward(self, x):
+            return self.fc(x)
+            
+    incomp_path = os.path.join(str(tmp_path), "incomp.pt")
+    torch.save(IncompatibleModel().state_dict(), incomp_path)
+    valid_metrics = {"approved": True, "reason": "TEST"}
+    assert registry.promote_candidate(incomp_path, version_tag="v_incomp", metrics=valid_metrics) is False
+
+    # 8. save_model() cannot overwrite existing champion without approved metrics
+    assert registry.save_model(model, version_tag="v_unapproved") is False
+    assert registry.save_model(model, version_tag="v_unapproved", metrics={"approved": False}) is False
+
+    # 9. Concurrent promotion lock prevents race conditions
+    lock_file = os.path.join(str(tmp_path), "promotion.lock")
+    with open(lock_file, "w") as f:
+        f.write("locked")
+    assert registry.promote_candidate(cand_path, version_tag="v_locked", metrics=valid_metrics) is False
+    if os.path.exists(lock_file):
+        os.remove(lock_file)
+
 
 
 

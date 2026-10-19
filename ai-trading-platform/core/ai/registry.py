@@ -114,7 +114,11 @@ class ModelRegistry:
         return current_mtime > self.last_loaded_mtime
 
     def save_model(self, model, version_tag: str = None, metrics: dict = None):
-        """Saves the model to the production directory with version metadata and historical archive."""
+        """
+        Saves the model to the production directory with version metadata.
+        If a champion already exists, direct overwrite via save_model() without explicit approved
+        evaluation metrics is blocked to prevent accidental unverified promotion.
+        """
         import json
         import time
 
@@ -122,19 +126,28 @@ class ModelRegistry:
             os.makedirs(self.model_dir, exist_ok=True)
             
         checkpoint_path = os.path.join(self.model_dir, "model_v1.pt")
-        torch.save(model.state_dict(), checkpoint_path)
+        if os.path.exists(checkpoint_path):
+            if not metrics or metrics.get("approved") is not True:
+                logger.error("Cannot overwrite existing champion via save_model() without validated promotion metrics with approved=True.")
+                return False
+
+        temp_path = os.path.join(self.model_dir, "model_v1.pt.tmp")
+        torch.save(model.state_dict(), temp_path)
+        os.replace(temp_path, checkpoint_path)
         
         # Save version metadata
         version = version_tag or f"v1_push_{int(time.time())}"
         self.current_version = version
         version_file = os.path.join(self.model_dir, "version.json")
+        temp_version = os.path.join(self.model_dir, "version.json.tmp")
         try:
-            with open(version_file, "w") as f:
+            with open(temp_version, "w") as f:
                 json.dump({
                     "version": version,
                     "timestamp": time.time(),
                     "metrics": metrics or {}
                 }, f, indent=2)
+            os.replace(temp_version, version_file)
         except Exception as e:
             logger.warning(f"Could not write version.json: {e}")
 
@@ -149,6 +162,7 @@ class ModelRegistry:
 
         logger.info(f"Model saved to {checkpoint_path} [Version: {version}]")
         self.record_tournament_result(metrics or {}, version_tag=version)
+        return True
 
     def record_tournament_result(self, eval_result: dict, version_tag: str = None):
         """Appends a tournament showdown record to cumulative tournament_history.json."""
@@ -189,21 +203,40 @@ class ModelRegistry:
             logger.warning(f"Could not update tournament_history.json: {e}")
 
     def promote_candidate(self, candidate_checkpoint_path: str, version_tag: str, metrics: dict = None) -> bool:
-        """Promotes a validated candidate model to champion with atomic replacement and automatic rollback backup."""
+        """
+        Promotes a validated candidate model to champion with strict gate checks,
+        concurrency protection, atomic replacement, and automatic rollback backup.
+        """
         import shutil
         import time
         import json
+        import math
 
-        # 1. Gate check: If metrics are provided, ensure candidate was explicitly approved
-        if metrics is not None and metrics.get("approved") is False:
-            logger.error(f"Cannot promote candidate: Evaluation decision is rejected (reason: {metrics.get('reason')}).")
+        # Step 1.2 & 1.3: Mandatory Evaluation Metrics Validation
+        if not metrics or not isinstance(metrics, dict):
+            logger.error("Cannot promote candidate: Evaluation metrics are missing or empty.")
             return False
+
+        if metrics.get("approved") is not True:
+            logger.error(f"Cannot promote candidate: Candidate is not approved (approved={metrics.get('approved')}, reason={metrics.get('reason')}).")
+            return False
+
+        if "reason" not in metrics:
+            logger.error("Cannot promote candidate: Missing required evaluation evidence 'reason'.")
+            return False
+
+        # Validate metrics are finite numbers where present
+        for m_key in ["challenger_score", "champion_score", "critic_loss", "entropy"]:
+            val = metrics.get(m_key)
+            if val is not None and (math.isnan(val) or math.isinf(val)):
+                logger.error(f"Cannot promote candidate: Non-finite evaluation metric '{m_key}' = {val}.")
+                return False
 
         if not os.path.exists(candidate_checkpoint_path):
             logger.error(f"Cannot promote candidate: file {candidate_checkpoint_path} not found.")
             return False
 
-        # 2. Candidate integrity verification before promotion
+        # Step 1.2: Candidate weights & architecture verification before promotion
         try:
             cand_state = torch.load(candidate_checkpoint_path, map_location="cpu")
             if not isinstance(cand_state, dict):
@@ -213,41 +246,79 @@ class ModelRegistry:
                 if torch.is_tensor(v) and (torch.isnan(v).any() or torch.isinf(v).any()):
                     logger.error(f"Cannot promote candidate: NaN/Inf weights detected in {k}.")
                     return False
+
+            # Verify architecture compatibility with SingleSymbolActorCritic(input_dim=200)
+            from apps.research.model import SingleSymbolActorCritic
+            test_model = SingleSymbolActorCritic(input_dim=200)
+            test_model.load_state_dict(cand_state)
+            test_model.eval()
+            with torch.no_grad():
+                dummy_input = torch.zeros(1, 300, 200)
+                a_out, v_out = test_model(dummy_input)
+                if a_out.shape[-1] != 4 or v_out.shape[-1] != 3:
+                    logger.error(f"Cannot promote candidate: Model output dimension mismatch (actions: {a_out.shape}, values: {v_out.shape}).")
+                    return False
         except Exception as e:
-            logger.error(f"Cannot promote candidate: Failed to load and validate checkpoint: {e}")
+            logger.error(f"Cannot promote candidate: Failed to load, validate, or verify candidate architecture: {e}")
             return False
-            
-        current_champion = os.path.join(self.model_dir, "model_v1.pt")
-        backup_champion = os.path.join(self.model_dir, "model_v1_backup.pt")
-        
-        # 3. Backup current champion before replacement
-        if os.path.exists(current_champion):
-            shutil.copy2(current_champion, backup_champion)
-            
-        # 4. Atomic promotion: Copy to temp file, then atomic os.replace
-        temp_champion = os.path.join(self.model_dir, "model_v1.pt.tmp")
-        shutil.copy2(candidate_checkpoint_path, temp_champion)
-        os.replace(temp_champion, current_champion)
-        self.current_version = version_tag
-        
-        # 5. Atomic version metadata write
-        version_file = os.path.join(self.model_dir, "version.json")
-        temp_version = os.path.join(self.model_dir, "version.json.tmp")
+
+        # Concurrency protection: Lock file
+        lock_file = os.path.join(self.model_dir, "promotion.lock")
         try:
-            with open(temp_version, "w") as f:
-                json.dump({
-                    "version": version_tag,
-                    "promoted_at": time.time(),
-                    "metrics": metrics or {},
-                    "has_backup": os.path.exists(backup_champion)
-                }, f, indent=2)
-            os.replace(temp_version, version_file)
-        except Exception as e:
-            logger.warning(f"Could not write version.json: {e}")
+            with open(lock_file, "x") as f:
+                f.write(str(time.time()))
+        except FileExistsError:
+            try:
+                mtime = os.path.getmtime(lock_file)
+                if time.time() - mtime > 60:
+                    os.remove(lock_file)
+                    with open(lock_file, "w") as f:
+                        f.write(str(time.time()))
+                else:
+                    logger.error("Cannot promote candidate: Concurrent promotion in progress (promotion.lock active).")
+                    return False
+            except Exception:
+                return False
+
+        try:
+            current_champion = os.path.join(self.model_dir, "model_v1.pt")
+            backup_champion = os.path.join(self.model_dir, "model_v1_backup.pt")
             
-        self.record_tournament_result(metrics or {}, version_tag=version_tag)
-        logger.info(f"🏆 Candidate {version_tag} PROMOTED to Production Champion!")
-        return True
+            # Step 1.4: Backup current champion before replacement
+            if os.path.exists(current_champion):
+                shutil.copy2(current_champion, backup_champion)
+                
+            # Atomic promotion: Copy to temp file, verify readability, then atomic os.replace
+            temp_champion = os.path.join(self.model_dir, "model_v1.pt.tmp")
+            shutil.copy2(candidate_checkpoint_path, temp_champion)
+            _ = torch.load(temp_champion, map_location="cpu")
+            os.replace(temp_champion, current_champion)
+            self.current_version = version_tag
+            
+            # Atomic version metadata write
+            version_file = os.path.join(self.model_dir, "version.json")
+            temp_version = os.path.join(self.model_dir, "version.json.tmp")
+            try:
+                with open(temp_version, "w") as f:
+                    json.dump({
+                        "version": version_tag,
+                        "promoted_at": time.time(),
+                        "metrics": metrics,
+                        "has_backup": os.path.exists(backup_champion)
+                    }, f, indent=2)
+                os.replace(temp_version, version_file)
+            except Exception as e:
+                logger.warning(f"Could not write version.json: {e}")
+                
+            self.record_tournament_result(metrics, version_tag=version_tag)
+            logger.info(f"🏆 Candidate {version_tag} PROMOTED to Production Champion!")
+            return True
+        finally:
+            if os.path.exists(lock_file):
+                try:
+                    os.remove(lock_file)
+                except Exception:
+                    pass
 
     def rollback(self) -> bool:
         """Restores the last known-good champion checkpoint from backup."""

@@ -544,7 +544,14 @@ async def run_training_loop():
                     try:
                         push_count += 1
                         version_tag = f"v1_push_{push_count}"
-                        registry.save_model(model, version_tag=version_tag, metrics=eval_result)
+                        cand_dir = "models/candidates"
+                        os.makedirs(cand_dir, exist_ok=True)
+                        cand_path = os.path.join(cand_dir, f"{version_tag}.pt")
+                        torch.save(model.state_dict(), cand_path)
+                        promoted = registry.promote_candidate(cand_path, version_tag=version_tag, metrics=eval_result)
+                        if not promoted:
+                            logger.error(f"Promotion gate rejected candidate {version_tag}.")
+                            continue
                         
                         if local_mode and (time.time() - last_push_time > 300):
                             logger.info(f"🚀 Pushing evaluated Brain ({version_tag}) to VPS in the background ({push_count}/100)...")

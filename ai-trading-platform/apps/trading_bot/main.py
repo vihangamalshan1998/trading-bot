@@ -154,29 +154,25 @@ class ProductionTradingBot:
             logger.info(f"[{sym}] CONTRACT VALIDATION: Symbol is in excluded_trading_symbols.")
             return False
 
-        # If exchange registry is populated, enforce strict exchange metadata verification
-        if registry._symbols:
-            cfg = registry.get_symbol(sym)
-            if not cfg:
-                logger.warning(f"[{sym}] CONTRACT VALIDATION: Symbol not found in Binance Futures exchange metadata.")
-                return False
-            if cfg.status != "ENABLED" or not cfg.trading_enabled:
-                logger.warning(f"[{sym}] CONTRACT VALIDATION: Contract status '{cfg.status}' is not tradable.")
-                return False
-            if cfg.quote_asset != "USDT":
-                logger.warning(f"[{sym}] CONTRACT VALIDATION: Quote asset '{cfg.quote_asset}' != 'USDT'.")
-                return False
-            if cfg.market_type != "FUTURES":
-                logger.warning(f"[{sym}] CONTRACT VALIDATION: Market type '{cfg.market_type}' != 'FUTURES'.")
-                return False
-            return True
+        # Enforce strict Binance Futures exchange metadata verification
+        if not registry._symbols:
+            logger.warning(f"[{sym}] CONTRACT VALIDATION: Binance Futures metadata registry is empty. Failing closed.")
+            return False
 
-        # Fallback before network initialization: only allow explicit symbol universe
-        if sym in settings.symbol_universe:
-            return True
-
-        # Fail closed
-        return False
+        cfg = registry.get_symbol(sym)
+        if not cfg:
+            logger.warning(f"[{sym}] CONTRACT VALIDATION: Symbol not found in Binance Futures exchange metadata.")
+            return False
+        if cfg.status != "ENABLED" or not cfg.trading_enabled:
+            logger.warning(f"[{sym}] CONTRACT VALIDATION: Contract status '{cfg.status}' is not tradable.")
+            return False
+        if cfg.quote_asset != "USDT":
+            logger.warning(f"[{sym}] CONTRACT VALIDATION: Quote asset '{cfg.quote_asset}' != 'USDT'.")
+            return False
+        if cfg.market_type != "FUTURES":
+            logger.warning(f"[{sym}] CONTRACT VALIDATION: Market type '{cfg.market_type}' != 'FUTURES'.")
+            return False
+        return True
 
     async def refresh_contract_metadata_if_needed(self):
         """Safely refreshes exchange contract metadata from Binance if empty or requested."""

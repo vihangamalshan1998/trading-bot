@@ -205,6 +205,9 @@ class NewsMacroCollector:
         fg_normalized = fg_val / 100.0
         
         # --- Fetch DefiLlama TVL Momentum ---
+        # BUG FIX: previously the RAW Ethereum TVL in dollars (~$49,500,000,000) was published as
+        # "momentum". That single giant value dominated LayerNorm(200) in the model and made every
+        # coin produce identical predictions. Now we publish the % change vs the previous fetch.
         tvl_mom = 0.0
         try:
             req_tvl = urllib.request.Request("https://api.llama.fi/v2/chains", headers={'User-Agent': self.user_agent})
@@ -212,7 +215,12 @@ class NewsMacroCollector:
                 tvl_data = json.loads(response.read().decode())
                 for chain in tvl_data:
                     if chain.get('name') == 'Ethereum':
-                        tvl_mom = float(chain.get('tvl', 0.0))
+                        tvl_now = float(chain.get('tvl', 0.0))
+                        prev_tvl = getattr(self, '_prev_eth_tvl', 0.0)
+                        if prev_tvl > 0 and tvl_now > 0:
+                            tvl_mom = max(-1.0, min(1.0, (tvl_now - prev_tvl) / prev_tvl))
+                        if tvl_now > 0:
+                            self._prev_eth_tvl = tvl_now
                         break
         except Exception:
             pass

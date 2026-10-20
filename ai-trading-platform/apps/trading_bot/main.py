@@ -547,6 +547,7 @@ class ProductionTradingBot:
         # Cross-Coin Beta (Relative Strength to BTC)
         sym_mom_1m = market.features[2] if market and len(market.features) == 90 else 0.0
         cross_coin_beta = sym_mom_1m / btc_mom_1m if abs(btc_mom_1m) > 1e-6 else 0.0
+        cross_coin_beta = float(np.clip(cross_coin_beta, -5.0, 5.0))
         
         macro_features = [
             float(time_sin), float(time_cos), float(day_sin), float(day_cos), float(cross_coin_beta), 0.0,
@@ -598,8 +599,13 @@ class ProductionTradingBot:
         
         if len(obs) != 200:
             raise ValueError(f"State vector dimension mismatch. Expected 200, got {len(obs)}")
-            
-        return torch.tensor(obs, dtype=torch.float32).unsqueeze(0), macro_features
+        
+        # SAFETY NET (matches trainer's universal clamp in normalize_state_tensor):
+        # A single unbounded input (e.g. raw $49B DeFi TVL) dominates LayerNorm(200) and makes
+        # every symbol produce identical outputs. Replace NaN/Inf and clamp every slot to [-5, 5].
+        obs_t = torch.tensor(obs, dtype=torch.float32)
+        obs_t = torch.nan_to_num(obs_t, nan=0.0, posinf=5.0, neginf=-5.0).clamp_(-5.0, 5.0)
+        return obs_t.unsqueeze(0), macro_features
                 
     async def sync_dashboard(self):
         """Periodically fetches live positions from Binance and publishes to dashboard."""

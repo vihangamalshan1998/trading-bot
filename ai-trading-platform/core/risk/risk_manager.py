@@ -42,7 +42,7 @@ class RiskManager:
             settings.correlated_exposure_limit_pct
         )
         self.max_position_margin_pct = getattr(
-            settings, "max_position_margin_pct", 0.15
+            settings, "max_position_margin_pct", 0.40
         )
         
         # Macro thresholds

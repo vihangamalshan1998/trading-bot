@@ -42,12 +42,12 @@ class Settings(BaseSettings):
     # Phase 1 RISK LIMITS
     # ============================================================
     max_position_size: float = Field(default=50000.0, gt=0)
-    # Portfolio & Symbol Exposure Limits (Leverage multiples of equity: 5.0 = 500% notional exposure / 5x leverage)
-    max_symbol_exposure_pct: float = Field(default=5.0, gt=0)     # Max 5x equity notional per symbol (25% margin @ 20x)
-    max_portfolio_exposure_pct: float = Field(default=5.0, gt=0)  # Max 5x aggregate portfolio leverage
+    # Portfolio & Symbol Exposure Limits (Leverage multiples of equity: 8.0 = 800% notional exposure / 8x leverage)
+    max_symbol_exposure_pct: float = Field(default=8.0, gt=0)     # Max 8x equity notional per symbol (40% margin @ 20x)
+    max_portfolio_exposure_pct: float = Field(default=10.0, gt=0) # Max 10x aggregate portfolio leverage
 
     max_leverage: int = Field(default=20, gt=0)
-    max_position_margin_pct: float = Field(default=0.25, gt=0, le=1.0)  # Max 25% of equity margin per coin (up to 25% on majors, 20% on alts)
+    max_position_margin_pct: float = Field(default=0.40, gt=0, le=1.0)  # Max 40% of equity margin per coin (up to 40% on majors, 35% on alts)
     min_close_confidence: float = Field(default=0.60, ge=0, le=1.0)     # Avoid closing on noise
     min_open_expected_return_pct: float = Field(default=0.22, ge=0)     # 0.22% min predicted move (ensures net profit after fees & spread)
     min_net_edge_hurdle_pct: float = Field(default=0.08, ge=0.0)        # 0.08% min net edge after fees, spread, slippage, and uncertainty penalty
@@ -58,11 +58,11 @@ class Settings(BaseSettings):
     conf_hurdle_asia: float = Field(default=0.67, ge=0.0, le=1.0)      # Asia Off-Peak Chop (00:00 - 08:00 UTC)
     conf_hurdle_weekend: float = Field(default=0.68, ge=0.0, le=1.0)   # Weekend Low Liquidity (Saturday & Sunday)
     
-    # Dynamic Margin Sizing Bounds (Option A: 15%-25% Majors, 12%-18% Alts)
-    major_min_margin_pct: float = Field(default=0.15, ge=0.01, le=0.50)  # 15% min margin on majors (BTC, ETH, SOL, BNB)
-    major_max_margin_pct: float = Field(default=0.25, ge=0.01, le=0.50)  # 25% max margin on majors
-    alt_min_margin_pct: float = Field(default=0.12, ge=0.01, le=0.50)    # 12% min margin on altcoins (ADA, XRP, NEAR, etc.)
-    alt_max_margin_pct: float = Field(default=0.18, ge=0.01, le=0.50)    # 18% max margin on altcoins
+    # Dynamic Margin Sizing Bounds (Enhanced Allocation: 25%-40% Majors, 20%-35% Alts)
+    major_min_margin_pct: float = Field(default=0.25, ge=0.01, le=0.50)  # 25% min margin on majors (BTC, ETH, SOL, BNB)
+    major_max_margin_pct: float = Field(default=0.40, ge=0.01, le=0.50)  # 40% max margin on majors
+    alt_min_margin_pct: float = Field(default=0.20, ge=0.01, le=0.50)    # 20% min margin on altcoins (TAO, ADA, XRP, NEAR, etc.)
+    alt_max_margin_pct: float = Field(default=0.35, ge=0.01, le=0.50)    # 35% max margin on altcoins
     
     taker_fee_pct: float = Field(default=0.0005, ge=0)                  # 0.05% taker fee
     maker_fee_pct: float = Field(default=0.0002, ge=0)                  # 0.02% maker fee

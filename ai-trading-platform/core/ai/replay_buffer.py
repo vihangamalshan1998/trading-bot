@@ -389,9 +389,14 @@ class ReplayBuffer:
             elif exp.action == "CLOSE_LONG": act[0] = -0.5
             elif exp.action == "CLOSE_SHORT": act[0] = 0.5
             
+            # Clamp returns to realistic percentage boundaries to protect the Critic MSE from legacy outliers
+            r_5m_clean = float(np.clip(r_5m, -5.0, 5.0))
+            r_1h_clean = float(np.clip(r_1h, -15.0, 15.0))
+            r_4h_clean = float(np.clip(r_4h, -25.0, 25.0))
+            
             states.append(seq_states)
             actions.append(act)
-            rewards.append([r_5m, r_1h, r_4h])  # 3 output heads!
+            rewards.append([r_5m_clean, r_1h_clean, r_4h_clean])  # 3 output heads!
             next_states.append(next_seq_states)
             dones.append([1.0 if getattr(exp, "next_state", None) is None else 0.0])
             

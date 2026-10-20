@@ -562,15 +562,16 @@ def test_missing_and_corrupt_champion_fails_closed(tmp_path):
     
     mock_batch = [object()] * 35
     mock_tensors = (
-        torch.zeros((35, 300, 200)),
-        torch.zeros((35, 300, 4)),
-        torch.zeros((35, 3)),
-        torch.zeros((35, 300, 200)),
+        torch.randn((35, 300, 200)),
+        torch.randn((35, 300, 4)),
+        torch.randn((35, 3)),
+        torch.randn((35, 300, 200)),
         torch.zeros((35, 300, 1))
     )
     
     with patch.object(trainer.buffer, "sample", return_value=mock_batch), \
-         patch.object(trainer.buffer, "build_tensors", return_value=mock_tensors):
+         patch.object(trainer.buffer, "build_tensors", return_value=mock_tensors), \
+         patch.object(trainer.model, "forward", return_value=(torch.randn(35, 4) * 2.0, torch.randn(35, 3))):
          
         # 1. Missing champion: os.path.exists returns False
         with patch("os.path.exists", return_value=False):

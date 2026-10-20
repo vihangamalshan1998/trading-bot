@@ -158,7 +158,7 @@ class SingleSymbolActorCritic(nn.Module):
         # Critic Head (Now predicts 3 horizons: 5m, 1h, 4h)
         self.critic_fc = nn.Linear(hidden_dim, 3)
         
-    def forward(self, x: torch.Tensor, hidden_state=None, return_hidden=False):
+    def forward(self, x: torch.Tensor, hidden_state=None, return_hidden=False, temperature: float = 6.0):
         # Support both (batch_size, input_dim) and (batch_size, seq_len, input_dim)
         if x.dim() == 2:
             x = x.unsqueeze(1) # (batch_size, 1, input_dim)
@@ -170,7 +170,17 @@ class SingleSymbolActorCritic(nn.Module):
         # Take the output from the last time step in the sequence
         last_out = lstm_out[:, -1, :]
         
-        actor_out = torch.tanh(self.actor_fc(last_out))
+        actor_raw = self.actor_fc(last_out)
+        if temperature is not None and temperature > 1.0:
+            # Direction (index 0): standard tanh for strong directional conviction [-1.0, 1.0]
+            # Confidence (1), Size (2), Offset (3): temperature-scaled tanh prevents saturated clipping
+            # to +/-0.9999, ensuring dynamic, continuous sensitivity across all market regimes
+            act_dir = torch.tanh(actor_raw[:, 0:1])
+            act_rest = torch.tanh(actor_raw[:, 1:] / temperature)
+            actor_out = torch.cat([act_dir, act_rest], dim=-1)
+        else:
+            actor_out = torch.tanh(actor_raw)
+            
         critic_out = self.critic_fc(last_out)
         
         if return_hidden:

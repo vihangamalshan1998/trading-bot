@@ -431,19 +431,32 @@ class PPOTrainer:
                     logger.error("Candidate evaluation FAILED: Challenger output contains NaN.")
                     return {"approved": False, "reason": "NAN_OUTPUTS"}
 
-                # Policy entropy check (prevents pushing mode-collapsed models)
+                # Strict Policy Entropy Floor (Prevents pushing mode-collapsed models)
                 noise = torch.randn_like(challenger_actions) * 1e-5
                 var = (challenger_actions + noise).var(dim=0, unbiased=False)
                 challenger_entropy = float(torch.sqrt(var + 1e-8).mean().item())
 
-                if challenger_entropy < 1e-4:
-                    logger.warning(f"Candidate evaluation FAILED: Challenger mode collapse detected (Entropy: {challenger_entropy:.6f} < 1e-4).")
-                    return {"approved": False, "reason": "MODE_COLLAPSE", "entropy": challenger_entropy}
+                if challenger_entropy < 0.60:
+                    logger.warning(f"Candidate evaluation FAILED: Challenger mode collapse / low entropy ({challenger_entropy:.4f} < 0.60). Preserving champion.")
+                    return {"approved": False, "reason": "LOW_POLICY_ENTROPY", "entropy": challenger_entropy}
 
                 challenger_critic_mse = float(nn.MSELoss()(challenger_values, safe_rewards).item())
-                if challenger_critic_mse > 100.0:
-                    logger.warning(f"Candidate evaluation FAILED: Challenger critic loss exploded ({challenger_critic_mse:.2f} > 100.0).")
+                if challenger_critic_mse > 4.0:
+                    logger.warning(f"Candidate evaluation FAILED: Challenger critic loss too high ({challenger_critic_mse:.2f} > 4.0). Preserving champion.")
                     return {"approved": False, "reason": "CRITIC_EXPLODED", "critic_loss": challenger_critic_mse}
+
+                # Action Monoculture / Saturation Check (Prevents pushing 100% blind short/long models)
+                short_ratio = float((challenger_actions[:, 0] < -0.2).float().mean().item())
+                long_ratio = float((challenger_actions[:, 0] > 0.2).float().mean().item())
+                if short_ratio > 0.85 or long_ratio > 0.85:
+                    logger.warning(f"Candidate evaluation FAILED: Action monoculture detected (Short: {short_ratio*100:.1f}%, Long: {long_ratio*100:.1f}%). Model is blindly biased.")
+                    return {"approved": False, "reason": "ACTION_MONOCULTURE", "short_ratio": short_ratio, "long_ratio": long_ratio}
+
+                # Critic Prediction Variance Check (Ensures Critic responds dynamically to market regimes)
+                c_std = float(challenger_values[:, 0].std().item())
+                if c_std < 0.05:
+                    logger.warning(f"Candidate evaluation FAILED: Critic output has near-zero variance ({c_std:.4f} < 0.05). Critic has collapsed.")
+                    return {"approved": False, "reason": "CRITIC_ZERO_VARIANCE", "critic_std": c_std}
 
             # Real-World VPS Fee & Slippage Simulation:
             # 0.10% Binance Futures round-trip taker fee + 0.02% conservative slippage
@@ -511,7 +524,8 @@ class PPOTrainer:
             SUPERIORITY_MARGIN = 0.01  # Predefined minimum improvement threshold
             score_beaten = challenger_score >= (champion_score + SUPERIORITY_MARGIN)
             pnl_preserved = challenger_sim_pnl >= champ_sim_pnl
-            is_superior = score_beaten and pnl_preserved
+            critic_not_degraded = challenger_critic_mse <= max(champ_critic_mse * 1.25, 2.5)
+            is_superior = score_beaten and pnl_preserved and critic_not_degraded
 
             eval_timestamp = time.time()
             

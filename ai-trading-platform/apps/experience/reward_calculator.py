@@ -131,13 +131,9 @@ class RewardCalculator:
                     def compute_outcome(p_future):
                         if not p_future or p_future <= 0:
                             return None
+                        # True market percentage return over the horizon (signed: positive = price rose, negative = price dropped)
                         delta_pct = ((p_future - p_start) / p_start) * 100.0
-                        if direction != 0.0:
-                            net = (delta_pct * direction) - round_trip_fee_pct
-                            return float(net)
-                        else:
-                            # Flat / HOLD action has 0.0% PnL and pays no trading fees
-                            return 0.0
+                        return float(delta_pct)
 
                     exp.reward_5m = compute_outcome(p_5m) if p_5m is not None else None
                     exp.reward_1h = compute_outcome(p_1h) if p_1h is not None else None

@@ -469,8 +469,8 @@ function App() {
                                 </span>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                <span style={{ color: '#888' }}>Entry / Liq Price</span>
-                                <span>${entryP.toFixed(4)} / <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span></span>
+                                <span style={{ color: '#888' }}>Entry / Live / Liq</span>
+                                <span>${entryP.toFixed(4)} / <span style={{ color: '#00e676', fontWeight: 'bold' }}>${(pos.markPrice || pos.mark_price || entryP).toFixed(4)}</span> / <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span></span>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                                 <span style={{ color: '#888' }}>Gross PnL (Fee: -${estFee.toFixed(2)})</span>
@@ -630,8 +630,8 @@ function App() {
                             </span>
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ color: '#888' }}>Entry / Liq Price</span>
-                            <span>${entryP.toFixed(4)} / <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span></span>
+                            <span style={{ color: '#888' }}>Entry / Live / Liq</span>
+                            <span>${entryP.toFixed(4)} / <span style={{ color: '#00e676', fontWeight: 'bold' }}>${(pos.markPrice || pos.mark_price || entryP).toFixed(4)}</span> / <span style={{ color: '#ffbd2e' }}>${pos.liquidationPrice ? pos.liquidationPrice.toFixed(4) : pos.liquidation_price ? pos.liquidation_price.toFixed(4) : '0.00'}</span></span>
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                             <span style={{ color: '#888' }}>Gross PnL (Fee: -${estFee.toFixed(2)})</span>

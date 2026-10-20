@@ -110,6 +110,7 @@ class ProductionTradingBot:
         self.session_win_rate = 0.0
         
         self.max_equity = 0.0
+        self.initial_balance = None
         self.last_win_time = time.time()
         self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
         self.last_close_time = {sym: 0.0 for sym in self.symbols} # Cooldown tracking per symbol
@@ -433,17 +434,32 @@ class ProductionTradingBot:
         portfolio_variance = float(np.var(self.equity_history) / equity) if equity > 0 and len(self.equity_history) > 1 else 0.0
         time_since_win_hrs = (time.time() - self.last_win_time) / 3600.0 if self.last_win_time > 0 else 0.0
         
+        # Scale raw dollar amounts to normalized ratios (adaptive to account's starting capital)
+        # Prevents large cash numbers from blowing up LayerNorm variance regardless of wallet size ($500, $5k, $50k)
+        if getattr(self, 'initial_balance', None) is None or self.initial_balance <= 0:
+            if self.portfolio_state.wallet_balance > 0:
+                self.initial_balance = float(self.portfolio_state.wallet_balance)
+            else:
+                self.initial_balance = 5000.00
+                
+        base_capital = self.initial_balance if self.initial_balance > 0 else 5000.00
+        norm_wallet = float(np.clip(self.portfolio_state.wallet_balance / base_capital, 0.0, 5.0))
+        norm_equity = float(np.clip(equity / base_capital, 0.0, 5.0))
+        norm_free_margin = float(np.clip(free_margin / equity if equity > 0 else 1.0, 0.0, 1.0))
+        norm_exposure = float(np.clip(self.portfolio_state.total_exposure / equity if equity > 0 else 0.0, 0.0, 10.0))
+        norm_time_since_win = float(np.clip(time_since_win_hrs / 24.0, 0.0, 2.0))
+        
         obs.extend([
-            self.portfolio_state.wallet_balance, 
-            equity,
-            free_margin,
+            norm_wallet, 
+            norm_equity,
+            norm_free_margin,
             margin_utilization,
-            self.portfolio_state.total_exposure,
+            norm_exposure,
             float(portfolio_heat),
             float(self.session_win_rate),
             float(account_drawdown), 
             float(portfolio_variance), 
-            float(time_since_win_hrs)
+            norm_time_since_win
         ])
         
         # 2. Position Awareness (10 dims)
@@ -477,18 +493,22 @@ class ProductionTradingBot:
             pos.max_drawdown_pnl = 0.0
             pos.entry_time = 0.0
                 
+        # Normalized entry price distance ratio rather than raw $81,000 BTC dollar price
+        entry_dist = (pos.entry_price - market.mid_price) / market.mid_price if market and market.mid_price > 0 and pos.entry_price > 0 else 0.0
+        pos_signed_dir = 1.0 if pos.quantity > 0 else (-1.0 if pos.quantity < 0 else 0.0)
+        
         obs.extend([
-            float(pos.quantity),
-            float(pos.entry_price),
+            float(pos_signed_dir),
+            float(np.clip(entry_dist, -1.0, 1.0)),
             float(pos.leverage) / 50.0, # normalized
             current_pnl_pct,
             dist_to_liq,
             # Fully utilizing the 10-slot Position Block
             float(pos.max_unrealized_pnl), 
             float(pos.max_drawdown_pnl),
-            float(time_held_hours),
-            float(entry_dist_vwap),
-            float(pos.accumulated_funding)
+            float(np.clip(time_held_hours / 24.0, 0.0, 2.0)),
+            float(np.clip(entry_dist_vwap, -1.0, 1.0)),
+            float(np.clip(pos.accumulated_funding, -1.0, 1.0))
         ])
         
         # 3. Market Features (90 dims) from engine.py
@@ -579,6 +599,8 @@ class ProductionTradingBot:
                     self.portfolio_state.wallet_balance = float(usdt.get("balance", 0.0))
                     self.portfolio_state.equity = float(usdt.get("crossWalletBalance", self.portfolio_state.wallet_balance)) + float(usdt.get("crossUnPnl", 0.0))
                     self.portfolio_state.free_margin = float(usdt.get("availableBalance", self.portfolio_state.wallet_balance))
+                    if (getattr(self, 'initial_balance', None) is None or self.initial_balance <= 0) and self.portfolio_state.wallet_balance > 0:
+                        self.initial_balance = self.portfolio_state.wallet_balance
                     
                     # Passive Airbag 4: Maintenance Margin Cushion (Anti-Exchange Liquidation Auto-Trim)
                     now_t = time.time()

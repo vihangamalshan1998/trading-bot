@@ -202,6 +202,45 @@ class ReplayBuffer:
             
         return unique_batch
 
+    @staticmethod
+    def _normalize_frame(frame: List[float]) -> List[float]:
+        """
+        Scale raw dollar amounts to normalized ratios (base capital $5,000).
+        Prevents large cash numbers ($5,000 balance, $81,000 BTC price) from blowing up
+        LayerNorm variance and wiping out market indicators.
+        """
+        if not frame or len(frame) < 200:
+            return frame
+        f = list(frame)
+        base_capital = 5000.0
+        
+        # Check if portfolio block is unnormalized (raw dollar amounts > 5.0)
+        if f[0] > 5.0:
+            f[0] = max(0.0, min(5.0, f[0] / base_capital))
+            f[1] = max(0.0, min(5.0, f[1] / base_capital))
+            f[2] = max(0.0, min(1.0, f[2] / base_capital))
+        else:
+            f[0] = max(0.0, min(5.0, f[0]))
+            f[1] = max(0.0, min(5.0, f[1]))
+            f[2] = max(0.0, min(1.0, f[2]))
+            
+        # Slot 4: exposure
+        if f[4] > 10.0:
+            f[4] = max(0.0, min(10.0, f[4] / base_capital))
+        else:
+            f[4] = max(0.0, min(10.0, f[4]))
+            
+        # Slot 10: position quantity vs signed direction
+        # In new code: pos_signed_dir is in [-1.0, 1.0]. In legacy code: raw coins (e.g. -409 SOL)
+        if abs(f[10]) > 1.0:
+            f[10] = 1.0 if f[10] > 0 else -1.0
+            
+        # Slot 11: entry_price distance (if abs > 1.0, it was raw asset price like $81,000 BTC)
+        if abs(f[11]) > 1.0:
+            f[11] = 0.0
+            
+        return f
+
     def _extract_sequence(self, exp: Experience, seq_len: int) -> List[List[float]]:
         # If the market_state is already a 2D movie (list of lists)
         if exp.market_state and isinstance(exp.market_state, list) and len(exp.market_state) > 0 and isinstance(exp.market_state[0], list):
@@ -209,17 +248,21 @@ class ReplayBuffer:
             for frame in exp.market_state:
                 # In V3, the live bot already builds the perfect 200-dim vector and passes it in the frame!
                 if len(frame) == 200:
-                    seq.append(frame)
+                    seq.append(self._normalize_frame(frame))
                 else:
                     # Legacy fallback
                     state = []
-                    if exp.portfolio_state: state.extend(exp.portfolio_state)
+                    if exp.portfolio_state:
+                        if isinstance(exp.portfolio_state, list):
+                            state.extend([x / 5000.0 if i < 3 and x > 10.0 else x for i, x in enumerate(exp.portfolio_state)])
+                        else:
+                            state.extend([1.0, 1.0, 1.0])
                     state.extend(frame)
                     state.append(exp.position_before or 0.0)
                     if exp.macro_state: state.extend(exp.macro_state)
                     else: state.extend([0.0] * 13)
                     while len(state) < 200: state.append(0.0)
-                    seq.append(state)
+                    seq.append(self._normalize_frame(state[:200]))
             
             # Pad or truncate to seq_len
             while len(seq) < seq_len:
@@ -228,10 +271,15 @@ class ReplayBuffer:
         else:
             # Fallback for old 1D records
             if isinstance(exp.market_state, list) and len(exp.market_state) == 200:
-                return [exp.market_state] * seq_len
+                norm_state = self._normalize_frame(exp.market_state)
+                return [norm_state] * seq_len
             
             state = []
-            if exp.portfolio_state: state.extend(exp.portfolio_state)
+            if exp.portfolio_state:
+                if isinstance(exp.portfolio_state, list):
+                    state.extend([x / 5000.0 if i < 3 and x > 10.0 else x for i, x in enumerate(exp.portfolio_state)])
+                else:
+                    state.extend([1.0, 1.0, 1.0])
             if exp.market_state: state.extend(exp.market_state)
             state.append(exp.position_before or 0.0)
             if exp.macro_state: state.extend(exp.macro_state)
@@ -239,7 +287,8 @@ class ReplayBuffer:
             
             # Pad to 200, or slice down to exactly 200 to guarantee it NEVER crashes
             while len(state) < 200: state.append(0.0)
-            return [state[:200]] * seq_len
+            norm_state = self._normalize_frame(state[:200])
+            return [norm_state] * seq_len
 
     def build_tensors(self, batch: List[Experience], seq_len: int = 300) -> Tuple[torch.Tensor, ...]:
         """Converts batch into PyTorch tensors with LSTM sequences and Multi-Horizon returns."""

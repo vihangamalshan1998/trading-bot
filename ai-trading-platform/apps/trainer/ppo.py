@@ -16,6 +16,41 @@ from core.logging.logger import logger, set_log_file
 from apps.research.model import SingleSymbolActorCritic
 from core.ai.registry import ModelRegistry
 
+def normalize_state_tensor(states: torch.Tensor) -> torch.Tensor:
+    """
+    Normalizes a batch of state tensors (shape: [batch, seq_len, 200] or [batch, 200] or [seq_len, 200])
+    so raw wallet balances ($5,000) and entry prices ($81,000) are converted to clean normalized ratios.
+    This guarantees that the 90 market indicators are never drowned out in LayerNorm(200).
+    """
+    if states is None:
+        return states
+    s = states.clone()
+    base_capital = 5000.0
+    
+    if s.shape[-1] != 200:
+        return s
+        
+    # Slot 0: wallet_balance
+    s[..., 0] = torch.where(s[..., 0] > 5.0, torch.clamp(s[..., 0] / base_capital, 0.0, 5.0), torch.clamp(s[..., 0], 0.0, 5.0))
+    
+    # Slot 1: equity
+    s[..., 1] = torch.where(s[..., 1] > 5.0, torch.clamp(s[..., 1] / base_capital, 0.0, 5.0), torch.clamp(s[..., 1], 0.0, 5.0))
+    
+    # Slot 2: free_margin
+    s[..., 2] = torch.where(s[..., 2] > 1.0, torch.clamp(s[..., 2] / base_capital, 0.0, 1.0), torch.clamp(s[..., 2], 0.0, 1.0))
+    
+    # Slot 4: exposure
+    s[..., 4] = torch.where(s[..., 4] > 10.0, torch.clamp(s[..., 4] / base_capital, 0.0, 10.0), torch.clamp(s[..., 4], 0.0, 10.0))
+    
+    # Slot 10: position direction [-1.0, 1.0]
+    s[..., 10] = torch.where(torch.abs(s[..., 10]) > 1.0, torch.sign(s[..., 10]), s[..., 10])
+    
+    # Slot 11: entry_price distance (if abs > 1.0, raw asset price like $81,000 BTC -> reset to 0.0)
+    s[..., 11] = torch.where(torch.abs(s[..., 11]) > 1.0, torch.zeros_like(s[..., 11]), s[..., 11])
+    
+    return s
+
+
 class PPOTrainer:
     """
     Phase 11: Proximal Policy Optimization (PPO) Training Loop.
@@ -102,6 +137,7 @@ class PPOTrainer:
         with torch.no_grad():
             if state.dim() == 2:
                 state = state.unsqueeze(0)
+            state = normalize_state_tensor(state)
             action_mean, value = self.model(state)
             action_std = torch.exp(torch.clamp(self.log_std, min=-2.0, max=0.5))
             dist = torch.distributions.Normal(action_mean, action_std)
@@ -157,6 +193,10 @@ class PPOTrainer:
         if dones.ndim != 2 or dones.shape[-1] != 1:
             logger.error(f"PPO: Invalid dones tensor dimension {dones.shape}. Expected (batch, 1).")
             return False
+
+        # Normalize state vectors so wallet balance & entry price don't drown out market indicators in LayerNorm
+        states = normalize_state_tensor(states)
+        next_states = normalize_state_tensor(next_states)
 
         # Detect and filter corrupted non-finite samples (Never silently convert with nan_to_num)
         finite_s = torch.isfinite(states).all(dim=1).all(dim=1)
@@ -377,6 +417,7 @@ class PPOTrainer:
                 logger.warning(f"Candidate evaluation REJECTED: Insufficient valid sequence tensors ({len(states)} < {min_eval_samples}).")
                 return {"approved": False, "reason": "INSUFFICIENT_TENSORS", "critic_loss": 0.0, "entropy": 0.0}
 
+            states = normalize_state_tensor(states)
             states = torch.nan_to_num(states, nan=0.0, posinf=1.0, neginf=-1.0)
             rewards = torch.nan_to_num(rewards, nan=0.0, posinf=1.0, neginf=-1.0)
             safe_rewards = rewards / 200.0

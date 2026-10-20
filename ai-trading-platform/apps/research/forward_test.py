@@ -282,23 +282,29 @@ class ForwardTester:
                 market_features = feature_engine.compute_features() # Exactly 90 slots!
                 
                 # Construct Full Production 200-Dim State Vector
-                # A. Portfolio & Risk (10 slots)
-                free_margin = max(0.0, wallet_balance - used_margin)
+                # A. Portfolio & Risk (10 slots) - Normalized against base capital $5,000
+                base_capital = 5000.0
+                norm_wallet = float(np.clip(wallet_balance / base_capital, 0.0, 5.0))
+                norm_equity = float(np.clip(equity / base_capital, 0.0, 5.0))
+                norm_free_margin = float(np.clip(free_margin / equity if equity > 0 else 1.0, 0.0, 1.0))
                 margin_util = used_margin / equity if equity > 0 else 0.0
+                norm_exposure = float(np.clip(trade_notional / equity if equity > 0 else 0.0, 0.0, 10.0))
                 account_dd = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
                 win_rate_val = (winning_trades / total_trades) if total_trades > 0 else 0.0
                 
                 portfolio_block = [
-                    wallet_balance, equity, free_margin, margin_util,
-                    trade_notional, 1.0 if position != 0 else 0.0,
+                    norm_wallet, norm_equity, norm_free_margin, margin_util,
+                    norm_exposure, 1.0 if position != 0 else 0.0,
                     win_rate_val, account_dd, 0.0, 0.0
                 ]
                 
                 # B. Position Awareness (10 slots)
                 current_pnl_pct = (unrealized_pnl / used_margin) if used_margin > 0 else 0.0
                 dist_to_liq = 0.80 if position != 0 else 0.0
+                entry_dist = (entry_price - cur_close) / cur_close if cur_close > 0 and entry_price > 0 else 0.0
+                pos_signed_dir = 1.0 if position > 0 else (-1.0 if position < 0 else 0.0)
                 position_block = [
-                    position, entry_price, leverage / 50.0, current_pnl_pct,
+                    pos_signed_dir, float(np.clip(entry_dist, -1.0, 1.0)), leverage / 50.0, current_pnl_pct,
                     dist_to_liq, max(0.0, current_pnl_pct), min(0.0, current_pnl_pct),
                     0.0, 0.0, 0.0
                 ]

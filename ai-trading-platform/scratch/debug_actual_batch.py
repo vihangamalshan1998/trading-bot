@@ -57,7 +57,8 @@ for i, sym in enumerate(batch_syms):
     crit = batch_critic[i].numpy()
     conf = (act[1] + 1.0) / 2.0
     side = "LONG" if act[0] > 0.2 else ("SHORT" if act[0] < -0.2 else "HOLD")
-    print(f"[{sym:12s}] Side={side:5s} | Conf={conf*100:5.1f}% | Critic 5m={crit[0]:+.4f}%, 1h={crit[1]:+.4f}%, 4h={crit[2]:+.4f}%")
+    target_size = float(np.clip((act[2] + 1.0) / 2.0, 0.25, 1.0))
+    print(f"[{sym:12s}] Side={side:5s} | Conf={conf*100:5.1f}% | Target={target_size*100:4.1f}% | raw_act={act.round(3)} | Critic 5m={crit[0]:+.4f}%")
 
 print("\n=== COMPARE TO REDIS ai:state:* RIGHT NOW ===")
 for sym in ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'RENDERUSDT']:

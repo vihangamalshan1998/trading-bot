@@ -139,10 +139,10 @@ class Settings(BaseSettings):
     liquidation_exhaustion_decay_pct: float = Field(default=0.75, ge=0.1, le=0.99)      # 75% liquidation velocity decay
 
     # ============================================================
-    # Institutional Upgrade 3: Market-Beta Hedger (Delta-Neutral)
+    # Institutional Upgrade 3: Market-Beta Hedger (Delta-Neutral) [DISABLED]
     # ============================================================
-    beta_hedging_enabled: bool = Field(default=True)
-    beta_hedge_ratio: float = Field(default=1.0, ge=0.0, le=2.0)                        # 1.0 = 100% delta-neutral
+    beta_hedging_enabled: bool = Field(default=False)
+    beta_hedge_ratio: float = Field(default=0.0, ge=0.0, le=2.0)                        # 0.0 = Disabled
     beta_hedge_rebalance_threshold_usd: float = Field(default=250.0, gt=0.0)            # $250 minimum rebalance delta
     beta_hedge_symbol: str = Field(default="BTCUSDT")
 

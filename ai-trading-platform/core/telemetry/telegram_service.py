@@ -90,7 +90,7 @@ class TelegramNotifier:
         
         emoji = "🟢" if "LONG" in side or side == "BUY" else "🔴"
         return (
-            f"<b>{emoji} TRADE ENTRY FILLED: {sym}</b>\n"
+            f"<b>{emoji} TRADE ENTRY (POST-ONLY MAKER): {sym}</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"• <b>Action:</b> <code>{side}</code>\n"
             f"• <b>Entry Price:</b> <code>${px:,.4f}</code>\n"
@@ -247,6 +247,49 @@ class TelegramNotifier:
             f"• <b>Tick Stall Duration:</b> <b>{dur:.1f}s without tick</b> (> 5.0s threshold)\n"
             f"• <b>Safety Action:</b> Cancelled {cancelled} resting limit orders on Binance\n"
             f"• <b>Purpose:</b> Prevent stale orderbook fills during exchange connection gap\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 <i>{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}</i>"
+        )
+
+    @staticmethod
+    def format_beta_hedge(data: Dict[str, Any]) -> str:
+        action = data.get("action_type", "REBALANCE_HEDGE")
+        side = data.get("side", "SELL")
+        sym = data.get("symbol", "BTCUSDT")
+        qty = data.get("quantity", 0.0)
+        px = data.get("price", 0.0)
+        notional = data.get("notional_usd", px * qty)
+        alt_delta = data.get("net_altcoin_delta_usd", 0.0)
+        target_hedge = data.get("target_btc_hedge_usd", 0.0)
+        
+        side_desc = "SHORT (SELL)" if side == "SELL" else "BUY (COVER / LONG)"
+        return (
+            f"<b>🛡️ MARKET-BETA DELTA HEDGE EXECUTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Hedge Action:</b> <code>{action}</code>\n"
+            f"• <b>Instrument:</b> <code>{sym}</code> ({side_desc})\n"
+            f"• <b>Quantity:</b> <code>{qty} {sym.replace('USDT', '')}</code> (${notional:,.2f})\n"
+            f"• <b>BTC Execution Price:</b> <code>${px:,.2f}</code>\n"
+            f"• <b>Net Altcoin Beta Delta:</b> <code>${alt_delta:+,.2f} USD</code>\n"
+            f"• <b>Target Protected Hedge:</b> <code>${target_hedge:+,.2f} USD</code>\n"
+            f"• <b>Portfolio Status:</b> <b>🟢 DELTA-NEUTRAL (Protected)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💡 <i>Broad market risk neutralized. Altcoin alpha isolated!</i>\n"
+            f"🕒 <i>{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}</i>"
+        )
+
+    @staticmethod
+    def format_order_timeout(data: Dict[str, Any]) -> str:
+        sym = data.get("symbol", "UNKNOWN")
+        timeout = data.get("timeout_seconds", 30.0)
+        reason = data.get("reason", "Order timed out unfilled. Cancelled to protect capital.")
+        return (
+            f"<b>⏱️ LIMIT ORDER TIMED OUT: {sym}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Action:</b> <b>Unfilled Order Cancelled</b>\n"
+            f"• <b>Timeout:</b> <code>{timeout:.0f} seconds</code>\n"
+            f"• <b>Protection:</b> <i>{reason}</i>\n"
+            f"• <b>Portfolio:</b> <b>No position opened. Margin restored.</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🕒 <i>{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}</i>"
         )

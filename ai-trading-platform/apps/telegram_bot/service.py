@@ -53,7 +53,6 @@ class TelegramCommandCenter:
                     {"text": "📈 Active Positions", "callback_data": "cmd_positions"}
                 ],
                 [
-                    {"text": "🛡️ Market-Beta Hedge", "callback_data": "cmd_hedge_status"},
                     {"text": "⚡ Refresh Status", "callback_data": "cmd_status"}
                 ]
             ]
@@ -240,40 +239,15 @@ class TelegramCommandCenter:
         await self.send_message("\n".join(lines), reply_markup=self.get_main_keyboard(), chat_id=chat_id)
 
     async def handle_hedge_command(self, chat_id: Optional[str] = None):
-        """Displays Market-Beta Hedge exposure and delta neutrality status."""
-        alt_delta = 0.0
-        btc_notional = 0.0
-        target_hedge = 0.0
-        discrepancy = 0.0
-        
-        try:
-            from core.risk.beta_hedger import beta_hedger
-            # We can read latest delta info from Redis or directly compute
-            if redis_manager.redis:
-                h_raw = await redis_manager.redis.get("system:beta_hedge:state")
-                if h_raw:
-                    h_data = json.loads(h_raw)
-                    alt_delta = h_data.get("net_altcoin_delta_usd", 0.0)
-                    btc_notional = h_data.get("current_btc_notional_usd", 0.0)
-                    target_hedge = h_data.get("target_btc_hedge_usd", 0.0)
-                    discrepancy = h_data.get("hedge_discrepancy_usd", 0.0)
-        except Exception as e:
-            logger.error(f"Error fetching hedge info: {e}")
-            
-        is_neutral = abs(discrepancy) < settings.beta_hedge_rebalance_threshold_usd
-        hedge_status = "🟢 DELTA-NEUTRAL (Protected)" if is_neutral else "🟡 REBALANCING NEEDED"
-        
+        """Displays Market-Beta Hedge status."""
         text = (
-            f"<b>🛡️ MARKET-BETA DELTA HEDGE STATUS</b>\n"
+            f"<b>🛡️ MARKET-BETA DELTA HEDGE: DISABLED</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"• <b>Status:</b> <b>{hedge_status}</b>\n"
-            f"• <b>Net Altcoin Beta Delta:</b> <code>${alt_delta:+,.2f} USD</code>\n"
-            f"• <b>Target BTC Hedge:</b> <code>${target_hedge:+,.2f} USD</code>\n"
-            f"• <b>Current BTC Hedge:</b> <code>${btc_notional:+,.2f} USD</code>\n"
-            f"• <b>Discrepancy:</b> <code>${discrepancy:+,.2f} USD</code>\n"
-            f"• <b>Hedge Ratio:</b> <code>{settings.beta_hedge_ratio*100:.0f}%</code>\n"
+            f"• <b>Status:</b> <b>⚪ DISABLED</b>\n"
+            f"• <b>Trading Mode:</b> Pure Directional AI Alpha\n"
+            f"• <b>Protections:</b> Tight 0.75% SL, Trailing Take-Profits & Macro Shields\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"💡 <i>Broad market risk is neutralized. Altcoin alpha isolated!</i>"
+            f"💡 <i>Trades execute purely based on AI conviction without paying double hedging fees.</i>"
         )
         await self.send_message(text, reply_markup=self.get_main_keyboard(), chat_id=chat_id)
 
@@ -470,6 +444,10 @@ class TelegramCommandCenter:
                                 formatted_text = telegram_notifier.format_margin_cushion_trim(payload)
                             elif alert_type == "HEARTBEAT_STALL":
                                 formatted_text = telegram_notifier.format_heartbeat_stall(payload)
+                            elif alert_type == "BETA_HEDGE":
+                                formatted_text = telegram_notifier.format_beta_hedge(payload)
+                            elif alert_type == "ORDER_TIMEOUT":
+                                formatted_text = telegram_notifier.format_order_timeout(payload)
                                 
                             await self.send_message(formatted_text, reply_markup=self.get_main_keyboard())
                         except Exception as parse_err:

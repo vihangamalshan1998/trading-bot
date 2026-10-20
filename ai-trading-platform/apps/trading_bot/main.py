@@ -1106,6 +1106,19 @@ class ProductionTradingBot:
                                         self.position_entry_times[sym] = 0.0
                                         
                                     self.portfolio_state.free_margin += margin_used
+                                    
+                                    # Institutional Upgrade: Broadcast Order Timeout Alert to Telegram
+                                    asyncio.create_task(
+                                        telegram_notifier.broadcast_alert(
+                                            "ORDER_TIMEOUT",
+                                            "",
+                                            {
+                                                "symbol": sym,
+                                                "timeout_seconds": timeout_limit,
+                                                "reason": f"Post-only maker order at ${price:,.4f} was not filled within {timeout_limit:.0f}s. Cancelled to protect capital."
+                                            }
+                                        )
+                                    )
 
                             # Partial-Fill Micro-Stub Protection:
                             # If an OPEN order timed out and only a tiny micro-stub (< 25% of intended size) filled,
@@ -2947,54 +2960,9 @@ class ProductionTradingBot:
                     logger.debug(f"Error parsing liquidation stream: {e}")
 
     async def beta_hedging_loop(self):
-        """Institutional Upgrade 3: Periodically calculates portfolio market delta and executes dynamic micro-hedges on BTC."""
-        logger.info("Starting Market-Beta Hedger background loop...")
-        while self.running:
-            try:
-                if settings.beta_hedging_enabled and self.market_states:
-                    # Evaluate rebalance
-                    rebalance_order = beta_hedger.evaluate_rebalance(self.portfolio_state, self.market_states)
-                    
-                    # Save delta metrics to Redis for Telegram and Dashboard
-                    delta_info = beta_hedger.calculate_portfolio_delta(self.portfolio_state, self.market_states)
-                    if self.redis.redis:
-                        await self.redis.redis.set("system:beta_hedge:state", json.dumps(delta_info))
-                        
-                    if rebalance_order:
-                        b_side = rebalance_order["side"]  # BUY or SELL
-                        b_qty = float(rebalance_order["quantity"])
-                        sym_config = registry.get_symbol("BTCUSDT")
-                        if sym_config:
-                            qty_str = sym_config.format_quantity(b_qty)
-                            if float(qty_str) > 0:
-                                logger.info(f"🛡️ EXECUTING BETA HEDGE ORDER: {b_side} {qty_str} BTCUSDT (Notional: ${rebalance_order['notional_usd']:,.2f})")
-                                if (self.trading_enabled and 
-                                    not self.emergency_stop and 
-                                    not settings.emergency_stop and 
-                                    not self.dry_run and 
-                                    (settings.allow_testnet or settings.allow_live_trading)):
-                                    client_order_id = f"hedge_{uuid.uuid4().hex[:10]}"
-                                    try:
-                                        await self.binance.set_leverage("BTCUSDT", settings.max_leverage)
-                                        await self.binance.create_order(
-                                            symbol="BTCUSDT",
-                                            side=b_side,
-                                            quantity=float(qty_str),
-                                            client_order_id=client_order_id,
-                                            order_type="MARKET"
-                                        )
-                                        logger.info(f"✅ Market-Beta Hedge Order Executed: {b_side} {qty_str} BTCUSDT")
-                                    except Exception as hedge_e:
-                                        logger.error(f"Failed to execute BTC hedge order on Binance: {hedge_e}")
-                                else:
-                                    logger.info(f"[SIMULATION] Market-Beta Hedge simulated: {b_side} {qty_str} BTCUSDT")
-                                    signed_qty = float(qty_str) if b_side == "BUY" else -float(qty_str)
-                                    if "BTCUSDT" in self.portfolio_state.positions:
-                                        self.portfolio_state.positions["BTCUSDT"].quantity += signed_qty
-                                        self.portfolio_state.positions["BTCUSDT"].current_price = delta_info["btc_price"]
-            except Exception as e:
-                logger.error(f"Error in beta_hedging_loop: {e}")
-            await asyncio.sleep(15.0)
+        """Market-Beta Hedger has been removed/disabled. Trading runs in pure directional alpha mode."""
+        logger.info("Market-Beta Hedger is completely disabled.")
+        return
 
     async def listen_macro_shield_loop(self):
         """Institutional Upgrade 1: Monitors upcoming economic releases and logs/alerts before high-impact events."""
@@ -3077,7 +3045,6 @@ class ProductionTradingBot:
             asyncio.create_task(self.monitor_kill_switch()),
             asyncio.create_task(self.update_htf_regimes_loop()),
             asyncio.create_task(self.listen_liquidation_cascade()),
-            asyncio.create_task(self.beta_hedging_loop()),
             asyncio.create_task(self.listen_macro_shield_loop()),
             asyncio.create_task(self.monitor_heartbeat_watchdog())
         ]

@@ -978,7 +978,7 @@ class ProductionTradingBot:
                         score = 0.0
                         if act_logits is not None and len(act_logits) >= 2 and crit_vals is not None and len(crit_vals) >= 1:
                             raw_act = float(act_logits[0])
-                            raw_conf = float(1.0 / (1.0 + np.exp(-act_logits[1])))
+                            raw_conf = float(np.clip((act_logits[1] + 1.0) / 2.0, 0.05, 0.99))
                             c5m = abs(float(crit_vals[0]))
                             if abs(raw_act) > 0.20 and raw_conf >= 0.70:
                                 score = raw_conf * c5m
@@ -1350,8 +1350,8 @@ class ProductionTradingBot:
                     else:
                         # Pure Deterministic Policy (Learned AI Weights - Zero Random Exploration Noise)
                         raw_action = float(action_logits[0])
-                        confidence_temperature = 1.0
-                        raw_conf = float(1.0 / (1.0 + np.exp(-action_logits[1] / confidence_temperature)))
+                        # Unscale confidence from [-1.0, 1.0] (tanh policy output) to [0.05, 0.99]
+                        raw_conf = float(np.clip((action_logits[1] + 1.0) / 2.0, 0.05, 0.99))
                         
                         # 1. Institutional Temporal Window Smoothing (3-tick moving average)
                         # Eliminates high-frequency neural jitter and noisy 1-tick oscillations
@@ -1360,9 +1360,10 @@ class ProductionTradingBot:
                         action_val = float(np.mean(self.smoothed_action_history[sym]))
                         confidence = float(np.mean(self.smoothed_confidence_history[sym]))
                         
-                        raw_size = 1.0 / (1.0 + np.exp(-action_logits[2]))
-                        target_size = max(0.25, min(1.0, raw_size))
-                        price_offset = (action_logits[3] + 1.0) / 2.0
+                        # Unscale target_size from [-1.0, 1.0] (tanh policy output) to [0.25, 1.0]
+                        unscaled_size = (action_logits[2] + 1.0) / 2.0
+                        target_size = float(np.clip(unscaled_size, 0.25, 1.0))
+                        price_offset = float(np.clip((action_logits[3] + 1.0) / 2.0, 0.0, 1.0))
                     
                     pos = self.portfolio_state.positions[sym]
                     lead_lag_mult = 1.00

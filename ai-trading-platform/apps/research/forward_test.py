@@ -328,7 +328,7 @@ class ForwardTester:
                 with torch.no_grad():
                     action_preds, critics = production_model(state_tensor)
                     raw_act = float(action_preds[0, 0].item())
-                    conf = float(1.0 / (1.0 + np.exp(-action_preds[0, 1].item())))
+                    conf = float(np.clip((action_preds[0, 1].item() + 1.0) / 2.0, 0.05, 0.99))
                     pred_edge = float(critics[0, 0].item()) if critics is not None and critics.numel() > 0 else 0.0
 
                 # Production Action Contract: Conviction (|act| > 0.20) and Confidence (>= 0.65)

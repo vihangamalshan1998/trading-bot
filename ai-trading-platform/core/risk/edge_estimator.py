@@ -50,7 +50,8 @@ class EdgeEstimator:
         Computes the complete cost structure and net edge for an order.
         """
         # 1. Expected Gross Return
-        gross_return = float(predicted_move_pct)
+        # For SHORT positions, a negative price move produces a positive return (e.g. -0.35% price move = +0.35% profit)
+        gross_return = -float(predicted_move_pct) if "SHORT" in side else float(predicted_move_pct)
         uncertainty = max(0.0, 1.0 - confidence)
 
         if gross_return <= 0.0:

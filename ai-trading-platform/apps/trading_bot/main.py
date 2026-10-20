@@ -2265,7 +2265,7 @@ class ProductionTradingBot:
                                 continue
                                 
                             # Phase 2: Pre-Trade Net-Edge Estimator (Ensures positive expectancy after fees, spread, and slippage)
-                            c5m_pred = float(precomputed_critics[sym][0]) if (sym in precomputed_critics and len(precomputed_critics[sym]) > 0) else 0.25
+                            c5m_pred = float(precomputed_critics[sym][0]) if (sym in precomputed_critics and len(precomputed_critics[sym]) > 0) else (0.25 if "LONG" in side else -0.25)
                             active_regime = "NEUTRAL"
                             if sym in self.htf_regimes:
                                 active_regime = self.htf_regimes[sym].get("trend", "NEUTRAL")

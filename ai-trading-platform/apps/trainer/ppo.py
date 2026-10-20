@@ -48,6 +48,18 @@ def normalize_state_tensor(states: torch.Tensor) -> torch.Tensor:
     # Slot 11: entry_price distance (if abs > 1.0, raw asset price like $81,000 BTC -> reset to 0.0)
     s[..., 11] = torch.where(torch.abs(s[..., 11]) > 1.0, torch.zeros_like(s[..., 11]), s[..., 11])
     
+    # Market Features volume & orderbook quantity slots:
+    # Slot 30 (vol_1m), 31 (buy_vol_1m), 32 (sell_vol_1m), 39 (vol_24h), 41 (bid_qty), 42 (ask_qty), 101 (liq_1m), 102 (liq_15m)
+    # Log-scaling compresses million-token quantities (e.g. 488,000 DOGE) to clean [0, 2.0] range
+    for vol_idx in (30, 31, 32, 39, 41, 42, 101, 102):
+        s[..., vol_idx] = torch.sign(s[..., vol_idx]) * torch.log1p(torch.abs(s[..., vol_idx])) / 10.0
+        
+    # Slot 40: spread_bps (scale so 100 bps = 1.0)
+    s[..., 40] = torch.clamp(s[..., 40] / 100.0, 0.0, 5.0)
+    
+    # Universal clamp across all slots to protect LayerNorm from extreme outliers
+    s = torch.clamp(s, -5.0, 5.0)
+    
     return s
 
 
@@ -265,7 +277,7 @@ class PPOTrainer:
                 old_log_probs = dist_old.log_prob(actions).sum(dim=-1, keepdim=True)
             
         with torch.no_grad():
-            safe_rewards = rewards / 200.0
+            safe_rewards = torch.clamp(rewards, min=-15.0, max=15.0)
             advantages, returns = self.compute_gae(safe_rewards, old_values, next_values, dones)
 
             if not (torch.isfinite(advantages).all() and torch.isfinite(returns).all()):
@@ -420,7 +432,7 @@ class PPOTrainer:
             states = normalize_state_tensor(states)
             states = torch.nan_to_num(states, nan=0.0, posinf=1.0, neginf=-1.0)
             rewards = torch.nan_to_num(rewards, nan=0.0, posinf=1.0, neginf=-1.0)
-            safe_rewards = rewards / 200.0
+            safe_rewards = torch.clamp(rewards, min=-15.0, max=15.0)
             actual_5m_ret = rewards[:, 0]
 
             self.model.eval()

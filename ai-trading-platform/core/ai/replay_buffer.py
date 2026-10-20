@@ -239,6 +239,19 @@ class ReplayBuffer:
         if abs(f[11]) > 1.0:
             f[11] = 0.0
             
+        # Market Features volume & orderbook quantity slots:
+        # Slot 30 (vol_1m), 31 (buy_vol_1m), 32 (sell_vol_1m), 39 (vol_24h), 41 (bid_qty), 42 (ask_qty), 101 (liq_1m), 102 (liq_15m)
+        for vol_idx in (30, 31, 32, 39, 41, 42, 101, 102):
+            val = float(f[vol_idx])
+            f[vol_idx] = float(np.sign(val) * np.log1p(abs(val)) / 10.0)
+            
+        # Slot 40: spread_bps
+        f[40] = float(max(0.0, min(5.0, float(f[40]) / 100.0)))
+        
+        # Universal clamp across all slots to protect LayerNorm from extreme outliers
+        for idx in range(len(f)):
+            f[idx] = float(max(-5.0, min(5.0, f[idx])))
+            
         return f
 
     def _extract_sequence(self, exp: Experience, seq_len: int) -> List[List[float]]:

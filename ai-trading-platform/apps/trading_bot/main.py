@@ -1381,9 +1381,26 @@ class ProductionTradingBot:
                         action_val = float(np.mean(self.smoothed_action_history[sym]))
                         confidence = float(np.mean(self.smoothed_confidence_history[sym]))
                         
-                        # Unscale target_size from [-1.0, 1.0] (tanh policy output) to [0.25, 1.0]
-                        unscaled_size = (action_logits[2] + 1.0) / 2.0
-                        target_size = float(np.clip(unscaled_size, 0.25, 1.0))
+                        critic_vals = precomputed_critics.get(sym)
+                        pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
+                        pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
+                        pred_ret_4h = float(critic_vals[2]) if critic_vals is not None and len(critic_vals) > 2 else pred_ret_1h
+
+                        # Dynamic Conviction-Scaled Position Sizing (Unlocks dynamic sizes beyond 25% floor):
+                        # 1. Base model requested preference [0.0 to 1.0]
+                        model_requested_size = (action_logits[2] + 1.0) / 2.0
+
+                        # 2. Dynamic Conviction Multiplier:
+                        # High confidence (> 0.65) and strong positive expected return (> 0.08%) scale up position allocation
+                        conviction_mult = 1.0
+                        if confidence > 0.65:
+                            conviction_mult += (confidence - 0.65) * 1.5
+                        if pred_ret_5m > 0.08:
+                            conviction_mult += min(0.50, pred_ret_5m * 2.0)
+
+                        # 3. Dynamic target size bounded between 0.25 (minimum safety floor) and 1.0 (max budget)
+                        effective_size = max(0.25, model_requested_size) * conviction_mult
+                        target_size = float(np.clip(effective_size, 0.25, 1.0))
                         price_offset = float(np.clip((action_logits[3] + 1.0) / 2.0, 0.0, 1.0))
                     
                     pos = self.portfolio_state.positions[sym]
@@ -1425,17 +1442,14 @@ class ProductionTradingBot:
                     else: predicted_side = "HOLD"
                     
                     if self.redis.redis:
-                        critic_vals = precomputed_critics.get(sym)
-                        pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
-                        pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
-                        pred_ret_4h = float(critic_vals[2]) if critic_vals is not None and len(critic_vals) > 2 else pred_ret_1h
                         ai_state = {
                             "predicted_side": predicted_side,
                             "confidence": float(confidence),
                             "target_size": float(target_size),
                             "critic_return": float(pred_ret_5m),
                             "critic_1h": float(pred_ret_1h),
-                            "critic_4h": float(pred_ret_4h)
+                            "critic_4h": float(pred_ret_4h),
+                            "timestamp": time.time(),
                         }
                         await self.redis.redis.set(f"ai:state:{sym}", json.dumps(ai_state))
 

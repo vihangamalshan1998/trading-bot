@@ -380,7 +380,21 @@ class ReplayBuffer:
                 # Neutral / flat
                 raw_confidence = 0.0
                 
-            raw_target_size = (target_size * 2.0) - 1.0 if target_size > 0 else 0.0
+            # GROUND TARGET SIZE IN CONVICTION & OPPORTUNITY RETURN (Breaks the 25% circular feedback loop)
+            if (actual_profit > 0 and r_5m >= 0) or (r_5m > 0 and r_1h > 0):
+                # Strong verified winning setup -> train model to allocate dynamic size [0.35 to 0.85]
+                conviction_size = min(0.85, 0.35 + max(0.0, r_5m / 2.5))
+                raw_target_size = (conviction_size * 2.0) - 1.0
+            elif actual_profit < 0 or (r_5m < 0 and r_1h < 0):
+                # Loser or adverse market drift -> train model to scale down to minimum floor [0.25]
+                raw_target_size = (0.25 * 2.0) - 1.0  # -0.50 policy space
+            elif target_size > 0:
+                # Explicit position size recorded
+                raw_target_size = (target_size * 2.0) - 1.0
+            else:
+                # Neutral / flat hold -> standard baseline 25% floor
+                raw_target_size = (0.25 * 2.0) - 1.0
+                
             raw_price_offset = (price_offset * 2.0) - 1.0 if price_offset > 0 else 0.0
             
             act = [0.0, raw_confidence, raw_target_size, raw_price_offset]

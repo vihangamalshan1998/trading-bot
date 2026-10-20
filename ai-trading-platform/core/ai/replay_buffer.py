@@ -72,7 +72,10 @@ class ReplayBuffer:
                 recent_ids = [r[0] for r in recent_ids_query]
                 
                 try:
-                    historical_ids_query = session.execute(text(f"SELECT id FROM experiences ORDER BY RAND() LIMIT {historical_limit}")).fetchall()
+                    from sqlalchemy import func
+                    max_id = session.query(func.max(Experience.id)).scalar() or 1
+                    sample_pool = random.sample(range(1, max_id + 1), min(historical_limit * 2, max_id))
+                    historical_ids_query = session.query(Experience.id).filter(Experience.id.in_(sample_pool)).limit(historical_limit).all()
                     historical_ids = [r[0] for r in historical_ids_query]
                 except Exception:
                     historical_ids = []

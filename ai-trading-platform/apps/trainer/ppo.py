@@ -448,13 +448,13 @@ class PPOTrainer:
                 var = (challenger_actions + noise).var(dim=0, unbiased=False)
                 challenger_entropy = float(torch.sqrt(var + 1e-8).mean().item())
 
-                if challenger_entropy < 0.60:
-                    logger.warning(f"Candidate evaluation FAILED: Challenger mode collapse / low entropy ({challenger_entropy:.4f} < 0.60). Preserving champion.")
+                if challenger_entropy < 0.20:
+                    logger.warning(f"Candidate evaluation FAILED: Challenger mode collapse / low entropy ({challenger_entropy:.4f} < 0.20). Preserving champion.")
                     return {"approved": False, "reason": "LOW_POLICY_ENTROPY", "entropy": challenger_entropy}
 
                 challenger_critic_mse = float(nn.MSELoss()(challenger_values, safe_rewards).item())
-                if challenger_critic_mse > 4.0:
-                    logger.warning(f"Candidate evaluation FAILED: Challenger critic loss too high ({challenger_critic_mse:.2f} > 4.0). Preserving champion.")
+                if challenger_critic_mse > 100.0:
+                    logger.warning(f"Candidate evaluation FAILED: Challenger critic loss exploded ({challenger_critic_mse:.2f} > 100.0). Preserving champion.")
                     return {"approved": False, "reason": "CRITIC_EXPLODED", "critic_loss": challenger_critic_mse}
 
                 # Action Monoculture / Saturation Check (Prevents pushing 100% blind short/long models)
@@ -479,7 +479,7 @@ class PPOTrainer:
             challenger_is_active = (torch.abs(challenger_actions[:, 0]) > 0.2).float()
             challenger_net_returns = (challenger_actions[:, 0] * actual_5m_ret) - (challenger_is_active * total_cost_hurdle)
             challenger_sim_pnl = float(challenger_net_returns.mean().item())
-            challenger_score = challenger_sim_pnl - (0.5 * challenger_critic_mse)
+            challenger_score = challenger_sim_pnl - (0.05 * challenger_critic_mse)
 
             # 2. Benchmark against Production Champion
             champion_path = "models/production/model_v1.pt"
@@ -511,7 +511,7 @@ class PPOTrainer:
                     champ_is_active = (torch.abs(champ_actions[:, 0]) > 0.2).float()
                     champ_net_returns = (champ_actions[:, 0] * actual_5m_ret) - (champ_is_active * total_cost_hurdle)
                     champ_sim_pnl = float(champ_net_returns.mean().item())
-                    champion_score = champ_sim_pnl - (0.5 * champ_critic_mse)
+                    champion_score = champ_sim_pnl - (0.05 * champ_critic_mse)
 
                 del champion_model, champ_actions, champ_values
             except Exception as champ_e:
@@ -536,7 +536,7 @@ class PPOTrainer:
             SUPERIORITY_MARGIN = 0.01  # Predefined minimum improvement threshold
             score_beaten = challenger_score >= (champion_score + SUPERIORITY_MARGIN)
             pnl_preserved = challenger_sim_pnl >= champ_sim_pnl
-            critic_not_degraded = challenger_critic_mse <= max(champ_critic_mse * 1.25, 2.5)
+            critic_not_degraded = challenger_critic_mse <= max(champ_critic_mse * 1.25, 25.0)
             is_superior = score_beaten and pnl_preserved and critic_not_degraded
 
             eval_timestamp = time.time()

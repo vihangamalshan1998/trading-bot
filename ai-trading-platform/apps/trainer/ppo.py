@@ -19,6 +19,7 @@ from core.ai import trainer_status
 from core.config.settings import settings
 from core.risk import exit_policy
 from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT, ADDED_2026_10_SLOTS, BRAIN_EXCLUDED_SLOTS
+from core.schemas.state_layout import MACRO_PENDING_SLOTS, MACRO_LIVE_SINCE, MACRO_MIN_LIVE_SHARE
 
 # --- Trading economics used to score actions (all in % of price / notional) ---
 # Live entry rule: |action| > 0.20 opens a position (see trading_bot.main side determination)
@@ -33,8 +34,10 @@ TAKE_PROFIT_PCT = exit_policy.MAX_STOP * exit_policy.HARD_TP_RR * 100.0
 TRAINER_STATE_PATH = "models/candidates/trainer_state.pt"
 # Direction exploration noise must stay small relative to the 0.20 deadband. With wide noise the
 # STOCHASTIC policy's optimum drifts toward the "less costly losing side" instead of flat, and the
-# DETERMINISTIC mean used live then trades into fees. sigma in [0.08, 0.30].
-DIR_LOG_STD_MIN = -2.5
+# DETERMINISTIC mean used live then trades into fees. sigma in [0.25, 0.30]: the floor was 0.08, the
+# noise had shrunk to 0.20, and on 82-100% of states all K samples then landed on the same side
+# (zero advantage, no direction learning).
+DIR_LOG_STD_MIN = -1.4
 DIR_LOG_STD_MAX = -1.2
 
 def normalize_state_tensor(states: torch.Tensor) -> torch.Tensor:
@@ -499,6 +502,24 @@ class PPOTrainer:
         except Exception as e:
             logger.warning(f"Could not restore trainer state ({e}); continuing with fresh exploration noise.")
 
+    def reset_direction_head(self):
+        """
+        Neutral restart of the LONG / SHORT output only (actor row 0): the market understanding (LSTM),
+        the critic forecasts and the confidence / size / offset outputs are kept. Used when training
+        starts from a brain that learned direction from the account slots (saturated at +1 = LONG).
+        """
+        fc = self.model.actor_fc
+        with torch.no_grad():
+            fc.weight[0].normal_(0.0, 1e-3)
+            fc.bias[0] = 0.0
+            self.log_std[0] = DIR_LOG_STD_MAX
+            for p in (fc.weight, fc.bias):
+                st = self.optimizer.state.get(p) or {}
+                for k in ("exp_avg", "exp_avg_sq"):
+                    if k in st:
+                        st[k][0].zero_()
+        logger.info("Direction output reset to neutral (old LONG habit removed); exploration noise 0.30.")
+
     def fit_feature_stats(self, n_experiences: int = 400) -> bool:
         """
         Fits per-slot mean / std on training frames and stores them in the model (they ship with the
@@ -523,8 +544,17 @@ class PPOTrainer:
         mask[list(ACTIVE_SLOTS)] = 1.0
         mask = mask * (std > 1e-6).float()
         mask[list(BRAIN_EXCLUDED_SLOTS)] = 0.0  # account / position state: risk rules only, never the brain
+        ts = [float(getattr(e, "timestamp", 0) or 0) for e in sample]
+        live_share = sum((t / 1000.0 if t > 1e11 else t) >= MACRO_LIVE_SINCE for t in ts) / max(1, len(ts))
+        macro_on = live_share >= MACRO_MIN_LIVE_SHARE
+        if not macro_on:
+            mask[list(MACRO_PENDING_SLOTS)] = 0.0
         self.model.set_feature_stats(mean, std, mask)
         dead = [i for i in ACTIVE_SLOTS if std[i] <= 1e-6 and i not in BRAIN_EXCLUDED_SLOTS]
+        logger.info(
+            f"Feature stats: macro momentum inputs {'ON' if macro_on else 'OFF'} "
+            f"({live_share:.0%} of the sample has live macro data, need {MACRO_MIN_LIVE_SHARE:.0%})."
+        )
         logger.info(
             f"Feature stats fitted on {frames.shape[0]} frames: {int(mask.sum().item())} slots enabled, "
             f"{len(dead)} ACTIVE slots carry no data yet (masked until refit): {dead}"
@@ -922,6 +952,8 @@ async def run_training_loop():
     trainer.load_trainer_state()
     # Per-slot input scaling: fit once for models that predate it, or on request when new inputs come online
     import sys as _sys
+    # A brain that still sees the account slots learned LONG / SHORT from them: restart that output neutral
+    legacy_direction = (not bool(model.feat_fitted)) or bool(model.feat_mask[list(BRAIN_EXCLUDED_SLOTS)].any())
     if not bool(model.feat_fitted) or "--refit-feature-stats" in _sys.argv:
         trainer_status.set_phase("fitting input scaling")
         trainer.fit_feature_stats()
@@ -930,6 +962,8 @@ async def run_training_loop():
         with torch.no_grad():
             model.feat_mask[list(BRAIN_EXCLUDED_SLOTS)] = 0.0
         logger.info("Feature mask: account / position slots 0-19 switched off for the brain.")
+    if legacy_direction:
+        trainer.reset_direction_head()
     logger.info("Starting continuous PPO training on historical/live data...")
     trainer_status.set_phase(
         "training",

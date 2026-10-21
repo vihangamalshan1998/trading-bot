@@ -144,6 +144,14 @@ ADDED_2026_10_SLOTS = tuple(range(45, 49)) + tuple(range(106, 110)) + tuple(rang
 # both champion and candidates went LONG on every row, while swapping all 90 market slots changed nothing.
 BRAIN_EXCLUDED_SLOTS = tuple(range(0, 20))
 
+# Macro inputs that were (nearly) flat until the macro feed was fixed on 20-21 Oct 2026: volatility
+# expectation, S&P / DXY / fear & greed / VIX / gold / treasury / Nasdaq momentum. Fitted on the old
+# data they read 3-5 std out of range live, so the brain only gets them once at least half of the
+# training sample comes from after MACRO_LIVE_SINCE (checked at every feature-stats fit / refit).
+MACRO_PENDING_SLOTS = (117, 121, 122, 123, 124, 125, 126, 127)
+MACRO_LIVE_SINCE = 1792540800  # 2026-10-21 00:00 UTC
+MACRO_MIN_LIVE_SHARE = 0.5
+
 # FeatureEngine-relative indices (0..89) for the live bot's per-feature transforms
 MARKET_LOG_VOLUME_FEATURES = tuple(i - MARKET_OFFSET for i in LOG_VOLUME_SLOTS if MARKET_OFFSET <= i < MARKET_OFFSET + MARKET_DIM)
 MARKET_SPREAD_FEATURE = SPREAD_SLOT - MARKET_OFFSET

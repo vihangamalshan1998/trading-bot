@@ -1,10 +1,16 @@
 import asyncio
+import time
 
 import msgpack
+from sqlalchemy import text
 
+from core.config.settings import settings
 from core.db.redis import redis_manager
 from core.logging.logger import logger
 from core.ai.replay_buffer import ReplayBuffer
+
+RETENTION_CHECK_SECONDS = 6 * 3600
+RETENTION_DELETE_BATCH = 500
 
 
 class ExperienceStorageService:
@@ -32,6 +38,36 @@ class ExperienceStorageService:
 
         self.running = False
 
+    def _delete_expired(self) -> int:
+        """
+        Deletes records older than settings.experience_retention_days in small batches (each record holds a
+        ~0.5 MB state sequence; one huge DELETE would lock the table). The laptop trainer keeps its own copy:
+        it syncs new records within minutes.
+        """
+        cutoff = int(time.time()) - int(settings.experience_retention_days) * 86400
+        total = 0
+        with self.replay_buffer.SessionLocal() as session:
+            while True:
+                n = session.execute(
+                    text(f"DELETE FROM experiences WHERE timestamp < :cutoff LIMIT {RETENTION_DELETE_BATCH}"),
+                    {"cutoff": cutoff},
+                ).rowcount or 0
+                session.commit()
+                total += n
+                if n < RETENTION_DELETE_BATCH:
+                    return total
+                time.sleep(0.5)
+
+    async def retention_loop(self):
+        while self.running:
+            try:
+                deleted = await asyncio.to_thread(self._delete_expired)
+                if deleted:
+                    logger.info(f"Retention: deleted {deleted} experiences older than {settings.experience_retention_days} days.")
+            except Exception as e:
+                logger.error(f"Retention cleanup failed: {e}")
+            await asyncio.sleep(RETENTION_CHECK_SECONDS)
+
     async def start(self):
         """
         Start the experience consumer.
@@ -51,6 +87,7 @@ class ExperienceStorageService:
         await pubsub.subscribe(self.CHANNEL)
 
         self.running = True
+        retention_task = asyncio.create_task(self.retention_loop())
 
         logger.info(
             "Experience Storage Service listening on "
@@ -174,6 +211,7 @@ class ExperienceStorageService:
 
         finally:
             self.running = False
+            retention_task.cancel()
 
             try:
                 await pubsub.unsubscribe(self.CHANNEL)

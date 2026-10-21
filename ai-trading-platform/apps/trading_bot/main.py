@@ -194,6 +194,60 @@ class ProductionTradingBot:
         x[..., list(ADDED_2026_10_SLOTS)] = 0.0
         return x
 
+    def _emit_market_snapshot(self, sym: str, seq, action_logits) -> None:
+        """
+        One training record per coin every settings.experience_snapshot_seconds, whatever the bot decides.
+        The trainer replays both LONG and SHORT from every record (path-aware outcomes), so it needs market
+        coverage, not decisions. Records used to be written only when the decision logic reached a HOLD
+        branch; the October 2026 entry gates skip past those, which cut the flow to ~200 records a day.
+        Values are rounded to 6 significant digits: the JSON state column is the VPS disk cost (~0.77 MB raw).
+        Shares the throttle with the older HOLD emitters, so a coin never gets two records in one window.
+        """
+        now_t = time.time()
+        if now_t - self.last_hold_emission_time.get(sym, 0.0) < settings.experience_snapshot_seconds:
+            return
+        self.last_hold_emission_time[sym] = now_t
+        try:
+            pos = self.portfolio_state.positions.get(sym)
+            qty = float(getattr(pos, "quantity", 0.0) or 0.0)
+            lev = int(getattr(pos, "leverage", 0) or settings.max_leverage)
+            mid = float(getattr(self.market_states.get(sym), "mid_price", 0.0) or 0.0)
+            conf = float(np.clip((float(action_logits[1]) + 1.0) / 2.0, 0.05, 0.99))
+            entry_t = float(getattr(pos, "entry_time", 0.0) or 0.0)
+            exp_data = {
+                "experience_id": str(uuid.uuid4()),
+                "timestamp": int(now_t),
+                "symbol": sym,
+                "market_state": [[float(f"{float(v):.6g}") for v in frame] for frame in seq],
+                "macro_state": None,
+                "portfolio_state": {
+                    "free_margin": float(self.portfolio_state.free_margin),
+                    "total_unrealized_pnl": float(self.portfolio_state.total_unrealized_pnl),
+                },
+                "derivatives_state": {
+                    "target_size": float(np.clip((float(action_logits[2]) + 1.0) / 2.0, 0.0, 1.0)),
+                    "price_offset": float(np.clip((float(action_logits[3]) + 1.0) / 2.0, 0.0, 1.0)),
+                },
+                "position_before": qty,
+                "position_after": qty,
+                "entry_price": float(getattr(pos, "entry_price", 0.0) or 0.0),
+                "exit_price": None,
+                "leverage": lev,
+                "margin": abs(qty) * mid / lev if qty and lev else 0.0,
+                "fees": 0.0,
+                "holding_duration": int(now_t - entry_t) if qty and entry_t > 0 else 0,
+                "action": "HOLD",
+                "action_probability": conf,
+                "confidence": conf,
+                "model_version": self.registry.get_current_version(),
+                "reward": 0.0,  # replaced by the reward grader's true market return
+                "realized_pnl": 0.0,
+                "unrealized_pnl": float(getattr(pos, "unrealized_pnl", 0.0) or 0.0),
+            }
+            asyncio.create_task(redis_manager.publish_binary("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
+        except Exception as e:
+            logger.warning(f"[{sym}] Market snapshot record skipped: {e}")
+
     def _calibrated_confidence(self, raw_conf: float) -> float:
         """Honest confidence: the win rate the champion's raw confidence actually achieved on unseen data."""
         cal = (self.trade_policy or {}).get("calibration") or {}
@@ -1363,7 +1417,9 @@ class ProductionTradingBot:
                             action_logits = action_logits_t[0].numpy()
                             precomputed_critics[sym] = expected_return[0].numpy()
 
-                        
+                    # Training record for this coin (every 10 min), before any trading gate can skip it
+                    self._emit_market_snapshot(sym, seq, action_logits)
+
                     market = self.market_states[sym]
                     self.alpha_engine.update_tick(sym, market)
                     
@@ -1676,7 +1732,7 @@ class ProductionTradingBot:
                         # Emit authentic live HOLD experience into DB when flat (throttled to once per 5 mins per coin to protect VPS disk)
                         # Populates LINK, ADA, AVAX, NEAR, LTC with genuine 200-dim market state sequences
                         now_hold_t = time.time()
-                        if pos.quantity == 0 and (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= 300.0:
+                        if pos.quantity == 0 and (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= settings.experience_snapshot_seconds:
                             self.last_hold_emission_time[sym] = now_hold_t
                             active_version = self.registry.get_current_version()
                             hold_exp_data = {
@@ -1932,7 +1988,7 @@ class ProductionTradingBot:
                         
                         # High-Quality HOLD Experiences (throttled to once per 5 mins per coin to protect VPS disk)
                         now_hold_t = time.time()
-                        if (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= 300.0:
+                        if (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= settings.experience_snapshot_seconds:
                             self.last_hold_emission_time[sym] = now_hold_t
                             hold_dur = 0
                             if pos.entry_price > 0 and getattr(pos, 'entry_time', 0.0) > 0:

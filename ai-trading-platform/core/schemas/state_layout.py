@@ -144,13 +144,22 @@ ADDED_2026_10_SLOTS = tuple(range(45, 49)) + tuple(range(106, 110)) + tuple(rang
 # both champion and candidates went LONG on every row, while swapping all 90 market slots changed nothing.
 BRAIN_EXCLUDED_SLOTS = tuple(range(0, 20))
 
-# Macro inputs that were (nearly) flat until the macro feed was fixed on 20-21 Oct 2026: volatility
-# expectation, S&P / DXY / fear & greed / VIX / gold / treasury / Nasdaq momentum. Fitted on the old
-# data they read 3-5 std out of range live, so the brain only gets them once at least half of the
-# training sample comes from after MACRO_LIVE_SINCE (checked at every feature-stats fit / refit).
+# Inputs that only carry real values in records saved from FULL_INPUTS_SINCE on (first complete record:
+# 2026-10-21 04:56 UTC). In older records they are 0 (or nearly flat), so a brain fitted on the mixed
+# data would read every live value as extreme and learn nothing about them:
+#   macro momentum that was flat until the macro feed was fixed,
+#   core market inputs the bot stored as 0 until 21 Oct (RSI, EMA / SMA distances, ADX, stochastic, 1m and
+#   24h volume, buy / sell volume, trade imbalance, VWAP deviation, 24h return, liquidations, OI delta,
+#   mark premium, whale imbalance),
+#   and the October 2026 additions (ADDED_2026_10_SLOTS).
+# They stay switched off for the brain until the database holds MIN_FULL_INPUT_ROWS graded records from
+# FULL_INPUTS_SINCE on. At that refit the trainer switches them on AND from then on trains only on
+# complete records (see apps/trainer/ppo.py fit_feature_stats).
 MACRO_PENDING_SLOTS = (117, 121, 122, 123, 124, 125, 126, 127)
-MACRO_LIVE_SINCE = 1792540800  # 2026-10-21 00:00 UTC
-MACRO_MIN_LIVE_SHARE = 0.5
+CORE_LATE_SLOTS = (26, 30, 31, 32, 33, 36, 37, 39, 56, 57, 58, 64, 65, 66, 67, 73, 74, 101, 102, 103, 105, 132)
+PENDING_INPUT_SLOTS = tuple(sorted(set(MACRO_PENDING_SLOTS + CORE_LATE_SLOTS + ADDED_2026_10_SLOTS)))
+FULL_INPUTS_SINCE = 1792558800  # 2026-10-21 05:00 UTC
+MIN_FULL_INPUT_ROWS = 3000
 
 # FeatureEngine-relative indices (0..89) for the live bot's per-feature transforms
 MARKET_LOG_VOLUME_FEATURES = tuple(i - MARKET_OFFSET for i in LOG_VOLUME_SLOTS if MARKET_OFFSET <= i < MARKET_OFFSET + MARKET_DIM)

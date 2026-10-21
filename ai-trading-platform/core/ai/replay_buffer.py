@@ -24,6 +24,9 @@ class ReplayBuffer:
         self.holdout_frac = holdout_frac
         self.holdout_cache: List[Experience] = []
         self.holdout_start_ts = float("inf")
+        # Only load records saved from this time on (epoch s); set once the brain uses the inputs that
+        # older records store as 0 (state_layout.FULL_INPUTS_SINCE). 0 = all records.
+        self.min_timestamp = 0.0
         self.engine = create_engine(settings.database_url)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         
@@ -78,6 +81,8 @@ class ReplayBuffer:
                 # Only rows graded with TRUE market returns are trainable (see reward_calculator.GRADED_FLAG).
                 # Ungraded / legacy-graded rows previously taught the critic to count HOLD emissions.
                 graded = Experience.data_quality_flags == GRADED_FLAG
+                if self.min_timestamp > 0:
+                    graded = graded & (Experience.timestamp >= int(self.min_timestamp))
 
                 # OPTIMIZATION FIX: Fetch half Recent and half Random Historical using indexed id.desc()
                 recent_ids_query = session.query(Experience.id).filter(graded).order_by(Experience.id.desc()).limit(recent_limit).all()
@@ -86,7 +91,12 @@ class ReplayBuffer:
                 try:
                     from sqlalchemy import func
                     max_id = session.query(func.max(Experience.id)).scalar() or 1
-                    sample_pool = random.sample(range(1, max_id + 1), min(historical_limit * 3, max_id))
+                    min_id = 1
+                    if self.min_timestamp > 0:
+                        min_id = session.query(func.min(Experience.id)).filter(
+                            Experience.timestamp >= int(self.min_timestamp)).scalar() or max_id
+                    span = max(1, max_id - min_id + 1)
+                    sample_pool = random.sample(range(min_id, max_id + 1), min(historical_limit * 3, span))
                     historical_ids_query = session.query(Experience.id).filter(Experience.id.in_(sample_pool), graded).limit(historical_limit).all()
                     historical_ids = [r[0] for r in historical_ids_query]
                 except Exception:
@@ -116,7 +126,8 @@ class ReplayBuffer:
                 try:
                     golden_ids_query = session.execute(text(
                         f"SELECT id FROM golden_experiences WHERE data_quality_flags = '{GRADED_FLAG}' "
-                        f"AND timestamp < {int(min(self.holdout_start_ts, 2**62))} ORDER BY RAND() LIMIT {golden_limit}"
+                        f"AND timestamp < {int(min(self.holdout_start_ts, 2**62))} "
+                        f"AND timestamp >= {int(self.min_timestamp)} ORDER BY RAND() LIMIT {golden_limit}"
                     )).fetchall()
                     golden_ids = [r[0] for r in golden_ids_query]
                     
@@ -256,6 +267,15 @@ class ReplayBuffer:
                 unique_batch.extend(fallback_pool) # Add whatever is left
             
         return unique_batch
+
+    def count_graded_since(self, ts: float) -> int:
+        """Number of trainable (graded) records saved at or after `ts` (epoch seconds)."""
+        try:
+            with self.SessionLocal() as session:
+                return int(session.query(Experience.id).filter(
+                    Experience.data_quality_flags == GRADED_FLAG, Experience.timestamp >= int(ts)).count())
+        except Exception:
+            return 0
 
     def sample_holdout(self, n: int) -> List[Experience]:
         """Random sample from the chronological holdout (never used for training)."""

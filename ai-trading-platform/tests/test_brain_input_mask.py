@@ -5,23 +5,33 @@ import torch
 from apps.research.model import SingleSymbolActorCritic
 from apps.trainer.ppo import PPOTrainer, DIR_LOG_STD_MAX
 from core.schemas.state_layout import (
-    ACTIVE_SLOTS, BRAIN_EXCLUDED_SLOTS, MACRO_LIVE_SINCE, MACRO_PENDING_SLOTS, STATE_DIM,
+    ACTIVE_SLOTS, BRAIN_EXCLUDED_SLOTS, FULL_INPUTS_SINCE, MIN_FULL_INPUT_ROWS, PENDING_INPUT_SLOTS, STATE_DIM,
 )
 
 
 class _Buffer:
-    def __init__(self, states, timestamp=0):
+    def __init__(self, states, timestamp=0, complete_rows=0):
         self.cache = [SimpleNamespace(timestamp=timestamp) for _ in range(64)]
         self._states = states
+        self.complete_rows = complete_rows
+        self.min_timestamp = 0.0
+        self.reloads = 0
+
+    def count_graded_since(self, ts):
+        return self.complete_rows
+
+    def load_cache_from_db(self, limit=0):
+        self.reloads += 1
 
     def build_tensors(self, sample, seq_len=300):
         return self._states, None, None, None, None
 
 
-def _trainer(model, states, timestamp=0):
+def _trainer(model, states, timestamp=0, complete_rows=0):
     t = PPOTrainer.__new__(PPOTrainer)
     t.model = model
-    t.buffer = _Buffer(states, timestamp)
+    t.limit = 100
+    t.buffer = _Buffer(states, timestamp, complete_rows)
     return t
 
 
@@ -32,19 +42,25 @@ def test_fitting_switches_off_account_and_position_slots():
 
     mask = model.feat_mask
     assert mask[list(BRAIN_EXCLUDED_SLOTS)].sum() == 0
-    market_active = [i for i in ACTIVE_SLOTS if i not in BRAIN_EXCLUDED_SLOTS and i not in MACRO_PENDING_SLOTS]
+    market_active = [i for i in ACTIVE_SLOTS if i not in BRAIN_EXCLUDED_SLOTS and i not in PENDING_INPUT_SLOTS]
     assert bool((mask[market_active] == 1).all())
 
 
-def test_macro_inputs_wait_for_enough_live_macro_data():
+def test_late_inputs_wait_for_enough_complete_records():
     torch.manual_seed(0)
-    old = SingleSymbolActorCritic(input_dim=STATE_DIM)
-    _trainer(old, torch.randn(64, 4, STATE_DIM), timestamp=MACRO_LIVE_SINCE - 86400).fit_feature_stats()
-    assert old.feat_mask[list(MACRO_PENDING_SLOTS)].sum() == 0  # mostly pre-fix data: off
+    early = SingleSymbolActorCritic(input_dim=STATE_DIM)
+    t = _trainer(early, torch.randn(64, 4, STATE_DIM), complete_rows=MIN_FULL_INPUT_ROWS - 1)
+    t.fit_feature_stats()
+    assert early.feat_mask[list(PENDING_INPUT_SLOTS)].sum() == 0      # not enough complete records: off
+    assert t.buffer.min_timestamp == 0.0 and t.buffer.reloads == 0    # still trains on all records
 
-    new = SingleSymbolActorCritic(input_dim=STATE_DIM)
-    _trainer(new, torch.randn(64, 4, STATE_DIM), timestamp=(MACRO_LIVE_SINCE + 86400) * 1000).fit_feature_stats()
-    assert bool((new.feat_mask[list(MACRO_PENDING_SLOTS)] == 1).all())  # enough live data (ms timestamps): on
+    ready = SingleSymbolActorCritic(input_dim=STATE_DIM)
+    t = _trainer(ready, torch.randn(64, 4, STATE_DIM), complete_rows=MIN_FULL_INPUT_ROWS)
+    t.fit_feature_stats()
+    active_pending = [i for i in PENDING_INPUT_SLOTS if i in ACTIVE_SLOTS]
+    assert bool((ready.feat_mask[active_pending] == 1).all())          # enough: on
+    assert t.buffer.min_timestamp == FULL_INPUTS_SINCE and t.buffer.reloads == 1  # ...and complete records only
+    assert ready.feat_mask[list(BRAIN_EXCLUDED_SLOTS)].sum() == 0      # account / position stay off regardless
 
 
 def test_brain_ignores_account_state():

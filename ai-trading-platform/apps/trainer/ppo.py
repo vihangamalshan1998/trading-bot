@@ -19,7 +19,7 @@ from core.ai import trainer_status
 from core.config.settings import settings
 from core.risk import exit_policy
 from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT, ADDED_2026_10_SLOTS, BRAIN_EXCLUDED_SLOTS
-from core.schemas.state_layout import MACRO_PENDING_SLOTS, MACRO_LIVE_SINCE, MACRO_MIN_LIVE_SHARE
+from core.schemas.state_layout import PENDING_INPUT_SLOTS, FULL_INPUTS_SINCE, MIN_FULL_INPUT_ROWS
 
 # --- Trading economics used to score actions (all in % of price / notional) ---
 # Live entry rule: |action| > 0.20 opens a position (see trading_bot.main side determination)
@@ -107,7 +107,8 @@ class PPOTrainer:
     Phase 11: Proximal Policy Optimization (PPO) Training Loop.
     Samples from the MySQL ReplayBuffer or RolloutBuffer and updates the Actor-Critic model.
     """
-    def __init__(self, model: SingleSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2, limit: int = 300):
+    def __init__(self, model: SingleSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2, limit: int = 300,
+                 min_timestamp: float = 0.0):
         self.model = model
         self.log_std = nn.Parameter(torch.tensor([-1.6, -0.5, -0.5, -0.5]))
         self.optimizer = optim.Adam(
@@ -119,6 +120,7 @@ class PPOTrainer:
         self.clip_epsilon = clip_epsilon
         self.actions_per_state = 4  # K fresh policy samples per replay state (leave-one-out baseline)
         self.buffer = ReplayBuffer()
+        self.buffer.min_timestamp = float(min_timestamp)  # complete records only, once the brain uses them
         self.rollout_buffer = RolloutBuffer()
         self.limit = limit
         
@@ -534,6 +536,13 @@ class PPOTrainer:
         enabled; RESERVED / DEPRECATED / dead slots are masked to 0 so they cannot add noise.
         Fit once, then keep fixed: the weights learn on top of these statistics.
         """
+        complete_rows = self.buffer.count_graded_since(FULL_INPUTS_SINCE)
+        full_inputs = complete_rows >= MIN_FULL_INPUT_ROWS
+        if full_inputs and self.buffer.min_timestamp < FULL_INPUTS_SINCE:
+            # Switching the late inputs on: fit AND train on complete records only from now on
+            logger.info(f"Feature stats: {complete_rows} complete records available; reloading the cache with complete records only...")
+            self.buffer.min_timestamp = float(FULL_INPUTS_SINCE)
+            self.buffer.load_cache_from_db(limit=self.limit)
         pool = list(self.buffer.cache)
         if len(pool) < 30:
             logger.warning(f"Feature stats: only {len(pool)} training experiences available; keeping current statistics.")
@@ -551,16 +560,16 @@ class PPOTrainer:
         mask[list(ACTIVE_SLOTS)] = 1.0
         mask = mask * (std > 1e-6).float()
         mask[list(BRAIN_EXCLUDED_SLOTS)] = 0.0  # account / position state: risk rules only, never the brain
-        ts = [float(getattr(e, "timestamp", 0) or 0) for e in sample]
-        live_share = sum((t / 1000.0 if t > 1e11 else t) >= MACRO_LIVE_SINCE for t in ts) / max(1, len(ts))
-        macro_on = live_share >= MACRO_MIN_LIVE_SHARE
-        if not macro_on:
-            mask[list(MACRO_PENDING_SLOTS)] = 0.0
+        if not full_inputs:
+            mask[list(PENDING_INPUT_SLOTS)] = 0.0
         self.model.set_feature_stats(mean, std, mask)
-        dead = [i for i in ACTIVE_SLOTS if std[i] <= 1e-6 and i not in BRAIN_EXCLUDED_SLOTS]
+        dead = [i for i in ACTIVE_SLOTS if std[i] <= 1e-6 and i not in BRAIN_EXCLUDED_SLOTS
+                and (full_inputs or i not in PENDING_INPUT_SLOTS)]
         logger.info(
-            f"Feature stats: macro momentum inputs {'ON' if macro_on else 'OFF'} "
-            f"({live_share:.0%} of the sample has live macro data, need {MACRO_MIN_LIVE_SHARE:.0%})."
+            f"Feature stats: late inputs (RSI / EMA / volume / VWAP / ADX, macro, order book, cross-exchange, "
+            f"coin ranks, Coinbase / DVOL, calendar; {len(PENDING_INPUT_SLOTS)} slots) {'ON' if full_inputs else 'OFF'}: "
+            f"{complete_rows} complete records, need {MIN_FULL_INPUT_ROWS}"
+            + (" - training on complete records only." if full_inputs else ".")
         )
         logger.info(
             f"Feature stats fitted on {frames.shape[0]} frames: {int(mask.sum().item())} slots enabled, "
@@ -1050,7 +1059,10 @@ async def run_training_loop():
 
     # 2. PRIORITY #1: Load Cache into RAM FIRST (Unobstructed, zero DB lock contention)
     trainer_status.set_phase("loading training data")
-    trainer = PPOTrainer(model=model, limit=limit)
+    uses_late_inputs = bool(model.feat_fitted) and bool(model.feat_mask[list(PENDING_INPUT_SLOTS)].any())
+    if uses_late_inputs:
+        logger.info("Brain uses the late inputs: loading complete records only (saved from 21 Oct 2026 05:00 UTC).")
+    trainer = PPOTrainer(model=model, limit=limit, min_timestamp=FULL_INPUTS_SINCE if uses_late_inputs else 0.0)
     trainer.load_trainer_state()
     # Per-slot input scaling: fit once for models that predate it, or on request when new inputs come online
     import sys as _sys

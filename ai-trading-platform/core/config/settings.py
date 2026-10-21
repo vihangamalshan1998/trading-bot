@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     min_edge_cost_multiple: float = Field(default=2.0, ge=1.0)          # expected move must be >= 2x round-trip cost
     entry_cooldown_seconds: float = Field(default=600.0, ge=0.0)       # per-coin wait after ANY close before re-opening
     max_entries_per_hour: int = Field(default=6, ge=1)                # portfolio-wide new positions per rolling hour
+    experience_snapshot_seconds: float = Field(default=600.0, ge=60.0)  # one training record per coin every 10 min, whatever the bot decides (~2,600/day)
+    experience_retention_days: int = Field(default=21, ge=3)            # VPS keeps 3 weeks of records; the laptop trainer syncs them within minutes
     min_net_edge_hurdle_pct: float = Field(default=0.08, ge=0.0)        # 0.08% min net edge after fees, spread, slippage, and uncertainty penalty
     
     # Institutional Session Confidence Matrix (Middle Ground Calibration)

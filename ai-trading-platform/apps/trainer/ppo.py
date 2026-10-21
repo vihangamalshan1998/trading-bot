@@ -284,7 +284,17 @@ class PPOTrainer:
                 logger.error("PPO: Computed non-finite advantages or returns. Aborting update.")
                 return False
 
-            actor_advantages = advantages.mean(dim=1, keepdim=True)
+            # Directional Policy Advantage Alignment:
+            # - For LONG actions (+0.5): advantageous when market rises (positive returns).
+            # - For SHORT actions (-0.5): advantageous when market falls (negative returns -> positive advantage).
+            # - For HOLD actions (0.0): advantageous when market falls (preserving capital vs drawdown).
+            raw_advantages = advantages.mean(dim=1, keepdim=True)
+            dir_multiplier = torch.where(
+                actions[:, 0:1] < -0.1, -1.0,
+                torch.where(actions[:, 0:1] > 0.1, 1.0,
+                            torch.where(raw_advantages < 0.0, -0.3, 0.0))
+            )
+            actor_advantages = raw_advantages * dir_multiplier
             adv_mean = actor_advantages.mean()
             adv_std = actor_advantages.std(unbiased=False)
             

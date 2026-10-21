@@ -1398,12 +1398,14 @@ class ProductionTradingBot:
                         model_requested_size = (action_logits[2] + 1.0) / 2.0
 
                         # 2. Dynamic Conviction Multiplier:
-                        # High confidence (> 0.65) and strong positive expected return (> 0.08%) scale up position allocation
+                        # High confidence (> 0.65) and strong directional return (> 0.08%) scale up position allocation
                         conviction_mult = 1.0
                         if confidence > 0.65:
                             conviction_mult += (confidence - 0.65) * 1.5
-                        if pred_ret_5m > 0.08:
-                            conviction_mult += min(0.50, pred_ret_5m * 2.0)
+                        
+                        dir_expected_ret = -pred_ret_5m if action_val < -0.1 else pred_ret_5m
+                        if dir_expected_ret > 0.08:
+                            conviction_mult += min(0.50, dir_expected_ret * 2.0)
 
                         # 3. Dynamic target size bounded between 0.25 (minimum safety floor) and 1.0 (max budget)
                         effective_size = max(0.25, model_requested_size) * conviction_mult

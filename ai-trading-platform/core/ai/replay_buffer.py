@@ -366,17 +366,22 @@ class ReplayBuffer:
             fees = getattr(exp, "fees", 0.0) or 0.0
             actual_profit = net_return - fees
             
-            # Combine immediate trade net profit with 5m and 1h multi-horizon forward returns
-            if (actual_profit > 0 and r_5m >= 0) or (r_5m > 0 and r_1h > 0):
+            # Direction-aligned multi-horizon returns (Shorts profit when market drops)
+            is_short = "SHORT" in (exp.action or "")
+            dir_r_5m = -r_5m if is_short else r_5m
+            dir_r_1h = -r_1h if is_short else r_1h
+
+            # Combine immediate trade net profit with directional 5m and 1h multi-horizon forward returns
+            if (actual_profit > 0 and dir_r_5m >= 0) or (dir_r_5m > 0 and dir_r_1h > 0):
                 # Strong verified winner -> High confidence target [0.5 to 0.95]
-                raw_confidence = min(0.95, 0.4 + max(0.0, r_5m / 50.0))
-            elif actual_profit < 0 or (r_5m < 0 and r_1h < 0):
+                raw_confidence = min(0.95, 0.4 + max(0.0, dir_r_5m / 50.0))
+            elif actual_profit < 0 or (dir_r_5m < 0 and dir_r_1h < 0):
                 # Net loss or sustained drawdown -> Low confidence / skepticism target [-0.8 to -0.3]
-                raw_confidence = max(-0.8, -0.3 + min(0.0, r_5m / 50.0))
-            elif r_5m > 0:
+                raw_confidence = max(-0.8, -0.3 + min(0.0, dir_r_5m / 50.0))
+            elif dir_r_5m > 0:
                 # Moderate short-term scalp win -> Slight positive confidence
                 raw_confidence = 0.2
-            elif r_5m < 0:
+            elif dir_r_5m < 0:
                 # Mild negative drift
                 raw_confidence = -0.2
             else:
@@ -384,11 +389,11 @@ class ReplayBuffer:
                 raw_confidence = 0.0
                 
             # GROUND TARGET SIZE IN CONVICTION & OPPORTUNITY RETURN (Breaks the 25% circular feedback loop)
-            if (actual_profit > 0 and r_5m >= 0) or (r_5m > 0 and r_1h > 0):
+            if (actual_profit > 0 and dir_r_5m >= 0) or (dir_r_5m > 0 and dir_r_1h > 0):
                 # Strong verified winning setup -> train model to allocate dynamic size [0.35 to 0.85]
-                conviction_size = min(0.85, 0.35 + max(0.0, r_5m / 2.5))
+                conviction_size = min(0.85, 0.35 + max(0.0, dir_r_5m / 2.5))
                 raw_target_size = (conviction_size * 2.0) - 1.0
-            elif actual_profit < 0 or (r_5m < 0 and r_1h < 0):
+            elif actual_profit < 0 or (dir_r_5m < 0 and dir_r_1h < 0):
                 # Loser or adverse market drift -> train model to scale down to minimum floor [0.25]
                 raw_target_size = (0.25 * 2.0) - 1.0  # -0.50 policy space
             elif target_size > 0:

@@ -44,10 +44,16 @@ class TelegramNotifier:
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     return True
-                else:
-                    err = await resp.text()
-                    logger.error(f"Telegram API error {resp.status}: {err}")
-                    return False
+                err = await resp.text()
+                if "can't parse entities" in err:
+                    # A bare "<" in an alert (e.g. "< 15%") breaks HTML mode: deliver it as plain text instead
+                    payload.pop("parse_mode", None)
+                    async with session.post(url, json=payload) as retry:
+                        if retry.status == 200:
+                            return True
+                        err = await retry.text()
+                logger.error(f"Telegram API error {resp.status}: {err}")
+                return False
         except Exception as e:
             logger.error(f"Failed to send Telegram message: {e}")
             return False

@@ -58,6 +58,10 @@ class TelegramCommandCenter:
             ]
         }
 
+    def _authorized(self, sender_chat: str) -> bool:
+        """Commands can close every position: only the configured TELEGRAM_CHAT_ID may give them."""
+        return bool(self.chat_id) and str(sender_chat) == str(self.chat_id)
+
     async def send_message(self, text: str, reply_markup: Optional[Dict[str, Any]] = None, chat_id: Optional[str] = None):
         """Sends a message to the user."""
         target_chat = chat_id or self.chat_id
@@ -80,6 +84,13 @@ class TelegramCommandCenter:
             async with session.post(url, json=payload) as resp:
                 if resp.status != 200:
                     err = await resp.text()
+                    if "can't parse entities" in err:
+                        # A bare "<" in an alert (e.g. "< 15%") breaks HTML mode: deliver it as plain text instead
+                        payload.pop("parse_mode", None)
+                        async with session.post(url, json=payload) as retry:
+                            if retry.status == 200:
+                                return
+                            err = await retry.text()
                     logger.error(f"Telegram sendMessage failed: {err}")
         except Exception as e:
             logger.error(f"Error sending Telegram message: {e}")
@@ -347,7 +358,10 @@ class TelegramCommandCenter:
                                 cb = update["callback_query"]
                                 cb_id = cb["id"]
                                 action = cb.get("data", "")
-                                sender_chat = str(cb.get("message", {}).get("chat", {}).get("id", self.chat_id))
+                                sender_chat = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+                                if not self._authorized(sender_chat):
+                                    logger.warning(f"Ignored Telegram button '{action}' from unauthorized chat {sender_chat}.")
+                                    continue
                                 
                                 logger.info(f"Received Telegram Button Tap: {action}")
                                 await self.answer_callback_query(cb_id, "Processing...")
@@ -371,7 +385,10 @@ class TelegramCommandCenter:
                             elif "message" in update and "text" in update["message"]:
                                 msg = update["message"]
                                 text = msg.get("text", "").strip()
-                                sender_chat = str(msg.get("chat", {}).get("id", self.chat_id))
+                                sender_chat = str(msg.get("chat", {}).get("id", ""))
+                                if not self._authorized(sender_chat):
+                                    logger.warning(f"Ignored Telegram command '{text[:40]}' from unauthorized chat {sender_chat}.")
+                                    continue
                                 
                                 if text.startswith("/start") or text.startswith("/help"):
                                     await self.handle_status_command(sender_chat)

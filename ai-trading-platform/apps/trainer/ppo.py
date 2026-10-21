@@ -963,6 +963,39 @@ class PPOTrainer:
             logger.exception(f"Error during candidate tournament evaluation: {e!r}")
             return {"approved": False, "reason": f"EXCEPTION_{e!r}"}
 
+VPS_HOST = os.getenv("VPS_SSH_HOST", "root@72.62.255.1")
+VPS_MODEL_DIR = "/var/www/trading-bot/ai-trading-platform/models/production"
+
+
+def push_champion_to_vps(version_tag: str) -> bool:
+    """
+    Uploads the champion to a temporary folder on the VPS, then renames all files into place with ONE ssh
+    command: version.json first, model_v1.pt last. The bot hot-reloads when model_v1.pt changes, so it
+    always finds the matching trade policy, and it can never read a half-uploaded model.
+    """
+    import subprocess
+    tmp = f"{VPS_MODEL_DIR}/.upload"
+    local = ["models/production/version.json", "models/production/tournament_history.json", "models/production/model_v1.pt"]
+    steps = [
+        ["ssh", VPS_HOST, f"mkdir -p {tmp}"],
+        ["scp", "-q", *local, f"{VPS_HOST}:{tmp}/"],
+        ["ssh", VPS_HOST, f"cd {VPS_MODEL_DIR} && mv {tmp}/version.json version.json && "
+                          f"mv {tmp}/tournament_history.json tournament_history.json && mv {tmp}/model_v1.pt model_v1.pt"],
+    ]
+    for cmd in steps:
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except Exception as e:
+            logger.error(f"VPS push of {version_tag} FAILED ({cmd[0]}): {e}. The VPS keeps its previous brain.")
+            return False
+        if res.returncode != 0:
+            logger.error(f"VPS push of {version_tag} FAILED ({cmd[0]} exit {res.returncode}): {(res.stderr or '').strip()[:300]}. "
+                         f"The VPS keeps its previous brain.")
+            return False
+    logger.info(f"✅ VPS push of {version_tag} complete: the live bot hot-reloads it within seconds.")
+    return True
+
+
 async def run_training_loop():
     set_log_file("logs/ai_trainer.log")
     logger.info("Initializing PPO Training Engine...")
@@ -1221,31 +1254,13 @@ async def run_training_loop():
                             logger.error(f"Promotion gate rejected candidate {version_tag}.")
                             continue
                         
-                        if local_mode and (time.time() - last_push_time > 300):
-                            logger.info(f"🚀 Pushing evaluated Brain ({version_tag}) to VPS in the background ({push_count}/150)...")
+                        if local_mode:
+                            # Every promoted champion goes to the VPS (a skipped push left laptop and VPS on
+                            # different champions). Background thread: training continues while it uploads.
+                            logger.info(f"🚀 Pushing evaluated Brain ({version_tag}) to VPS in the background...")
                             last_push_time = time.time()
-                            import subprocess
-                            subprocess.Popen(
-                                ["scp", "models/production/model_v1.pt", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/model_v1.pt"],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL
-                            )
-                            subprocess.Popen(
-                                ["scp", "models/production/version.json", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/version.json"],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL
-                            )
-                            subprocess.Popen(
-                                ["scp", "models/production/tournament_history.json", "root@72.62.255.1:/var/www/trading-bot/ai-trading-platform/models/production/tournament_history.json"],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL
-                            )
-                            
-                            # Auto-Shutdown after 150 successful pushes
-                            if push_count >= 150:
-                                logger.info("✅ Successfully completed 150 Brain pushes. Auto-shutting down Master Trainer!")
-                                import sys
-                                sys.exit(0)
+                            import threading
+                            threading.Thread(target=push_champion_to_vps, args=(version_tag,), daemon=True).start()
                         
                         # Schedule model update broadcast
                         try:

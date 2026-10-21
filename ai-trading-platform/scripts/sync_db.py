@@ -33,8 +33,22 @@ def sync_experiences():
     except Exception as e:
         logger.error(f"REMOTE VPS Database Connection error: {e}")
         logger.error("Make sure the SSH tunnel is open and the VPS database password matches!")
+        local_conn.close()
         return
 
+    # Runs every ~30s around the clock: both connections must close on every path (errors included),
+    # otherwise a long tunnel outage piles up open MySQL connections.
+    try:
+        _sync_rows(local_conn, remote_conn)
+    finally:
+        for conn in (local_conn, remote_conn):
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _sync_rows(local_conn, remote_conn):
     with local_conn.cursor() as local_cursor, remote_conn.cursor(pymysql.cursors.DictCursor) as remote_cursor:
         while True:
             # Get the highest ID we currently have on the laptop
@@ -104,9 +118,6 @@ def sync_experiences():
             
             if updated_count > 0:
                 logger.info(f"Successfully synced {updated_count} delayed rewards from VPS to Laptop!")
-
-    local_conn.close()
-    remote_conn.close()
 
 if __name__ == "__main__":
     print("===================================")

@@ -1397,13 +1397,28 @@ class ProductionTradingBot:
                     await asyncio.sleep(3.0)
                     continue
 
-                # 0. Hot Reload Model
+                # 0. Hot Reload Model (a failed load keeps the current brain and retries next tick: an error
+                #    here used to halt the whole bot via FAIL CLOSED)
                 if self.registry.check_for_updates():
                     logger.info("New model version detected. Hot reloading...")
-                    self.model = self.registry.load_model(self.model)
-                    self.model.eval()
-                    self._refresh_actor_signal_offset()
-                    logger.info("Hot reload complete.")
+                    try:
+                        self.model = self.registry.load_model(self.model)
+                        self.model.eval()
+                        self.has_valid_model = True
+                        self._refresh_actor_signal_offset()
+                        logger.info("Hot reload complete.")
+                    except Exception as reload_err:
+                        logger.error(f"Hot reload failed, keeping the current brain: {reload_err}")
+                # Trade policy (min confidence, calibration, signal offset) lives in version.json: re-read it
+                # whenever that file changes, not only when the weights do.
+                try:
+                    v_mtime = os.path.getmtime(os.path.join(self.registry.model_dir, "version.json"))
+                except OSError:
+                    v_mtime = 0.0
+                if v_mtime and v_mtime != getattr(self, "_version_mtime", 0.0):
+                    if getattr(self, "_version_mtime", 0.0):
+                        self._refresh_actor_signal_offset()
+                    self._version_mtime = v_mtime
 
                 now_t = time.time()
                 # 0.1 Dynamic Universe Synchronization: Integrate hot coins from UniverseScreener

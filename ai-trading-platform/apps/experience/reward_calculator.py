@@ -58,6 +58,14 @@ class KlinePriceSource:
     def _covered(self, symbol: str, start_ms: int, end_ms: int) -> bool:
         return any(s <= start_ms and end_ms <= e for s, e in self.fetched_ranges[symbol])
 
+    def prune(self, keep_after_ms: int):
+        """Drops cached candles older than keep_after_ms (the service runs for weeks; the cache only grew)."""
+        for symbol, candles in self.cache.items():
+            for k in [k for k in candles if k < keep_after_ms]:
+                del candles[k]
+        for symbol in list(self.fetched_ranges):
+            self.fetched_ranges[symbol] = [(s, e) for s, e in self.fetched_ranges[symbol] if s >= keep_after_ms]
+
     def ensure(self, symbol: str, start_ms: int, end_ms: int):
         if not self._covered(symbol, start_ms, end_ms):
             self._fetch(symbol, start_ms, end_ms)
@@ -110,6 +118,9 @@ class RewardCalculator:
         try:
             # Grade only once the full 4h horizon (+ 30 min margin) is in the past
             safe_cutoff = int(time.time()) - (HORIZONS_SEC[-1] + 1800)
+            if time.time() - getattr(self, "_last_prune", 0.0) > 3600:
+                self._last_prune = time.time()
+                self.prices.prune(int((time.time() - 2 * 86400) * 1000))
 
             with self.SessionLocal() as session:
                 # Light-weight column query: never load the 300x200 market_state JSON here.
@@ -133,7 +144,15 @@ class RewardCalculator:
                     try:
                         self.prices.ensure(symbol, t_min * 1000 - KLINE_MS, (t_max + HORIZONS_SEC[-1]) * 1000 + 3 * KLINE_MS)
                     except Exception as e:
-                        logger.warning(f"Reward Calculator: kline fetch failed for {symbol}: {e}. Will retry later.")
+                        if t_max < time.time() - 3 * 86400:
+                            # Prices for these rows are not coming back. Left ungraded, they would fill every
+                            # id-ordered batch and stop grading for all other coins.
+                            for r in sym_rows:
+                                session.execute(update(t).where(t.c.id == r.id).values(data_quality_flags=UNGRADEABLE_FLAG))
+                            failed += len(sym_rows)
+                            logger.warning(f"Reward Calculator: no klines for {symbol} rows older than 3 days ({e}); flagged {UNGRADEABLE_FLAG}.")
+                        else:
+                            logger.warning(f"Reward Calculator: kline fetch failed for {symbol}: {e}. Will retry later.")
                         continue
 
                     for r in sym_rows:

@@ -57,13 +57,19 @@ class BinanceWebSocketCollector:
             
             # The returned array is the 90-dim Phase 3 Market State
             ai_features_array = engine.compute_features().tolist()
-            
+
+            # raw["mid_price"] is whichever came last: a trade price (at the bid or the ask) or the book mid, so it
+            # jumps by half the spread. The engine keeps that series (the brain was trained on it), but the bot
+            # prices stops, PnL and orders off mid_price, so publish the true book mid there.
+            bid, ask = raw["best_bid"], raw["best_ask"]
+            book_mid = (bid + ask) / 2.0 if bid > 0 and ask >= bid else raw["mid_price"]
+
             payload = {
                 "symbol": symbol,
                 "timestamp": time.time(),
                 "bid": raw["best_bid"] or raw["mid_price"],
                 "ask": raw["best_ask"] or raw["mid_price"],
-                "mid_price": raw["mid_price"],
+                "mid_price": book_mid,
                 "last_price": raw["mid_price"],
                 "spread": max(0.0, raw["best_ask"] - raw["best_bid"]),
                 "order_book_imbalance": raw["ob_skew_l2"],

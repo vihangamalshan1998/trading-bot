@@ -60,7 +60,11 @@ class ReplayBuffer:
                 self._write_count = 0
             self._write_count += 1
         except Exception as e:
-            pass
+            # Never silent: a failed insert is a lost training record (the storage service logged
+            # "Stored experience" for rows that were never written). Re-raised so the caller sees it.
+            from core.logging.logger import logger
+            logger.error(f"Experience insert FAILED ({exp_data.get('symbol')}, id {exp_data.get('experience_id')}): {e}")
+            raise
 
             
     def load_cache_from_db(self, limit: int = 10000):

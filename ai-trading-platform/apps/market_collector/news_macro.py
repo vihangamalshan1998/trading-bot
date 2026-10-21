@@ -1,3 +1,4 @@
+import math
 import asyncio
 import json
 import time
@@ -53,6 +54,18 @@ def aggregate_headline_scores(cache: dict, titles: list, n_new: int = 0) -> tupl
     source = f"{n_gemini}/{len(rows)} Gemini, {n_new} newly scored"
     return round(max(-1.0, min(1.0, sentiment)), 4), round(max(0.0, min(1.0, volatility)), 4), source
 
+
+
+def _day_momentum(hist) -> float:
+    """Last daily change of a yfinance history, ignoring NaN closes; 0.0 when unavailable."""
+    try:
+        closes = hist["Close"].dropna()
+        if len(closes) >= 2 and float(closes.iloc[-2]) != 0.0:
+            v = float((closes.iloc[-1] - closes.iloc[-2]) / closes.iloc[-2])
+            return v if math.isfinite(v) else 0.0
+    except Exception:
+        pass
+    return 0.0
 
 class NewsMacroCollector:
     """
@@ -232,18 +245,14 @@ class NewsMacroCollector:
             tn_hist = tickers.tickers["^TNX"].history(period="5d")
             nx_hist = tickers.tickers["^NDX"].history(period="5d")
             
-            if len(sp_hist) >= 2:
-                sp500_mom = (sp_hist['Close'].iloc[-1] - sp_hist['Close'].iloc[-2]) / sp_hist['Close'].iloc[-2]
-            if len(dx_hist) >= 2:
-                dxy_mom = (dx_hist['Close'].iloc[-1] - dx_hist['Close'].iloc[-2]) / dx_hist['Close'].iloc[-2]
-            if len(vx_hist) >= 2:
-                vix_mom = (vx_hist['Close'].iloc[-1] - vx_hist['Close'].iloc[-2]) / vx_hist['Close'].iloc[-2]
-            if len(gl_hist) >= 2:
-                gold_mom = (gl_hist['Close'].iloc[-1] - gl_hist['Close'].iloc[-2]) / gl_hist['Close'].iloc[-2]
-            if len(tn_hist) >= 2:
-                tnx_mom = (tn_hist['Close'].iloc[-1] - tn_hist['Close'].iloc[-2]) / tn_hist['Close'].iloc[-2]
-            if len(nx_hist) >= 2:
-                ndx_mom = (nx_hist['Close'].iloc[-1] - nx_hist['Close'].iloc[-2]) / nx_hist['Close'].iloc[-2]
+            # Latest bars can have a NaN close (market still open / partial data): one NaN used to fail
+            # MacroState validation and drop the whole cycle (news, Fear & Greed, every macro input).
+            sp500_mom = _day_momentum(sp_hist)
+            dxy_mom = _day_momentum(dx_hist)
+            vix_mom = _day_momentum(vx_hist)
+            gold_mom = _day_momentum(gl_hist)
+            tnx_mom = _day_momentum(tn_hist)
+            ndx_mom = _day_momentum(nx_hist)
         except Exception as e:
             logger.warning(f"yfinance fetch failed: {e}")
             

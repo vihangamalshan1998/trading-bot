@@ -842,6 +842,9 @@ class PPOTrainer:
 async def run_training_loop():
     set_log_file("logs/ai_trainer.log")
     logger.info("Initializing PPO Training Engine...")
+    # Dashboard heartbeat from launch on (loading the replay cache alone can take ~10 minutes)
+    trainer_status.set_phase("starting")
+    trainer_status.start_heartbeat()
     
     # We need to initialize the model first
     from core.config.settings import settings
@@ -913,13 +916,20 @@ async def run_training_loop():
                 logger.error(f"Failed to create backup: {e}")
 
     # 2. PRIORITY #1: Load Cache into RAM FIRST (Unobstructed, zero DB lock contention)
+    trainer_status.set_phase("loading training data")
     trainer = PPOTrainer(model=model, limit=limit)
     trainer.load_trainer_state()
     # Per-slot input scaling: fit once for models that predate it, or on request when new inputs come online
     import sys as _sys
     if not bool(model.feat_fitted) or "--refit-feature-stats" in _sys.argv:
+        trainer_status.set_phase("fitting input scaling")
         trainer.fit_feature_stats()
     logger.info("Starting continuous PPO training on historical/live data...")
+    trainer_status.set_phase(
+        "training",
+        step_fn=lambda: getattr(trainer, "step_count", 0),
+        extra_fn=lambda: {"train_rows": len(trainer.buffer.cache), "holdout_rows": len(trainer.buffer.holdout_cache)},
+    )
 
     # 3. PRIORITY #2: Start DB Auto-Syncer & Golden Extractor in background thread AFTER cache is in RAM
     if local_mode:
@@ -980,20 +990,7 @@ async def run_training_loop():
                         
                     time.sleep(30) # Check for new trades every 30 seconds
 
-            def heartbeat():
-                # Own thread: a long grading cycle must not let the dashboard's 10-minute keys expire
-                # (the trainer's log used to vanish from the dashboard and come back after each cycle).
-                while True:
-                    try:
-                        trainer_status.publish(getattr(trainer, "step_count", 0), {
-                            "train_rows": len(trainer.buffer.cache), "holdout_rows": len(trainer.buffer.holdout_cache),
-                        })
-                    except Exception:
-                        pass
-                    time.sleep(30)
-
             threading.Thread(target=background_syncer, daemon=True).start()
-            threading.Thread(target=heartbeat, daemon=True).start()
         except Exception as e:
             logger.error(f"Could not start background syncer: {e}")
     
@@ -1048,7 +1045,9 @@ async def run_training_loop():
                 trainer.save_trainer_state()
                 logger.info(f"💾 Saved candidate checkpoint: {cand_step_path}")
                 
+                trainer_status.set_phase("running tournament")
                 eval_result = trainer.evaluate_candidate(sample_size=1000)
+                trainer_status.set_phase("training")
                 
                 if not eval_result.get("approved", False):
                     logger.warning(f"Candidate brain REJECTED by evaluation gate: {eval_result.get('reason')}. Continuing training without resetting weights (Saved at {cand_step_path})...")
@@ -1105,7 +1104,9 @@ async def run_training_loop():
                     
                 # Refresh cache AFTER saving, so the GC freeze doesn't block the actual deployment
                 logger.info("Refreshing RAM cache from DB (this may take a minute)...")
+                trainer_status.set_phase("reloading training data")
                 trainer.buffer.load_cache_from_db(limit=limit)
+                trainer_status.set_phase("training")
                 
                 # Auto-delete data older than 30 days to save VPS disk space
                 if step % 1000 == 0:

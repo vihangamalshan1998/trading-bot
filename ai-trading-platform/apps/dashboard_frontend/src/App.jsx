@@ -8,6 +8,9 @@ const F = { RET_24H: 6, DEPTH_IMB_01: 25, DEPTH_IMB_1: 26, FUNDING: 80, LS_RATIO
 const ROUND_TRIP_FEE = 0.0007 // maker entry 0.02% + taker exit 0.05%
 const HORIZON_W = [0.1, 0.6, 0.3] // exit_policy.HORIZON_WEIGHTS: blended 1-4h expected move
 const TRAINER = 'ai-trainer'
+// What the laptop trainer is doing (its heartbeat starts at launch, before the ~10 min data load)
+const phaseLabel = (p) => ({ starting: 'Starting up', 'loading training data': 'Loading data…', 'fitting input scaling': 'Fitting inputs…',
+  'running tournament': 'Tournament…', 'reloading training data': 'Reloading data…' }[p] || 'Training')
 
 // ---------------------------------------------------------------- helpers
 const fmtPct = (v, d = 2) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(d)}%`
@@ -234,7 +237,7 @@ const Overview = ({ ctx }) => {
           value={pm2.length ? `${pm2.length - down.length} of ${pm2.length} running` : '—'}
           note={down.length ? `Down: ${down.map((s) => s.name).join(', ')}` : 'All healthy'} />
         <StatusTile icon="cpu" color={trainer?.status === 'online' ? 'green' : 'red'} label="Trainer (laptop)"
-          value={trainer?.status === 'online' ? 'Training' : 'Not reporting'}
+          value={trainer?.status === 'online' ? phaseLabel(trainer.phase) : 'Not reporting'}
           note={trainer?.status === 'online' ? `Seen ${trainer.last_seen_s}s ago` : 'Start MASTER_TRAINER on the laptop'} />
       </div>
 
@@ -458,7 +461,7 @@ const Brain = ({ ctx }) => {
     <>
       <div className="grid cols-4">
         <StatusTile icon="brain" color={champ.is_v3 ? 'green' : 'amber'} label="Live brain" value={champ.version || '—'} note={champ.is_v3 ? 'Passed the honest after-fees test' : 'Old brain: never passed the new test'} />
-        <StatusTile icon="cpu" color={trainerAge != null && trainerAge < 180 ? 'green' : 'red'} label="Trainer" value={trainerAge != null && trainerAge < 180 ? `Step ${trainer.step}` : 'Not reporting'} note={trainer ? `Last heartbeat ${ago(trainer.timestamp)} · ${trainer.host || ''}` : 'Start MASTER_TRAINER on the laptop'} />
+        <StatusTile icon="cpu" color={trainerAge != null && trainerAge < 180 ? 'green' : 'red'} label="Trainer" value={trainerAge != null && trainerAge < 180 ? ((trainer.phase || 'training') === 'training' ? `Step ${trainer.step}` : phaseLabel(trainer.phase)) : 'Not reporting'} note={trainer ? `Last heartbeat ${ago(trainer.timestamp)} · ${trainer.host || ''}` : 'Start MASTER_TRAINER on the laptop'} />
         <StatusTile icon="check" color={winners ? 'green' : 'blue'} label="Tournaments" value={`${rows.length} run · ${winners} won`} note="One tournament every 100 training steps" />
         <StatusTile icon="trades" color={best != null && best > 0 ? 'green' : 'amber'} label="Best new brain so far" value={best != null ? `${best.toFixed(4)}% / decision` : '—'} note="Above 0 = profit after fees on unseen data" />
       </div>
@@ -867,7 +870,7 @@ const Services = ({ ctx }) => {
                 <div className="svc-name">{s.name}</div>
                 <div className="svc-meta">
                   {s.remote
-                    ? (s.status === 'online' ? `seen ${s.last_seen_s}s ago` : s.status.replace('-', ' '))
+                    ? (s.status === 'online' ? `${phaseLabel(s.phase).toLowerCase()} · seen ${s.last_seen_s}s ago` : s.status.replace('-', ' '))
                     : `${s.status} · up ${duration(s.uptime_since)}${s.cpu != null ? ` · ${s.cpu}% CPU` : ''}${s.memory_mb ? ` · ${s.memory_mb} MB` : ''}`}
                 </div>
                 {describe[s.name] && <div className="svc-meta faint">{describe[s.name]}</div>}

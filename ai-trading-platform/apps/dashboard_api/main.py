@@ -369,7 +369,8 @@ async def get_services():
         age = time.time() - float(trainer.get("timestamp", 0) or 0)
         services.append({"name": TRAINER_SERVICE, "status": "online" if age < 180 else "silent",
                          "restarts": 0, "uptime_since": trainer.get("started_at"), "cpu": None, "memory_mb": None,
-                         "remote": True, "host": trainer.get("host"), "last_seen_s": round(age)})
+                         "remote": True, "host": trainer.get("host"), "last_seen_s": round(age),
+                         "phase": trainer.get("phase", "training")})
     elif not any(s["name"] in (TRAINER_SERVICE, "ai-trainer") for s in services):
         services.append({"name": TRAINER_SERVICE, "status": "not-reporting", "restarts": 0, "uptime_since": None,
                          "cpu": None, "memory_mb": None, "remote": True})
@@ -388,7 +389,8 @@ async def get_service_logs(service: str, stream: str = "out", lines: int = 500):
         if tail:
             return {"logs": tail[-lines:], "source": "redis (laptop trainer)", "ok": True}
         local = os.path.join("logs", "ai_trainer.log")
-        if os.path.exists(local):
+        # Local file only when it is live (dashboard run on the laptop); on the VPS it is an old leftover
+        if os.path.exists(local) and time.time() - os.path.getmtime(local) < 600:
             return {"logs": await asyncio.to_thread(_tail, local, lines), "source": local, "ok": True}
         return {"logs": ["The laptop trainer is not reporting. Start MASTER_TRAINER (its SSH tunnel carries the log here)."], "source": None, "ok": False}
     path = await asyncio.to_thread(_resolve_log, service, stream)

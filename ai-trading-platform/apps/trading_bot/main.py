@@ -31,6 +31,8 @@ from core.ai.liquidation_cascade_hunter import liquidation_hunter, LiquidationSi
 from core.risk.beta_hedger import beta_hedger
 from core.telemetry.telegram_service import telegram_notifier
 
+ENTRY_GUARD_KEY = "bot:entry_guard"  # hourly entry cap + per-coin cooldowns, kept across restarts
+
 class ProductionTradingBot:
     """
     Phase 1: Safe Execution Engine with Canonical Schemas.
@@ -122,6 +124,7 @@ class ProductionTradingBot:
         self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
         self.last_close_time = {sym: 0.0 for sym in self.symbols} # Cooldown tracking per symbol
         self.recent_entry_times = collections.deque()  # new-position timestamps for the hourly entry cap
+        self._saved_entry_guard = None  # last entry-guard state written to Redis (survives restarts)
         self.position_entry_times = {sym: 0.0 for sym in self.symbols} # Minimum holding tracking per symbol
         self.peak_pnl_pct = {sym: 0.0 for sym in self.symbols} # Peak leveraged PnL tracking for trailing profit locks
         self.pnl_history = {sym: collections.deque(maxlen=30) for sym in self.symbols} # (timestamp, pnl_pct_leveraged) for velocity shock detection
@@ -163,6 +166,36 @@ class ProductionTradingBot:
         while self.recent_entry_times and self.recent_entry_times[0] < cutoff:
             self.recent_entry_times.popleft()
         return len(self.recent_entry_times)
+
+    async def _load_entry_guard(self):
+        """Restores the hourly entry count and per-coin cooldowns, so a restart does not open a burst of trades."""
+        try:
+            raw = await self.redis.redis.get(ENTRY_GUARD_KEY) if self.redis.redis else None
+            if not raw:
+                return
+            data = json.loads(raw)
+            cutoff = time.time() - 3600.0
+            self.recent_entry_times.extend(sorted(float(t) for t in data.get("entries", []) if float(t) >= cutoff))
+            for sym, t in (data.get("last_close") or {}).items():
+                self.last_close_time[sym] = max(self.last_close_time.get(sym, 0.0), float(t))
+            logger.info(f"Restored entry guard: {len(self.recent_entry_times)} entries in the last hour, "
+                        f"{len(data.get('last_close') or {})} coin cooldowns.")
+        except Exception as e:
+            logger.warning(f"Could not restore entry guard: {e}")
+
+    async def _save_entry_guard(self):
+        state = {
+            "entries": list(self.recent_entry_times),
+            "last_close": {s: t for s, t in self.last_close_time.items() if t > time.time() - 7200.0},
+        }
+        if state == self._saved_entry_guard:
+            return
+        try:
+            if self.redis.redis:
+                await self.redis.redis.set(ENTRY_GUARD_KEY, json.dumps(state), ex=7200)
+                self._saved_entry_guard = state
+        except Exception as e:
+            logger.warning(f"Could not save entry guard: {e}")
 
     def _refresh_actor_signal_offset(self):
         """
@@ -2171,7 +2204,7 @@ class ProductionTradingBot:
                                     
                                     # Pre-capture entry price BEFORE sending the order to avoid race conditions with market fill
                                     entry_px = self.portfolio_state.positions[sym].entry_price if sym in self.portfolio_state.positions else 0.0
-                                    pos_leverage = self.portfolio_state.positions[sym].leverage if sym in self.portfolio_state.positions else 10
+                                    pos_leverage = settings.max_leverage  # set on Binance just above, before every order
                                     
                                     # Always fetch authoritative Binance live position entry price before sending close order
                                     if "CLOSE" in side and self.trading_enabled and not self.dry_run:
@@ -2662,7 +2695,8 @@ class ProductionTradingBot:
                 logger.critical(f"FAIL CLOSED: Critical error in inference loop: {e}")
                 self.running = False # Halt the bot immediately
                 raise RuntimeError(f"FAIL CLOSED: Inference loop error: {e}")
-                
+
+            await self._save_entry_guard()
             await asyncio.sleep(5.0)
             
     async def monitor_kill_switch(self):
@@ -2879,7 +2913,9 @@ class ProductionTradingBot:
                     await self.panic_liquidate()
         except Exception as ks_err:
             logger.error(f"Failed to check initial kill switch: {ks_err}")
-        
+
+        await self._load_entry_guard()
+
         tasks = [
             asyncio.create_task(self.listen_macro()),
             asyncio.create_task(self.inference_loop()),

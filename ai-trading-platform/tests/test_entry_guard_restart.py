@@ -23,6 +23,7 @@ def _bot(redis):
     b.recent_entry_times = collections.deque()
     b.last_close_time = {"BTCUSDT": 0.0, "ETHUSDT": 0.0}
     b._saved_entry_guard = None
+    b._entry_guard_loaded = False
     return b
 
 
@@ -59,3 +60,24 @@ def test_missing_or_broken_state_starts_clean():
 
     b, empty = asyncio.run(run())
     assert b._entries_last_hour() == 0 and empty._entries_last_hour() == 0
+
+
+def test_late_redis_merges_instead_of_overwriting_and_never_double_counts():
+    redis = FakeRedis()
+    now = time.time()
+
+    async def run():
+        before = _bot(redis)
+        before.recent_entry_times.extend([now - 300, now - 200])
+        await before._save_entry_guard()
+
+        after = _bot(None)                      # restarted bot, Redis not connected yet
+        await after._load_entry_guard()         # skipped
+        after.recent_entry_times.append(now - 10)
+        after.redis = SimpleNamespace(redis=redis)
+        for _ in range(3):                      # inference ticks
+            await after._save_entry_guard()
+        return after
+
+    after = asyncio.run(run())
+    assert after._entries_last_hour() == 3

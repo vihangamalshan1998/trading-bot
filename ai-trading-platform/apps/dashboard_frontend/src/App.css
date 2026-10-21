@@ -223,6 +223,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .pos-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .pos-card .kv { background: var(--surface); }
 .pos-card .kv-grid { grid-template-columns: 1fr 1fr; }
+.pos-card .kv-value { white-space: normal; text-overflow: clip; }  /* show "-$36.55 (-5.7%)" in full on narrow cards */
 
 /* ---------- services & logs ---------- */
 .svc-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 20px; align-items: start; }

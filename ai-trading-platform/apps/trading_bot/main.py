@@ -125,6 +125,7 @@ class ProductionTradingBot:
         self.last_close_time = {sym: 0.0 for sym in self.symbols} # Cooldown tracking per symbol
         self.recent_entry_times = collections.deque()  # new-position timestamps for the hourly entry cap
         self._saved_entry_guard = None  # last entry-guard state written to Redis (survives restarts)
+        self._entry_guard_loaded = False
         self.position_entry_times = {sym: 0.0 for sym in self.symbols} # Minimum holding tracking per symbol
         self.peak_pnl_pct = {sym: 0.0 for sym in self.symbols} # Peak leveraged PnL tracking for trailing profit locks
         self.pnl_history = {sym: collections.deque(maxlen=30) for sym in self.symbols} # (timestamp, pnl_pct_leveraged) for velocity shock detection
@@ -169,13 +170,18 @@ class ProductionTradingBot:
 
     async def _load_entry_guard(self):
         """Restores the hourly entry count and per-coin cooldowns, so a restart does not open a burst of trades."""
+        if self._entry_guard_loaded or not self.redis.redis:
+            return
         try:
-            raw = await self.redis.redis.get(ENTRY_GUARD_KEY) if self.redis.redis else None
+            raw = await self.redis.redis.get(ENTRY_GUARD_KEY)
+            self._entry_guard_loaded = True
             if not raw:
                 return
             data = json.loads(raw)
             cutoff = time.time() - 3600.0
-            self.recent_entry_times.extend(sorted(float(t) for t in data.get("entries", []) if float(t) >= cutoff))
+            known = set(self.recent_entry_times)
+            restored = sorted(float(t) for t in data.get("entries", []) if float(t) >= cutoff and float(t) not in known)
+            self.recent_entry_times = collections.deque(sorted(list(self.recent_entry_times) + restored))
             for sym, t in (data.get("last_close") or {}).items():
                 self.last_close_time[sym] = max(self.last_close_time.get(sym, 0.0), float(t))
             logger.info(f"Restored entry guard: {len(self.recent_entry_times)} entries in the last hour, "
@@ -184,6 +190,9 @@ class ProductionTradingBot:
             logger.warning(f"Could not restore entry guard: {e}")
 
     async def _save_entry_guard(self):
+        await self._load_entry_guard()   # no-op once done; never overwrite stored state that was not read yet
+        if not self._entry_guard_loaded:
+            return
         state = {
             "entries": list(self.recent_entry_times),
             "last_close": {s: t for s, t in self.last_close_time.items() if t > time.time() - 7200.0},
@@ -191,9 +200,8 @@ class ProductionTradingBot:
         if state == self._saved_entry_guard:
             return
         try:
-            if self.redis.redis:
-                await self.redis.redis.set(ENTRY_GUARD_KEY, json.dumps(state), ex=7200)
-                self._saved_entry_guard = state
+            await self.redis.redis.set(ENTRY_GUARD_KEY, json.dumps(state), ex=7200)
+            self._saved_entry_guard = state
         except Exception as e:
             logger.warning(f"Could not save entry guard: {e}")
 
@@ -2899,6 +2907,12 @@ class ProductionTradingBot:
                 self.portfolio_state.equity = 1000.0
                 self.portfolio_state.free_margin = 1000.0
                 logger.info("Using mock 1000 USDT balance for Dry Run.")
+
+        # Redis must be up before the startup checks below (it was otherwise only connected later by the listener tasks)
+        try:
+            await self.redis.connect()
+        except Exception as e:
+            logger.error(f"Redis connect at startup failed: {e}")
 
         # Check if kill switch is active at startup
         try:

@@ -1386,12 +1386,19 @@ class ProductionTradingBot:
                         pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
                         pred_ret_4h = float(critic_vals[2]) if critic_vals is not None and len(critic_vals) > 2 else pred_ret_1h
 
-                        # Actor-Critic Directional Fusion & Zero-Point Calibration:
-                        # 1. The Actor head has a historical zero-state bias of ~+0.30.
-                        # 2. Integrate the Critic's objective multi-horizon return forecast to drive symmetric directional conviction.
-                        # When Critic is heavily negative (e.g. -1.5%), it pulls action_val cleanly into SHORT territory (< -0.20).
-                        critic_impulse = float(np.clip(pred_ret_5m / 2.0, -0.40, 0.40))
-                        action_val = float(np.clip((raw_action_val - 0.30) + critic_impulse, -1.0, 1.0))
+                        # Actor-Critic Directional Fusion:
+                        # 1. The Critic head provides an objective regression forecast of multi-horizon price returns.
+                        # 2. When Critic has directional conviction (|pred_ret_5m| >= 0.15%), its forecast drives the thesis.
+                        # 3. When Critic is flat (|pred_ret_5m| < 0.15%), Actor execution policy modulates the state.
+                        critic_signal = float(np.clip(pred_ret_5m / 1.5, -0.80, 0.80))
+                        actor_signal = float(np.clip(raw_action_val - 0.50, -0.50, 0.50))
+                        
+                        if pred_ret_5m <= -0.15:
+                            action_val = float(np.clip(critic_signal + min(0.0, actor_signal), -1.0, -0.25))
+                        elif pred_ret_5m >= 0.15:
+                            action_val = float(np.clip(critic_signal + max(0.0, actor_signal), 0.25, 1.0))
+                        else:
+                            action_val = float(np.clip(actor_signal + critic_signal, -1.0, 1.0))
 
                         # Dynamic Conviction-Scaled Position Sizing (Unlocks dynamic sizes beyond 25% floor):
                         # 1. Base model requested preference [0.0 to 1.0]

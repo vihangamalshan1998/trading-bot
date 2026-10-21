@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import time
 import urllib.parse
+from decimal import Decimal
 from typing import Dict, Any, List, Optional
 from core.config.settings import settings
 from core.logging.logger import logger
@@ -26,7 +27,8 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         
         self.listen_key = None
         self.ws_connection = None
-        
+        self._market_max_qty_cache: Optional[Dict[str, Decimal]] = None
+
     async def connect(self):
         if self.session is None:
             self.session = aiohttp.ClientSession(
@@ -110,13 +112,64 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         params = {"symbol": symbol}
         return await self._request("GET", "/fapi/v1/openOrders", signed=True, params=params)
         
+    async def _market_max_qty(self, symbol: str) -> Optional[Decimal]:
+        """Largest quantity Binance accepts in one MARKET order (MARKET_LOT_SIZE.maxQty), loaded once."""
+        if self._market_max_qty_cache is None:
+            try:
+                info = await self.get_exchange_info()
+                self._market_max_qty_cache = {
+                    s["symbol"]: Decimal(f["maxQty"])
+                    for s in info.get("symbols", [])
+                    for f in s.get("filters", [])
+                    if f.get("filterType") == "MARKET_LOT_SIZE" and Decimal(f["maxQty"]) > 0
+                }
+            except Exception as e:
+                logger.warning(f"Could not load market order size limits: {e}")
+                return None
+        return self._market_max_qty_cache.get(symbol)
+
     async def create_order(self, symbol: str, side: str, quantity: float, client_order_id: str, order_type: str = "MARKET", price: str = None, time_in_force: str = None, reduce_only: bool = False) -> Dict[str, Any]:
-        """Places a live order with idempotency using client_order_id."""
+        """
+        Places a live order with idempotency using client_order_id.
+        A MARKET order bigger than the symbol's market-order limit (e.g. 10 TAO on testnet) is sent as
+        several smaller orders with the same total, so closes can never get stuck on error -4005.
+        """
+        if order_type.upper() == "MARKET":
+            max_qty = await self._market_max_qty(symbol)
+            total = Decimal(str(quantity))
+            if max_qty is not None and total > max_qty:
+                chunks = []
+                remaining = total
+                while remaining > 0:
+                    chunks.append(min(remaining, max_qty))
+                    remaining -= chunks[-1]
+                logger.warning(
+                    f"[{symbol}] Market order {total} is above the {max_qty} per-order limit. "
+                    f"Sending it in {len(chunks)} parts."
+                )
+                executed = Decimal("0")
+                quote = Decimal("0")
+                res: Dict[str, Any] = {}
+                for i, chunk in enumerate(chunks, 1):
+                    res = await self._send_order(symbol, side, format(chunk, "f"), f"{client_order_id}_{i}",
+                                                 order_type, price, time_in_force, reduce_only)
+                    executed += Decimal(str(res.get("executedQty", 0) or 0))
+                    quote += Decimal(str(res.get("cumQuote", 0) or 0))
+                merged = dict(res)
+                merged["executedQty"] = format(executed, "f")
+                merged["cumQuote"] = format(quote, "f")
+                merged["avgPrice"] = format(quote / executed, "f") if executed > 0 else "0"
+                merged["split_parts"] = len(chunks)
+                return merged
+        return await self._send_order(symbol, side, f"{quantity}", client_order_id,
+                                      order_type, price, time_in_force, reduce_only)
+
+    async def _send_order(self, symbol: str, side: str, quantity: str, client_order_id: str, order_type: str, price: str, time_in_force: str, reduce_only: bool) -> Dict[str, Any]:
         params = {
             "symbol": symbol,
             "side": side.upper(),
             "type": order_type.upper(),
-            "quantity": f"{quantity}",
+            "quantity": quantity,
             "newClientOrderId": client_order_id
         }
         if reduce_only:

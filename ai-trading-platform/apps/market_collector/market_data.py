@@ -9,6 +9,7 @@ from core.db.redis import redis_manager
 from core.config.settings import settings
 from apps.feature_engine.engine import FeatureEngine
 from core.data_quality.validator import DataQualityValidator
+from apps.market_collector.context_poller import market_data_ws_url, poll_context, seed_engines
 
 class BinanceWebSocketCollector:
     """
@@ -17,7 +18,7 @@ class BinanceWebSocketCollector:
     """
     def __init__(self, symbols: List[str]):
         self.symbols = [s.lower() for s in symbols]
-        self.base_url = "wss://fstream.binance.com/stream?streams="
+        self.base_url = f"{market_data_ws_url()}/stream?streams="
         self._running = False
         
         # Initialize a Feature Engine for each symbol
@@ -49,6 +50,8 @@ class BinanceWebSocketCollector:
             engine = self.feature_engines[symbol]
             raw = self.latest_raw[symbol]
             engine.add_tick(raw)
+            # Trade / liquidation totals are per-tick accumulators: reset after each tick
+            raw["volume"] = raw["buy_volume"] = raw["trade_count"] = raw["liquidation_volume"] = 0.0
             
             # The returned array is the 90-dim Phase 3 Market State
             ai_features_array = engine.compute_features().tolist()
@@ -62,9 +65,10 @@ class BinanceWebSocketCollector:
                 "last_price": raw["mid_price"],
                 "spread": max(0.0, raw["best_ask"] - raw["best_bid"]),
                 "order_book_imbalance": raw["ob_skew_l2"],
-                "volume": raw["volume"],
+                "volume": float(sum(list(engine.volumes)[-60:])),
                 "vwap": raw["mid_price"], 
-                "volatility": 0.0,
+                # 1h ATR as a fraction of price: drives the volatility-scaled exit policy
+                "volatility": engine.volatility_1h(),
                 "funding_rate": raw["funding_rate"],
                 "features": ai_features_array,
                 "data_quality": 1.0
@@ -129,10 +133,14 @@ class BinanceWebSocketCollector:
                 logger.warning(f"Data Quality Validation Failed: {symbol} - {reason}")
                 return
 
-            self.latest_raw[symbol]["mid_price"] = price # trades also update mid_price
-            self.latest_raw[symbol]["volume"] = qty
-            self.latest_raw[symbol]["buy_volume"] = 0.0 if is_buyer_maker else qty
-            self.latest_raw[symbol]["trade_count"] = 1.0
+            # Accumulate every trade until the next tick (previously each trade OVERWROTE the last one,
+            # so "1m volume" was a sum of 60 random single-trade sizes)
+            raw = self.latest_raw[symbol]
+            raw["mid_price"] = price # trades also update mid_price
+            raw["volume"] += qty
+            if not is_buyer_maker:
+                raw["buy_volume"] += qty
+            raw["trade_count"] += 1.0
             
             await self.publish_features(symbol)
         except Exception as e:
@@ -141,7 +149,8 @@ class BinanceWebSocketCollector:
     async def process_funding_rate(self, data: dict):
         try:
             symbol = data['s'].upper()
-            self.latest_raw[symbol]["funding_rate"] = float(data['r'])
+            if 'r' in data:
+                self.latest_raw[symbol]["funding_rate"] = float(data['r'])
             
             mark = float(data.get('p', 1.0))
             index = float(data.get('i', 1.0))
@@ -161,20 +170,12 @@ class BinanceWebSocketCollector:
         except Exception as e:
             pass
             
-    async def process_funding_rate(self, data: dict):
-        try:
-            symbol = data['s'].upper()
-            if 'r' in data:
-                self.latest_raw[symbol]["funding_rate"] = float(data['r'])
-            await self.publish_features(symbol)
-        except Exception as e:
-            pass
     async def process_liquidation(self, data: dict):
         try:
             order = data['o']
             symbol = order['s'].upper()
             qty = float(order['q'])
-            self.latest_raw[symbol]["liquidation_volume"] = qty
+            self.latest_raw[symbol]["liquidation_volume"] += qty
             await self.publish_features(symbol)
         except Exception as e:
             pass
@@ -200,42 +201,8 @@ class BinanceWebSocketCollector:
             pass
             
     async def poll_rest_data(self):
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            while self._running:
-                try:
-                    for s in self.symbols:
-                        sym = s.upper()
-                        # 1. Long/Short Ratio
-                        ls_url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={sym}&period=5m&limit=1"
-                        async with session.get(ls_url) as resp:
-                            if resp.status == 200:
-                                ls_data = await resp.json()
-                                if ls_data and len(ls_data) > 0:
-                                    self.latest_raw[sym]["ls_ratio"] = float(ls_data[0]['longShortRatio'])
-                                    
-                        # 2. 4H Trend (EMA approximation)
-                        kline_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval=4h&limit=20"
-                        async with session.get(kline_url) as resp:
-                            if resp.status == 200:
-                                k_data = await resp.json()
-                                if k_data and len(k_data) > 0:
-                                    closes = [float(k[4]) for k in k_data]
-                                    self.latest_raw[sym]["ema_4h"] = sum(closes) / len(closes) # SMA as proxy for stability
-                                    
-                        # 3. Premium Index (Funding Rate fallback)
-                        pi_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={sym}"
-                        async with session.get(pi_url) as resp:
-                            if resp.status == 200:
-                                pi_data = await resp.json()
-                                if pi_data and 'lastFundingRate' in pi_data:
-                                    self.latest_raw[sym]["funding_rate"] = float(pi_data['lastFundingRate'])
-                                    
-                    logger.info("Polled REST Data: Long/Short Ratios, 4H Trends & Funding Rates updated.")
-                except Exception as e:
-                    logger.warning(f"Error polling REST data: {e}")
-                    
-                await asyncio.sleep(300) # Poll every 5 minutes
+        """Open interest, premium, funding, 24h stats, long/short ratio and 4h trend (shared poller)."""
+        await poll_context([sym.upper() for sym in self.symbols], self.latest_raw, lambda: self._running)
 
     async def listen(self):
         self._running = True
@@ -247,6 +214,8 @@ class BinanceWebSocketCollector:
             
         logger.info(f"Connecting to {len(streams)} Binance WS streams...")
         await redis_manager.connect()
+        # Pre-load ~16h of 1m bars so indicators / volatility are valid immediately
+        await seed_engines(self.feature_engines)
         
         async def _listen_chunk(chunk):
             streams_path = "/".join(chunk)

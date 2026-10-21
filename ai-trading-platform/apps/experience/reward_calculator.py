@@ -1,163 +1,184 @@
+import sys
 import time
+import json
 import asyncio
-from sqlalchemy import create_engine
+import urllib.request
+import urllib.parse
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+
+from sqlalchemy import create_engine, update, or_, Table, MetaData
 from sqlalchemy.orm import sessionmaker
-from core.database.models.ai import Experience
+from core.database.models.ai import Experience, GRADED_FLAG, UNGRADEABLE_FLAG
 from core.config.settings import settings
 from core.logging.logger import logger, set_log_file
+
+HORIZONS_SEC = (300, 3600, 14400)  # 5m, 1h, 4h
+KLINE_MS = 60_000
+KLINES_PER_REQUEST = 1500
+
+
+class KlinePriceSource:
+    """
+    Price oracle backed by Binance 1m klines (public endpoint, no API key).
+    Uses the same testnet/mainnet base URL as the execution adapter so graded
+    returns describe the exact market the bot trades.
+
+    price_at(t) = open of the first 1m candle whose open time is >= t (at most 60s late,
+    identical rule for the start and every horizon, so the bias cancels out).
+    """
+    def __init__(self):
+        self.base_url = "https://testnet.binancefuture.com" if settings.binance_testnet else "https://fapi.binance.com"
+        # {symbol: {minute_open_ms: open_price}}
+        self.cache: Dict[str, Dict[int, float]] = defaultdict(dict)
+        self.fetched_ranges: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
+
+    def _fetch(self, symbol: str, start_ms: int, end_ms: int):
+        cursor = start_ms
+        while cursor < end_ms:
+            params = urllib.parse.urlencode({
+                "symbol": symbol, "interval": "1m", "startTime": cursor, "limit": KLINES_PER_REQUEST
+            })
+            with urllib.request.urlopen(f"{self.base_url}/fapi/v1/klines?{params}", timeout=20) as resp:
+                rows = json.load(resp)
+            if not rows:
+                break
+            for k in rows:
+                self.cache[symbol][int(k[0])] = float(k[1])
+            last_open = int(rows[-1][0])
+            if last_open + KLINE_MS <= cursor:
+                break
+            cursor = last_open + KLINE_MS
+            time.sleep(0.1)  # stay far below public rate limits
+        self.fetched_ranges[symbol].append((start_ms, end_ms))
+
+    def _covered(self, symbol: str, start_ms: int, end_ms: int) -> bool:
+        return any(s <= start_ms and end_ms <= e for s, e in self.fetched_ranges[symbol])
+
+    def ensure(self, symbol: str, start_ms: int, end_ms: int):
+        if not self._covered(symbol, start_ms, end_ms):
+            self._fetch(symbol, start_ms, end_ms)
+
+    def price_at(self, symbol: str, t_sec: int) -> Optional[float]:
+        t_ms = int(t_sec) * 1000
+        minute = ((t_ms + KLINE_MS - 1) // KLINE_MS) * KLINE_MS
+        candles = self.cache.get(symbol, {})
+        # Tolerate up to 2 missing candles (exchange maintenance gaps)
+        for k in range(3):
+            p = candles.get(minute + k * KLINE_MS)
+            if p and p > 0:
+                return p
+        return None
+
 
 class RewardCalculator:
     """
     The 'Teacher's Assistant'.
-    Runs in the background. Finds old experiences that are missing their 
-    Multi-Horizon macro rewards, calculates the exact future sum from the database,
-    and writes the final grades back to the database in red pen.
+    Grades every experience (HOLD included) with the TRUE forward market return of its symbol
+    over 5m / 1h / 4h, in percent of price (signed, direction-free):
+
+        reward_h = (price(t + h) - price(t)) / price(t) * 100
+
+    These are exactly the units the live bot assumes when it reads the critic head
+    ("critic_return 5m = +0.15%"), and they let the trainer score ANY action counterfactually.
     """
     def __init__(self):
         self.engine = create_engine(settings.database_url)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
-        
-    def process_batch(self, batch_size=100):
+        self.prices = KlinePriceSource()
+
+    def process_batch(self, batch_size: int = 2000, table: Optional[Table] = None) -> int:
+        t = Experience.__table__ if table is None else table
         try:
-            current_time = int(time.time())
-            # 4 hours = 14,400 seconds. Add a 1-hour buffer (18,000s total) to guarantee
-            # all future data exists before we grade the experience.
-            safe_cutoff = current_time - 18000
-            
+            # Grade only once the full 4h horizon (+ 30 min margin) is in the past
+            safe_cutoff = int(time.time()) - (HORIZONS_SEC[-1] + 1800)
+
             with self.SessionLocal() as session:
-                # Find records that are old enough, but haven't been graded yet
-                ungraded = session.query(Experience).filter(
-                    Experience.timestamp < safe_cutoff,
-                    Experience.reward_4h == None
-                ).order_by(Experience.timestamp.asc()).limit(batch_size).all()
-                
-                if not ungraded:
-                    return 0 # Nothing to do
-                    
-                for exp in ungraded:
-                    t_start = exp.timestamp
-                    if not t_start:
+                # Light-weight column query: never load the 300x200 market_state JSON here.
+                rows = session.query(t.c.id, t.c.symbol, t.c.timestamp).filter(
+                    t.c.timestamp < safe_cutoff,
+                    or_(t.c.data_quality_flags.is_(None),
+                        t.c.data_quality_flags.notin_([GRADED_FLAG, UNGRADEABLE_FLAG]))
+                ).order_by(t.c.id.asc()).limit(batch_size).all()
+
+                if not rows:
+                    return 0
+
+                by_symbol = defaultdict(list)
+                for r in rows:
+                    by_symbol[r.symbol].append(r)
+
+                graded = failed = 0
+                for symbol, sym_rows in by_symbol.items():
+                    t_min = min(r.timestamp for r in sym_rows)
+                    t_max = max(r.timestamp for r in sym_rows)
+                    try:
+                        self.prices.ensure(symbol, t_min * 1000 - KLINE_MS, (t_max + HORIZONS_SEC[-1]) * 1000 + 3 * KLINE_MS)
+                    except Exception as e:
+                        logger.warning(f"Reward Calculator: kline fetch failed for {symbol}: {e}. Will retry later.")
                         continue
 
-                    # Extract initial price and action direction
-                    p_start = None
-                    if exp.entry_price and exp.entry_price > 0:
-                        p_start = float(exp.entry_price)
-                    elif exp.market_state and isinstance(exp.market_state, dict):
-                        p_val = exp.market_state.get("mid_price") or exp.market_state.get("last_price")
-                        if p_val and float(p_val) > 0:
-                            p_start = float(p_val)
-
-                    if not p_start or p_start <= 0:
-                        # Cannot grade without an initial reference price; flag as None rather than misleading 0.0
-                        exp.reward_5m = None
-                        exp.reward_1h = None
-                        exp.reward_4h = None
-                        continue
-
-                    action_str = str(exp.action or "").upper()
-                    if "LONG" in action_str:
-                        direction = 1.0
-                    elif "SHORT" in action_str:
-                        direction = -1.0
-                    else:
-                        direction = 0.0
-
-                    # Configurable round-trip trading cost assumption (in percent)
-                    round_trip_fee_pct = (settings.maker_fee_pct + settings.taker_fee_pct) * 100.0  # e.g. 0.07%
-
-                    # Fetch future observations for this symbol up to 4.5 hours ahead
-                    future_rows = session.query(
-                        Experience.timestamp,
-                        Experience.entry_price,
-                        Experience.market_state,
-                        Experience.fees
-                    ).filter(
-                        Experience.symbol == exp.symbol,
-                        Experience.timestamp >= t_start,
-                        Experience.timestamp <= t_start + 16200
-                    ).order_by(Experience.timestamp.asc()).all()
-
-                    if not future_rows:
-                        continue
-
-                    t_5m_target = t_start + 300
-                    t_1h_target = t_start + 3600
-                    t_4h_target = t_start + 14400
-
-                    def extract_price(row):
-                        if row.entry_price and float(row.entry_price) > 0:
-                            return float(row.entry_price)
-                        if row.market_state and isinstance(row.market_state, dict):
-                            p = row.market_state.get("mid_price") or row.market_state.get("last_price")
-                            if p and float(p) > 0:
-                                return float(p)
-                        return None
-
-                    p_5m, p_1h, p_4h = None, None, None
-                    best_diff_5m, best_diff_1h, best_diff_4h = float("inf"), float("inf"), float("inf")
-
-                    # Strict lower and upper timestamp bounds per horizon
-                    # 5m: target ± tolerance [t-60, t+120]
-                    # 1h: target ± tolerance [t-150, t+600]
-                    # 4h: target ± tolerance [t-300, t+1200]
-                    for row in future_rows:
-                        t = row.timestamp
-                        f_price = extract_price(row)
-                        if not f_price:
+                    for r in sym_rows:
+                        p0 = self.prices.price_at(symbol, r.timestamp)
+                        futures = [self.prices.price_at(symbol, r.timestamp + h) for h in HORIZONS_SEC]
+                        if not p0 or any(p is None for p in futures):
+                            session.execute(update(t).where(t.c.id == r.id).values(data_quality_flags=UNGRADEABLE_FLAG))
+                            failed += 1
                             continue
+                        r5m, r1h, r4h = [float((p - p0) / p0 * 100.0) for p in futures]
+                        session.execute(update(t).where(t.c.id == r.id).values(
+                            reward_5m=r5m, reward_1h=r1h, reward_4h=r4h, data_quality_flags=GRADED_FLAG
+                        ))
+                        graded += 1
 
-                        # 5m horizon: lower and upper tolerance
-                        if (t_5m_target - 60) <= t <= (t_5m_target + 120):
-                            diff_5m = abs(t - t_5m_target)
-                            if diff_5m < best_diff_5m:
-                                best_diff_5m = diff_5m
-                                p_5m = f_price
-
-                        # 1h horizon: lower and upper tolerance
-                        if (t_1h_target - 150) <= t <= (t_1h_target + 600):
-                            diff_1h = abs(t - t_1h_target)
-                            if diff_1h < best_diff_1h:
-                                best_diff_1h = diff_1h
-                                p_1h = f_price
-
-                        # 4h horizon: lower and upper tolerance
-                        if (t_4h_target - 300) <= t <= (t_4h_target + 1200):
-                            diff_4h = abs(t - t_4h_target)
-                            if diff_4h < best_diff_4h:
-                                best_diff_4h = diff_4h
-                                p_4h = f_price
-
-                    def compute_outcome(p_future):
-                        if not p_future or p_future <= 0:
-                            return None
-                        # True market percentage return over the horizon (signed: positive = price rose, negative = price dropped)
-                        delta_pct = ((p_future - p_start) / p_start) * 100.0
-                        return float(delta_pct)
-
-                    exp.reward_5m = compute_outcome(p_5m) if p_5m is not None else None
-                    exp.reward_1h = compute_outcome(p_1h) if p_1h is not None else None
-                    exp.reward_4h = compute_outcome(p_4h) if p_4h is not None else None
-                    
                 session.commit()
-                return len(ungraded)
-                
+                if failed:
+                    logger.warning(f"Reward Calculator: {failed} rows had no price data and were flagged {UNGRADEABLE_FLAG}.")
+                return graded + failed
+
         except Exception as e:
             logger.error(f"Reward Calculator Error: {e}")
             return 0
 
+    def grade_all(self, table: Optional[Table] = None) -> int:
+        """Grades the whole backlog (used for the one-off re-grade of legacy rows)."""
+        total = 0
+        while True:
+            n = self.process_batch(table=table)
+            if n == 0:
+                return total
+            total += n
+            logger.info(f"Reward Calculator: graded {total} rows in {(table if table is not None else Experience.__table__).name} so far...")
+
+
+def golden_table() -> Table:
+    """Golden experiences share the Experience schema in a separate table."""
+    return Table("golden_experiences", MetaData(), autoload_with=create_engine(settings.database_url))
+
+
 async def main():
     set_log_file("logs/reward_calculator.log")
-    logger.info("Starting Teacher's Assistant (Reward Calculator)...")
+    logger.info("Starting Teacher's Assistant (Reward Calculator, true market returns)...")
     calculator = RewardCalculator()
-    
+
+    if "--regrade" in sys.argv:
+        n = calculator.grade_all()
+        logger.info(f"Re-grade complete: {n} experiences.")
+        try:
+            gt = golden_table()
+            n = calculator.grade_all(table=gt)
+            logger.info(f"Re-grade complete: {n} golden experiences.")
+        except Exception as e:
+            logger.warning(f"Golden table re-grade skipped: {e}")
+        return
+
     while True:
         processed = calculator.process_batch()
         if processed > 0:
-            logger.info(f"Graded {processed} historical experiences with Multi-Horizon rewards.")
-            await asyncio.sleep(2.0) # Throttle to prevent 100% CPU usage while clearing backlogs
+            logger.info(f"Graded {processed} historical experiences with Multi-Horizon market returns.")
+            await asyncio.sleep(2.0)
         else:
-            await asyncio.sleep(60.0) # Sleep for a minute if caught up
+            await asyncio.sleep(60.0)
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -105,6 +105,18 @@ class ModelRegistry:
                 pass
         return "v1"
 
+    def get_evaluator_version(self) -> str:
+        """Evaluator that approved the active champion (from version.json), or "" for legacy checkpoints."""
+        version_file = os.path.join(self.model_dir, "version.json")
+        try:
+            import json
+            with open(version_file, "r") as f:
+                metrics = json.load(f).get("metrics") or {}
+            nested = metrics.get("metrics") if isinstance(metrics.get("metrics"), dict) else {}
+            return str(metrics.get("evaluator_version") or nested.get("evaluator_version") or "")
+        except Exception:
+            return ""
+
     def check_for_updates(self) -> bool:
         """Returns True if a newer model checkpoint exists on disk."""
         checkpoint_path = os.path.join(self.model_dir, "model_v1.pt")

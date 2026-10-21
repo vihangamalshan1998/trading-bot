@@ -70,8 +70,11 @@ def sync_experiences():
                 return
                 
         # Phase 2: Sync Delayed Rewards!
-        # The VPS updates `reward_4h` hours after the trade. We need to pull those updates down.
-        local_cursor.execute("SELECT id FROM experiences WHERE reward IS NULL OR reward_4h IS NULL")
+        # Only the immediate shaped `reward` is pulled from the VPS. The multi-horizon market returns
+        # (reward_5m / reward_1h / reward_4h) are graded LOCALLY by apps.experience.reward_calculator
+        # from exchange klines; the VPS grader summed the shaped `reward` column instead, which taught
+        # the critic to count HOLD emissions rather than predict the market.
+        local_cursor.execute("SELECT id FROM experiences WHERE reward IS NULL")
         missing_rewards = local_cursor.fetchall()
         
         if missing_rewards:
@@ -85,16 +88,16 @@ def sync_experiences():
                 format_strings = ','.join(['%s'] * len(chunk_ids))
                 
                 # Ask VPS if it has calculated the rewards for these rows yet
-                remote_cursor.execute(f"SELECT id, reward, reward_5m, reward_1h, reward_4h FROM experiences WHERE id IN ({format_strings}) AND (reward IS NOT NULL OR reward_4h IS NOT NULL)", tuple(chunk_ids))
+                remote_cursor.execute(f"SELECT id, reward FROM experiences WHERE id IN ({format_strings}) AND reward IS NOT NULL", tuple(chunk_ids))
                 vps_updates = remote_cursor.fetchall()
-                
+
                 if vps_updates:
                     for vps_row in vps_updates:
                         local_cursor.execute("""
-                            UPDATE experiences 
-                            SET reward = %s, reward_5m = %s, reward_1h = %s, reward_4h = %s 
+                            UPDATE experiences
+                            SET reward = %s
                             WHERE id = %s
-                        """, (vps_row['reward'], vps_row['reward_5m'], vps_row['reward_1h'], vps_row['reward_4h'], vps_row['id']))
+                        """, (vps_row['reward'], vps_row['id']))
                         updated_count += 1
                     # Commit each chunk immediately so row locks are released immediately
                     local_conn.commit()

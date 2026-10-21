@@ -541,12 +541,12 @@ def test_candidate_evaluation_rejects_insufficient_samples():
     trainer = PPOTrainer(model=model, limit=10)
     
     # Mock buffer.sample returning empty or insufficient list
-    with patch.object(trainer.buffer, "sample", return_value=[]):
+    with patch.object(trainer.buffer, "sample_holdout", return_value=[]):
         res = trainer.evaluate_candidate(sample_size=64)
         assert res["approved"] is False
         assert res["reason"] == "INSUFFICIENT_SAMPLE_SIZE"
         
-    with patch.object(trainer.buffer, "sample", return_value=[object()] * 10):
+    with patch.object(trainer.buffer, "sample_holdout", return_value=[object()] * 10):
         res = trainer.evaluate_candidate(sample_size=64)
         assert res["approved"] is False
         assert res["reason"] == "INSUFFICIENT_SAMPLE_SIZE"
@@ -569,7 +569,7 @@ def test_missing_and_corrupt_champion_fails_closed(tmp_path):
         torch.zeros((35, 300, 1))
     )
     
-    with patch.object(trainer.buffer, "sample", return_value=mock_batch), \
+    with patch.object(trainer.buffer, "sample_holdout", return_value=mock_batch), \
          patch.object(trainer.buffer, "build_tensors", return_value=mock_tensors), \
          patch.object(trainer.model, "forward", return_value=(torch.randn(35, 4) * 2.0, torch.randn(35, 3))):
          

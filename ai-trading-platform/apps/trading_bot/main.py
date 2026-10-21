@@ -13,6 +13,8 @@ from typing import Dict, Any
 
 from core.db.redis import redis_manager
 from core.ai.registry import ModelRegistry
+from core.risk import exit_policy
+from core.schemas.state_layout import MARKET_LOG_VOLUME_FEATURES, MARKET_SPREAD_FEATURE, MARKET_DEPRECATED_FEATURES
 from apps.research.model import SingleSymbolActorCritic
 from core.risk.risk_manager import RiskManager
 from core.exchange.binance_client import BinanceFuturesAdapter
@@ -62,6 +64,7 @@ class ProductionTradingBot:
         
         # 4. Strict Model Checkpoint Loading (graceful if no checkpoint yet)
         self.has_valid_model = False
+        self.actor_signal_offset = 0.50
         self.model = SingleSymbolActorCritic(input_dim=200)
         
         # VPS CPU FIX: Restrict PyTorch inference to 1 core so the trading bot doesn't hog the host CPU
@@ -72,6 +75,7 @@ class ProductionTradingBot:
             self.model = self.registry.load_model(self.model)
             self.model.eval()
             self.has_valid_model = True
+            self._refresh_actor_signal_offset()
             logger.info(f"Loaded rigorously validated SingleSymbolActorCritic for {self.num_symbols} symbols.")
         except Exception as e:
             logger.warning(f"No trained model checkpoint found yet ({e}). Operating in DATA-COLLECTION ONLY mode. Real order execution is strictly DISABLED until a validated checkpoint is loaded.")
@@ -149,6 +153,17 @@ class ProductionTradingBot:
         self.recent_losses_history: collections.deque = collections.deque(maxlen=30)
         self.last_market_tick_time = time.time()
         self.last_margin_trim_time = 0.0
+
+    def _refresh_actor_signal_offset(self):
+        """
+        Legacy champions (trained on summed shaped rewards) learned a strong long bias, which was
+        cancelled by hand with `raw_action - 0.50`. Champions approved by the v3 holdout evaluator are
+        trained on true market returns and centered at 0 (|a| <= 0.2 = flat), so the offset must be 0;
+        otherwise a neutral model would be read as a -0.5 SHORT on every tick.
+        """
+        evaluator = self.registry.get_evaluator_version()
+        self.actor_signal_offset = 0.0 if evaluator.startswith("v3") else 0.50
+        logger.info(f"Actor signal offset = {self.actor_signal_offset:.2f} (champion evaluator: {evaluator or 'legacy'})")
 
     def is_valid_contract(self, sym: str) -> bool:
         """
@@ -389,12 +404,16 @@ class ProductionTradingBot:
                             ema50 = float(self._calc_ema(closes, min(50, len(closes)))[-1])
                             adx_val = float(self._calc_adx(highs, lows, closes, period=14))
                             
-                            # Bullish Regime: Price > EMA20 > EMA50
-                            if cur_px > ema20 and ema20 > ema50 and (adx_val >= 20.0 or (ema20 - ema50)/ema50 > 0.003):
+                            # Bullish Expansion: Price > EMA20 > EMA50 with authentic trend momentum (ADX >= 20.0)
+                            if cur_px > ema20 and ema20 > ema50 and adx_val >= 20.0:
                                 trend = "STRONG_BULL"
-                            # Bearish Regime: Price < EMA20 < EMA50
-                            elif cur_px < ema20 and ema20 < ema50 and (adx_val >= 20.0 or (ema50 - ema20)/ema50 > 0.003):
+                            # Bearish Breakdown: Price < EMA20 < EMA50 with authentic trend momentum (ADX >= 20.0)
+                            elif cur_px < ema20 and ema20 < ema50 and adx_val >= 20.0:
                                 trend = "STRONG_BEAR"
+                            elif cur_px > ema20 and ema20 > ema50:
+                                trend = "WEAK_BULL"
+                            elif cur_px < ema20 and ema20 < ema50:
+                                trend = "WEAK_BEAR"
                             else:
                                 trend = "RANGING"
                                 
@@ -515,13 +534,14 @@ class ProductionTradingBot:
         if market and len(market.features) == 90:
             cleaned_features = []
             for idx, val in enumerate(market.features):
-                # Normalize raw volume / orderbook quantity / liquidation slots
-                # Slot 10: vol_1m, 11: buy_vol_1m, 12: sell_vol_1m, 19: vol_24h, 21: bid_qty, 22: ask_qty, 81: liq_1m, 82: liq_15m
-                if idx in (10, 11, 12, 19, 21, 22, 81, 82):
+                # Per-slot transforms come from core/schemas/state_layout.py (single source of truth)
+                if idx in MARKET_DEPRECATED_FEATURES:
+                    cleaned_features.append(0.0)
+                elif idx in MARKET_LOG_VOLUME_FEATURES:
                     v_abs = abs(float(val))
                     scaled_v = np.sign(float(val)) * (np.log1p(v_abs) / 10.0)
                     cleaned_features.append(float(np.clip(scaled_v, -5.0, 5.0)))
-                elif idx == 20: # spread_bps (scale so 100 bps = 1.0)
+                elif idx == MARKET_SPREAD_FEATURE: # spread_bps (scale so 100 bps = 1.0)
                     cleaned_features.append(float(np.clip(float(val) / 100.0, 0.0, 5.0)))
                 else:
                     cleaned_features.append(float(np.clip(float(val), -5.0, 5.0)))
@@ -821,6 +841,7 @@ class ProductionTradingBot:
                     logger.info("New model version detected. Hot reloading...")
                     self.model = self.registry.load_model(self.model)
                     self.model.eval()
+                    self._refresh_actor_signal_offset()
                     logger.info("Hot reload complete.")
 
                 now_t = time.time()
@@ -1001,9 +1022,9 @@ class ProductionTradingBot:
                         if act_logits is not None and len(act_logits) >= 2 and crit_vals is not None and len(crit_vals) >= 1:
                             raw_act = float(act_logits[0])
                             raw_conf = float(np.clip((act_logits[1] + 1.0) / 2.0, 0.05, 0.99))
-                            c5m = abs(float(crit_vals[0]))
+                            exp_move = abs(exit_policy.expected_move_pct(crit_vals))
                             if abs(raw_act) > 0.20 and raw_conf >= 0.70:
-                                score = raw_conf * c5m
+                                score = raw_conf * exp_move
                         flat_candidates.append((score, sym))
                 
                 # Sort flat symbols descending by opportunity score (highest score first)
@@ -1272,88 +1293,36 @@ class ProductionTradingBot:
                                 prev_peak = pnl_pct_leveraged
 
                             is_in_freeroll = self.partial_tp_triggered.get(sym, False)
-                            
-                            # 0. FREE-ROLL BREAKEVEN STOP LOSS (Active ONLY after 50% Partial TP has been secured)
-                            # Protects the remaining 50% free-roll runner at Breakeven +0.25% (covering all round-trip fees)
-                            if is_in_freeroll and pnl_pct_leveraged <= 0.0025:
-                                logger.info(f"[{sym}] 🔒 FREE-ROLL BREAKEVEN HIT: Price retraced to +{pnl_pct_leveraged*100:.2f}% (<= +0.25% fee floor). Closing remaining 50% with zero loss!")
-                                freeroll_stop_triggered = True
-                            
-                            # 1. HARD STOP LOSS (-15.0% leveraged = -0.75% spot move at 20x leverage)
-                            # Provides complete wick breathing room to survive liquidity sweeps and ride the swing!
-                            elif pnl_pct_leveraged <= -0.15:
-                                logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Position is down {pnl_pct_leveraged*100:.2f}%. Overriding AI to protect capital.")
-                                hard_stop_triggered = True
-                                
-                            # 1.5. HARD TAKE-PROFIT CEILING (+35.0% leveraged = +1.75% price surge at 20x leverage)
-                            # Instantly locks in windfall gains at the candle peak before any pullback!
-                            elif pnl_pct_leveraged >= 0.35:
-                                logger.info(f"[{sym}] 🎯 HARD TAKE-PROFIT TRIGGERED: Massive surge to +{pnl_pct_leveraged*100:.2f}% leveraged! Snatching windfall profit immediately at wick peak.")
-                                hard_take_profit_triggered = True
 
-                            # 1.8. INSTITUTIONAL DYNAMIC 50% SCALE-OUT (TP1 at +5.0% leveraged gain)
-                            # Takes profit on 50% of the position, banking guaranteed cash and arming the Free-Roll!
-                            elif not is_in_freeroll and pnl_pct_leveraged >= 0.050:
-                                logger.info(f"[{sym}] 💰 DYNAMIC 50% SCALE-OUT (TP1): Surged to +{pnl_pct_leveraged*100:.2f}% leveraged! Banking 50% profit and arming Free-Roll runner.")
-                                partial_tp_triggered = True
-                            
-                            # 2. SUDDEN VELOCITY SHOCK DETECTOR (Catches flash spikes / wicks against winning trades)
-                            elif prev_peak >= 0.04:
-                                # Inspect PnL over the last 15 seconds
-                                recent_window = [p for t, p in self.pnl_history[sym] if (now_t - t) <= 15.0]
-                                if recent_window:
-                                    recent_peak = max(recent_window)
-                                    # If PnL dropped by >= 3.5% leveraged in <15s and lost over 30% of recent peak
-                                    if (recent_peak - pnl_pct_leveraged) >= 0.035 and pnl_pct_leveraged < (recent_peak * 0.70):
-                                        logger.warning(f"[{sym}] ⚡ SUDDEN VELOCITY SHOCK DETECTED: Rapid drop from +{recent_peak*100:.2f}% to +{pnl_pct_leveraged*100:.2f}% in <15s! Locking in profit immediately.")
-                                        sudden_shock_triggered = True
-
-                            # 3. ATR-ADAPTIVE VOLATILITY RATCHETING TRAILING STOP (True Micro-Swing Protection)
-                            if not (hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or partial_tp_triggered or freeroll_stop_triggered):
-                                coin_vol = float(market.volatility) if market and hasattr(market, 'volatility') and market.volatility > 0 else 0.015
-                                # vol_factor: baseline 0.015 (1.5% volatility)
-                                # Low vol (BTC/ETH ~0.8%) -> tighter retention (+3% to +5% retention) to bank cash fast
-                                # High vol (NEAR/SOL/ADA ~3.0%) -> wider breathing room (-5% to -7% retention) to ride runners
-                                vol_factor = float(np.clip((coin_vol - 0.015) * 4.0, -0.07, +0.07))
-                                t1_retention = float(np.clip(0.70 - vol_factor, 0.60, 0.78))
-                                t2_retention = float(np.clip(0.75 - vol_factor, 0.65, 0.82))
-                                t3_retention = float(np.clip(0.85 - (vol_factor * 0.5), 0.80, 0.90))
-
-                                # Institutional Upgrade 1: Ratchet trailing retention when BTC Flash-Crash Shield is active
-                                flash_retention = macro_crash_shield.get_trailing_retention_override()
-                                if flash_retention is not None:
-                                    t1_retention = max(t1_retention, flash_retention)
-                                    t2_retention = max(t2_retention, flash_retention)
-                                    t3_retention = max(t3_retention, flash_retention)
-
-                                # Tier 1: Micro-Swing Impulse Protection (Requires >= +8.0% peak to ensure fees & slippage are cleanly beaten)
-                                if 0.08 <= prev_peak < 0.15:
-                                    trailing_floor = max(0.04, prev_peak * t1_retention) # Guarantee at least +4.0% net gain above fees
-                                    if pnl_pct_leveraged < trailing_floor:
-                                        logger.info(f"[{sym}] 🔒 ATR-ADAPTIVE IMPULSE TRAIL (Vol: {coin_vol*100:.2f}%, Ret: {t1_retention*100:.1f}%): Peak +{prev_peak*100:.2f}%, now +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Banking solid swing gain!")
-                                        trailing_stop_triggered = True
-                                # Tier 2: Developing Trend (+15% to +30% peak)
-                                elif 0.15 <= prev_peak < 0.30:
-                                    trailing_floor = max(0.08, prev_peak * t2_retention) # Dynamic breathing room, min +8% floor
-                                    if pnl_pct_leveraged < trailing_floor:
-                                        logger.info(f"[{sym}] 🔒 ATR-ADAPTIVE TRAIL TRIGGERED (Developing Swing, Vol: {coin_vol*100:.2f}%, Ret: {t2_retention*100:.1f}%): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing gain!")
-                                        trailing_stop_triggered = True
-                                # Tier 3: Mature Deep Trend Runner (>= +30% peak, e.g. +50%, +100%+)
-                                elif prev_peak >= 0.30:
-                                    trailing_floor = prev_peak * t3_retention # Harvest 80-90% of peak gains
-                                    if pnl_pct_leveraged < trailing_floor:
-                                        logger.info(f"[{sym}] 🔒 ATR-ADAPTIVE TRAIL TRIGGERED (Deep Runner, Vol: {coin_vol*100:.2f}%, Ret: {t3_retention*100:.1f}%): Peak was +{prev_peak*100:.2f}%, current +{pnl_pct_leveraged*100:.2f}% < {trailing_floor*100:.2f}%. Securing massive gain!")
-                                        trailing_stop_triggered = True
-
-                            # 4. INSTITUTIONAL STALE POSITION PRUNER (Capital Recycling)
-                            # If a position has stagnated for >= 90 mins (5,400s) and hovering within ±2.0% leveraged PnL,
-                            # prune it to liberate used margin for active high-conviction breakout setups!
+                            # Shared exit policy (core/risk/exit_policy.py), in PRICE moves so it is independent
+                            # of leverage and identical to what the trainer scores. Stop <= 0.75% (never wider
+                            # than before), first take-profit >= 1.5x the stop, fee-covering breakeven, and the
+                            # runner trails one stop-distance behind its peak only after TP1 is banked.
+                            levels = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
+                            lev = float(pos_check.leverage) if pos_check.leverage else 1.0
+                            peak_move = prev_peak / lev
                             entry_time = self.position_entry_times.get(sym, 0.0)
-                            if entry_time > 0:
-                                holding_time = now_t - entry_time
-                                if holding_time >= 5400.0 and abs(pnl_pct_leveraged) < 0.020:
-                                    logger.info(f"[{sym}] ♻️ STALE TRADE PRUNER: Stagnant trade held {holding_time/60.0:.1f}m with flat PnL ({pnl_pct_leveraged*100:+.2f}%). Pruning to recycle capital!")
-                                    stale_trade_triggered = True
+                            held_seconds = (now_t - entry_time) if entry_time > 0 else 0.0
+                            decision = exit_policy.evaluate_exit(pnl_pct, peak_move, is_in_freeroll, held_seconds, levels)
+
+                            if decision.reason == "HARD STOP":
+                                logger.warning(f"[{sym}] 🛑 HARD STOP LOSS TRIGGERED: Price move {pnl_pct*100:+.2f}% <= -{levels.stop*100:.2f}% stop. Overriding AI to protect capital.")
+                                hard_stop_triggered = True
+                            elif decision.reason == "HARD TAKE-PROFIT":
+                                logger.info(f"[{sym}] 🎯 HARD TAKE-PROFIT TRIGGERED: Price move {pnl_pct*100:+.2f}% >= +{levels.hard_tp*100:.2f}% (3x stop).")
+                                hard_take_profit_triggered = True
+                            elif decision.reason == "PARTIAL TP 50%":
+                                logger.info(f"[{sym}] 💰 50% SCALE-OUT (TP1): Price move {pnl_pct*100:+.2f}% >= +{levels.tp1*100:.2f}% ({levels.tp1/levels.stop:.1f}x the {levels.stop*100:.2f}% stop). Banking half, runner protected at fee-covering breakeven.")
+                                partial_tp_triggered = True
+                            elif decision.reason == "FREE-ROLL BREAKEVEN":
+                                logger.info(f"[{sym}] 🔒 FREE-ROLL BREAKEVEN HIT: Runner back to {pnl_pct*100:+.2f}% (<= +{levels.breakeven*100:.2f}% which covers round-trip fees). Closing remainder.")
+                                freeroll_stop_triggered = True
+                            elif decision.reason == "TRAILING STOP":
+                                logger.info(f"[{sym}] 🔒 RUNNER TRAIL: Peak {peak_move*100:+.2f}%, now {pnl_pct*100:+.2f}% (trail gap {levels.trail_gap*100:.2f}%). Securing gain!")
+                                trailing_stop_triggered = True
+                            elif decision.reason == "STALE PRUNE":
+                                logger.info(f"[{sym}] ♻️ STALE TRADE PRUNER: Held {held_seconds/3600.0:.1f}h with no progress ({pnl_pct*100:+.2f}%). Pruning to recycle capital!")
+                                stale_trade_triggered = True
                         else:
                             self.peak_pnl_pct[sym] = 0.0
                             if sym in self.pnl_history:
@@ -1387,15 +1356,17 @@ class ProductionTradingBot:
                         pred_ret_4h = float(critic_vals[2]) if critic_vals is not None and len(critic_vals) > 2 else pred_ret_1h
 
                         # Actor-Critic Directional Fusion:
-                        # 1. The Critic head provides an objective regression forecast of multi-horizon price returns.
-                        # 2. When Critic has directional conviction (|pred_ret_5m| >= 0.15%), its forecast drives the thesis.
-                        # 3. When Critic is flat (|pred_ret_5m| < 0.15%), Actor execution policy modulates the state.
-                        critic_signal = float(np.clip(pred_ret_5m / 1.5, -0.80, 0.80))
-                        actor_signal = float(np.clip(raw_action_val - 0.50, -0.50, 0.50))
+                        # 1. The Critic head forecasts real 5m / 1h / 4h price moves; their blend (exit_policy
+                        #    HORIZON_WEIGHTS) is the expected move of a trade held under the 1-4h exit policy.
+                        # 2. When that expected move is decisive (|move| >= 0.15%), it drives the thesis.
+                        # 3. Otherwise the Actor policy modulates the state.
+                        exp_move = exit_policy.expected_move_pct(critic_vals)
+                        critic_signal = float(np.clip(exp_move / 1.5, -0.80, 0.80))
+                        actor_signal = float(np.clip(raw_action_val - self.actor_signal_offset, -0.50, 0.50))
                         
-                        if pred_ret_5m <= -0.15:
+                        if exp_move <= -0.15:
                             action_val = float(np.clip(critic_signal + min(0.0, actor_signal), -1.0, -0.25))
-                        elif pred_ret_5m >= 0.15:
+                        elif exp_move >= 0.15:
                             action_val = float(np.clip(critic_signal + max(0.0, actor_signal), 0.25, 1.0))
                         else:
                             action_val = float(np.clip(actor_signal + critic_signal, -1.0, 1.0))
@@ -1410,7 +1381,7 @@ class ProductionTradingBot:
                         if confidence > 0.65:
                             conviction_mult += (confidence - 0.65) * 1.5
                         
-                        dir_expected_ret = -pred_ret_5m if action_val < -0.1 else pred_ret_5m
+                        dir_expected_ret = -exp_move if action_val < -0.1 else exp_move
                         if dir_expected_ret > 0.08:
                             conviction_mult += min(0.50, dir_expected_ret * 2.0)
 
@@ -1562,7 +1533,7 @@ class ProductionTradingBot:
                         
                         # 1. Bullish Momentum Squeeze Expansion -> Strict Short Lockout
                         if action_val < -0.20:
-                            is_bull_expansion = (htf_trend == "STRONG_BULL") or (ret_30m >= 0.018) or (ret_15m >= 0.012) or (rsi_1h >= 0.65)
+                            is_bull_expansion = (htf_trend == "STRONG_BULL" and htf_adx >= 20.0) or (ret_30m >= 0.018) or (ret_15m >= 0.012) or (rsi_1h >= 0.65)
                             if is_bull_expansion:
                                 reason = f"1H Trend: {htf_trend} (ADX: {htf_adx:.1f})" if htf_trend == "STRONG_BULL" else f"Fast Ret30m: {ret_30m*100:+.2f}%, RSI1h: {rsi_1h*100:+.1f}%"
                                 logger.warning(f"[{sym}] 🛑 HTF REGIME GATE: Bullish momentum expansion active ({reason}). SHORTS ARE STRICTLY LOCKED OUT to prevent squeeze bleed!")
@@ -1570,7 +1541,7 @@ class ProductionTradingBot:
                                 
                         # 2. Bearish Momentum Breakdown -> Strict Long Lockout
                         elif action_val > 0.20:
-                            is_bear_expansion = (htf_trend == "STRONG_BEAR") or (ret_30m <= -0.018) or (ret_15m <= -0.012) or (rsi_1h <= -0.65)
+                            is_bear_expansion = (htf_trend == "STRONG_BEAR" and htf_adx >= 20.0) or (ret_30m <= -0.018) or (ret_15m <= -0.012) or (rsi_1h <= -0.65)
                             if is_bear_expansion:
                                 reason = f"1H Trend: {htf_trend} (ADX: {htf_adx:.1f})" if htf_trend == "STRONG_BEAR" else f"Fast Ret30m: {ret_30m*100:+.2f}%, RSI1h: {rsi_1h*100:+.1f}%"
                                 logger.warning(f"[{sym}] 🛑 HTF REGIME GATE: Bearish breakdown active ({reason}). LONGS ARE STRICTLY LOCKED OUT to prevent falling knife!")
@@ -2031,16 +2002,20 @@ class ProductionTradingBot:
                         has_reversal_critic = (pos.quantity > 0 and (pred_ret_5m <= -0.15 or pred_ret_1h <= -0.25)) or \
                                               (pos.quantity < 0 and (pred_ret_5m >= 0.15 or pred_ret_1h >= 0.25))
                         
-                        # 1. Critic-Assisted Exit: If in solid profit (>= +3.5% leveraged) and Critic detects adverse reversal, lock in gain immediately!
-                        if 0.035 <= pnl_pct_leveraged < 0.060 and has_reversal_critic:
-                            logger.info(f"[{sym}] 🎯 CRITIC-ASSISTED PROFIT EXIT: PnL is +{pnl_pct_leveraged*100:.2f}% and Critic forecasts adverse reversal (5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}%). Securing green profit immediately!")
-                            # Bypass fee-protection gate and allow smooth exit
-                        elif 0.0 <= pnl_pct_leveraged < 0.040:
-                            # 2. Fee Protection Gate: Widened from +1.8% to +4.0% leveraged (+0.20% price move at 20x) to ensure exchange fees (~$10) are cleanly paid with positive net USDT
-                            logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: PnL is +{pnl_pct_leveraged*100:.2f}% < +4.00% leveraged fee-protection threshold. Letting trend ride!")
+                        # Thresholds follow the shared exit policy (price moves): an AI close of a winner must be
+                        # worth at least one stop-distance, otherwise wins stay smaller than losses.
+                        cur_move = pnl_pct_leveraged / max(1.0, float(pos.leverage or 1))
+                        close_levels = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
+
+                        # 1. Critic-Assisted Exit: in profit beyond 2x costs and the Critic forecasts an adverse reversal
+                        if cur_move >= 2.0 * exit_policy.ROUND_TRIP_COST and has_reversal_critic:
+                            logger.info(f"[{sym}] 🎯 CRITIC-ASSISTED PROFIT EXIT: Move {cur_move*100:+.2f}% and Critic forecasts adverse reversal (5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}%). Securing profit!")
+                        elif 0.0 <= cur_move < close_levels.stop:
+                            # 2. Small profit: let it run toward TP1 instead of banking a win smaller than a loss
+                            logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: Move {cur_move*100:+.2f}% < {close_levels.stop*100:.2f}% (one stop-distance). Letting trend ride!")
                             continue
-                        elif pnl_pct_leveraged >= 0.040:
-                            # 3. Solid Profit (>= +4.0% leveraged): Allow smooth profit taking (0.40 hurdle)
+                        elif cur_move >= close_levels.stop:
+                            # 3. Solid Profit (>= one stop-distance): Allow smooth profit taking (0.40 hurdle)
                             close_hurdle = 0.40
                             if confidence < close_hurdle:
                                 logger.info(f"[{sym}] SKIPPING PROFIT CLOSE (Low Confidence: {confidence:.2f} < {close_hurdle:.2f}, PnL: +{pnl_pct_leveraged*100:.2f}%)")
@@ -2052,7 +2027,7 @@ class ProductionTradingBot:
                             has_adverse_critic = (pos.quantity > 0 and (pred_ret_5m <= -0.50 or pred_ret_1h <= -0.70)) or \
                                                  (pos.quantity < 0 and (pred_ret_5m >= 0.50 or pred_ret_1h >= 0.70))
                             
-                            if pnl_pct_leveraged > -0.15 and not has_adverse_critic:
+                            if cur_move > -close_levels.stop and not has_adverse_critic:
                                 logger.info(f"[{sym}] SKIPPING WICK EXIT: PnL is {pnl_pct_leveraged*100:+.2f}% (surviving wick noise buffer up to -15%, Critic return 5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}% is not severe). Giving swing room to run!")
                                 continue
                             
@@ -2070,12 +2045,14 @@ class ProductionTradingBot:
                         
                         min_hurdle = max(session_critic_hurdle, settings.min_open_expected_return_pct) # Dynamic session fee hurdle
                         
-                        # 1. 5-Minute Entry Hurdle (Beats fee + spread)
-                        if action_val > 0.2 and pred_ret_5m < min_hurdle:
-                            logger.info(f"[{sym}] SKIPPING OPEN_LONG: 5m Critic return {pred_ret_5m:.2f}% < {min_hurdle:.2f}% fee hurdle.")
+                        # 1. Expected-Move Entry Hurdle: the blended 1-4h forecast (the horizon the exits are built
+                        #    for) must clear costs with margin. A 5m forecast almost never exceeds this hurdle.
+                        exp_move = exit_policy.expected_move_pct(critic_vals)
+                        if action_val > 0.2 and exp_move < min_hurdle:
+                            logger.info(f"[{sym}] SKIPPING OPEN_LONG: Expected move {exp_move:+.2f}% < {min_hurdle:.2f}% hurdle.")
                             continue
-                        elif action_val < -0.2 and pred_ret_5m > -min_hurdle:
-                            logger.info(f"[{sym}] SKIPPING OPEN_SHORT: 5m Critic return {pred_ret_5m:.2f}% > -{min_hurdle:.2f}% fee hurdle.")
+                        elif action_val < -0.2 and exp_move > -min_hurdle:
+                            logger.info(f"[{sym}] SKIPPING OPEN_SHORT: Expected move {exp_move:+.2f}% > -{min_hurdle:.2f}% hurdle.")
                             continue
                             
                         # 2. 1-Hour & 4-Hour Multi-Horizon Swing Alignment (Strict Anti-Suicide Rule)

@@ -4,9 +4,13 @@ import numpy as np
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 from typing import List, Dict, Any, Tuple
-from core.database.models.ai import Experience
+from core.database.models.ai import Experience, GRADED_FLAG
 from core.config.settings import settings
 from core.ai.sumtree import SumTree
+from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT
+
+# Longest reward horizon (4h) + grading tolerance: gap kept between training rows and the holdout
+HOLDOUT_EMBARGO_SEC = 14400 + 1800
 
 class ReplayBuffer:
     """
@@ -14,8 +18,11 @@ class ReplayBuffer:
     Provides intelligent sampling (recent, historical, rare) from MySQL.
     Uses RAM as a cache, NOT the source of truth.
     """
-    def __init__(self, capacity_cache: int = 1000):
+    def __init__(self, capacity_cache: int = 1000, holdout_frac: float = 0.15):
         self.capacity = capacity_cache
+        self.holdout_frac = holdout_frac
+        self.holdout_cache: List[Experience] = []
+        self.holdout_start_ts = float("inf")
         self.engine = create_engine(settings.database_url)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         
@@ -66,33 +73,50 @@ class ReplayBuffer:
             
             with self.SessionLocal() as session:
                 from sqlalchemy.sql import text
-                
+
+                # Only rows graded with TRUE market returns are trainable (see reward_calculator.GRADED_FLAG).
+                # Ungraded / legacy-graded rows previously taught the critic to count HOLD emissions.
+                graded = Experience.data_quality_flags == GRADED_FLAG
+
                 # OPTIMIZATION FIX: Fetch half Recent and half Random Historical using indexed id.desc()
-                recent_ids_query = session.query(Experience.id).order_by(Experience.id.desc()).limit(recent_limit).all()
+                recent_ids_query = session.query(Experience.id).filter(graded).order_by(Experience.id.desc()).limit(recent_limit).all()
                 recent_ids = [r[0] for r in recent_ids_query]
-                
+
                 try:
                     from sqlalchemy import func
                     max_id = session.query(func.max(Experience.id)).scalar() or 1
-                    sample_pool = random.sample(range(1, max_id + 1), min(historical_limit * 2, max_id))
-                    historical_ids_query = session.query(Experience.id).filter(Experience.id.in_(sample_pool)).limit(historical_limit).all()
+                    sample_pool = random.sample(range(1, max_id + 1), min(historical_limit * 3, max_id))
+                    historical_ids_query = session.query(Experience.id).filter(Experience.id.in_(sample_pool), graded).limit(historical_limit).all()
                     historical_ids = [r[0] for r in historical_ids_query]
                 except Exception:
                     historical_ids = []
-                    
+
                 all_normal_ids = list(set(recent_ids + historical_ids))
-                
+
                 if all_normal_ids:
                     # INDEXED LOOKUP: Order by primary key id.desc() to avoid multi-gigabyte disk filesort!
                     recent = session.query(Experience).filter(Experience.id.in_(all_normal_ids)).order_by(Experience.id.desc()).all()
                 else:
                     recent = []
-                    
-                self.cache = recent[::-1] # Reverse to chronological
-                
+
+                # Chronological train / holdout split: the newest slice of graded data is NEVER trained on.
+                # Candidate models are judged on it, so promotion reflects out-of-sample performance.
+                recent.sort(key=lambda e: e.timestamp or 0)
+                n_holdout = int(len(recent) * self.holdout_frac) if len(recent) >= 100 else 0
+                self.holdout_cache = recent[len(recent) - n_holdout:] if n_holdout else []
+                self.cache = recent[:len(recent) - n_holdout] if n_holdout else recent
+                self.holdout_start_ts = (self.holdout_cache[0].timestamp or 0) if self.holdout_cache else float("inf")
+                if self.holdout_cache:
+                    # Purge embargo: training rows whose 4h forward window overlaps the holdout would leak it.
+                    embargo_start = self.holdout_start_ts - HOLDOUT_EMBARGO_SEC
+                    self.cache = [e for e in self.cache if (e.timestamp or 0) < embargo_start]
+
                 # Golden Batch Integration (The 10% Permanent Memory)
                 try:
-                    golden_ids_query = session.execute(text(f"SELECT id FROM golden_experiences ORDER BY RAND() LIMIT {golden_limit}")).fetchall()
+                    golden_ids_query = session.execute(text(
+                        f"SELECT id FROM golden_experiences WHERE data_quality_flags = '{GRADED_FLAG}' "
+                        f"AND timestamp < {int(min(self.holdout_start_ts, 2**62))} ORDER BY RAND() LIMIT {golden_limit}"
+                    )).fetchall()
                     golden_ids = [r[0] for r in golden_ids_query]
                     
                     if golden_ids:
@@ -109,7 +133,7 @@ class ReplayBuffer:
             if self.capacity > 0 and len(self.cache) > 0:
                 self.sumtree.rebuild_from_list(self.cache, alpha=0.6)
                 
-            logger.info(f"✅ Replay buffer cache loaded successfully ({len(self.cache)} normal, {len(self.golden_cache)} golden trades in RAM)!")
+            logger.info(f"✅ Replay buffer cache loaded successfully ({len(self.cache)} train, {len(self.holdout_cache)} holdout, {len(self.golden_cache)} golden in RAM)!")
                 
         except Exception as e:
             from core.logging.logger import logger
@@ -205,6 +229,10 @@ class ReplayBuffer:
             
         return unique_batch
 
+    def sample_holdout(self, n: int) -> List[Experience]:
+        """Random sample from the chronological holdout (never used for training)."""
+        return random.sample(self.holdout_cache, min(n, len(self.holdout_cache)))
+
     @staticmethod
     def _normalize_frame(frame: List[float]) -> List[float]:
         """
@@ -244,12 +272,17 @@ class ReplayBuffer:
             
         # Market Features volume & orderbook quantity slots:
         # Slot 30 (vol_1m), 31 (buy_vol_1m), 32 (sell_vol_1m), 39 (vol_24h), 41 (bid_qty), 42 (ask_qty), 101 (liq_1m), 102 (liq_15m)
-        for vol_idx in (30, 31, 32, 39, 41, 42, 101, 102):
+        # The live bot (_build_state_vector) ALREADY log-scales these before storing the frame, so only
+        # rescale values that are still raw (> 5.0). Re-scaling already-scaled values shrank them ~10x
+        # in training while inference saw full-size values (train/serve skew).
+        for vol_idx in LOG_VOLUME_SLOTS:
             val = float(f[vol_idx])
-            f[vol_idx] = float(np.sign(val) * np.log1p(abs(val)) / 10.0)
-            
-        # Slot 40: spread_bps
-        f[40] = float(max(0.0, min(5.0, float(f[40]) / 100.0)))
+            if abs(val) > 5.0:
+                f[vol_idx] = float(np.sign(val) * np.log1p(abs(val)) / 10.0)
+
+        # Slot 40: spread_bps (live bot already stores bps / 100; only rescale raw legacy values)
+        if float(f[SPREAD_SLOT]) > 5.0:
+            f[SPREAD_SLOT] = float(max(0.0, min(5.0, float(f[SPREAD_SLOT]) / 100.0)))
         
         # Universal clamp across all slots to protect LayerNorm from extreme outliers
         for idx in range(len(f)):
@@ -307,127 +340,51 @@ class ReplayBuffer:
             return [norm_state] * seq_len
 
     def build_tensors(self, batch: List[Experience], seq_len: int = 300) -> Tuple[torch.Tensor, ...]:
-        """Converts batch into PyTorch tensors with LSTM sequences and Multi-Horizon returns."""
+        """
+        Converts a batch into PyTorch tensors with LSTM sequences and multi-horizon market returns.
+
+        rewards[:, h] = TRUE forward market return of the symbol over 5m / 1h / 4h (% of price,
+        direction-free). Because the market move does not depend on our (small) order, the outcome
+        of ANY action can be scored from it: pnl(position) = position * return - costs. The trainer
+        relies on this to evaluate freshly sampled actions instead of the logged ones.
+
+        actions[:, 0] = logged direction (+0.5 long / -0.5 short / 0 hold) for diagnostics only.
+        Rows without true market returns are dropped (never guessed).
+        """
         states, actions, rewards, next_states, dones = [], [], [], [], []
         
-        for exp in batch:  # BUG FIX: Removed erroneous 'with session' wrapper - action mapping must be INSIDE this loop
-            # 1. BUILD LSTM SEQUENCE FROM EMBEDDED MOVIE
+        for exp in batch:
+            if exp.reward_5m is None or exp.reward_1h is None or exp.reward_4h is None:
+                continue
+            if getattr(exp, "data_quality_flags", None) != GRADED_FLAG:
+                continue
+
             seq_states = self._extract_sequence(exp, seq_len)
-            next_seq_states = seq_states # Simplification for next state since we don't have the +1 frame
 
-            # 2. CALCULATE MULTI-HORIZON PREDICTIONS (Combine DB Grades + RAM Cache)
-            # If the Teacher's Assistant has graded this old test in the DB, use it!
-            # If it's a brand new test (in cache) and hasn't been graded yet, sum whatever future we have in RAM.
-            if exp.reward_5m is not None:
-                r_5m = exp.reward_5m
-                r_1h = exp.reward_1h
-                r_4h = exp.reward_4h
-            else:
-                try:
-                    idx = self.cache.index(exp)
-                except ValueError:
-                    idx = -1
-                    
-                if idx != -1:
-                    # BUG FIX (User Spotted!): Filter by the EXACT same coin (symbol)
-                    # Because we trade 6 coins at once, 5 minutes of data spans ~360 database rows, not 60.
-                    cache_len = len(self.cache)
-                    r_5m = 0.0
-                    r_1h = 0.0
-                    r_4h = 0.0
-                    t_start = getattr(exp, 'timestamp', 0)
-                    
-                    for i in range(idx, cache_len):
-                        # Only add the profit if it's the exact same coin
-                        if getattr(self.cache[i], 'symbol', None) == getattr(exp, 'symbol', None):
-                            r = self.cache[i].reward or 0.0
-                            t_future = getattr(self.cache[i], 'timestamp', 0)
-                            
-                            # CRITICAL FIX: Use exact timestamps, NOT row counts!
-                            if t_future <= t_start + 300:
-                                r_5m += r
-                            if t_future <= t_start + 3600:
-                                r_1h += r
-                            if t_future <= t_start + 14400:
-                                r_4h += r
-                                
-                            if t_future > t_start + 14400:
-                                break
-                else:
-                    # Isolated rare DB sample that somehow wasn't graded yet (Edge case)
-                    r_5m = r_1h = r_4h = (exp.reward or 0.0)
-
-            # Action Mapping  (BUG FIX: this block is now INSIDE the for loop)
-            target_size = exp.derivatives_state.get("target_size", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
-            price_offset = exp.derivatives_state.get("price_offset", 0.0) if isinstance(exp.derivatives_state, dict) else 0.0
-            # GROUND CONFIDENCE IN REAL PROFIT (Replay Buffer Fix)
-            # Ground-truth conviction based on whether the action actually generated net profit!
-            net_return = getattr(exp, "realized_pnl", 0.0) or 0.0
-            fees = getattr(exp, "fees", 0.0) or 0.0
-            actual_profit = net_return - fees
+            act = [0.0, 0.0, 0.0, 0.0]
+            if exp.action in ("OPEN_LONG", "CLOSE_SHORT"): act[0] = 0.5
+            elif exp.action in ("OPEN_SHORT", "CLOSE_LONG"): act[0] = -0.5
             
-            # Direction-aligned multi-horizon returns (Shorts profit when market drops)
-            is_short = "SHORT" in (exp.action or "")
-            dir_r_5m = -r_5m if is_short else r_5m
-            dir_r_1h = -r_1h if is_short else r_1h
-
-            # Combine immediate trade net profit with directional 5m and 1h multi-horizon forward returns
-            if (actual_profit > 0 and dir_r_5m >= 0) or (dir_r_5m > 0 and dir_r_1h > 0):
-                # Strong verified winner -> High confidence target [0.5 to 0.95]
-                raw_confidence = min(0.95, 0.4 + max(0.0, dir_r_5m / 50.0))
-            elif actual_profit < 0 or (dir_r_5m < 0 and dir_r_1h < 0):
-                # Net loss or sustained drawdown -> Low confidence / skepticism target [-0.8 to -0.3]
-                raw_confidence = max(-0.8, -0.3 + min(0.0, dir_r_5m / 50.0))
-            elif dir_r_5m > 0:
-                # Moderate short-term scalp win -> Slight positive confidence
-                raw_confidence = 0.2
-            elif dir_r_5m < 0:
-                # Mild negative drift
-                raw_confidence = -0.2
-            else:
-                # Neutral / flat
-                raw_confidence = 0.0
-                
-            # GROUND TARGET SIZE IN CONVICTION & OPPORTUNITY RETURN (Breaks the 25% circular feedback loop)
-            if (actual_profit > 0 and dir_r_5m >= 0) or (dir_r_5m > 0 and dir_r_1h > 0):
-                # Strong verified winning setup -> train model to allocate dynamic size [0.35 to 0.85]
-                conviction_size = min(0.85, 0.35 + max(0.0, dir_r_5m / 2.5))
-                raw_target_size = (conviction_size * 2.0) - 1.0
-            elif actual_profit < 0 or (dir_r_5m < 0 and dir_r_1h < 0):
-                # Loser or adverse market drift -> train model to scale down to minimum floor [0.25]
-                raw_target_size = (0.25 * 2.0) - 1.0  # -0.50 policy space
-            elif target_size > 0:
-                # Explicit position size recorded
-                raw_target_size = (target_size * 2.0) - 1.0
-            else:
-                # Neutral / flat hold -> standard baseline 25% floor
-                raw_target_size = (0.25 * 2.0) - 1.0
-                
-            raw_price_offset = (price_offset * 2.0) - 1.0 if price_offset > 0 else 0.0
-            
-            act = [0.0, raw_confidence, raw_target_size, raw_price_offset]
-            if exp.action == "OPEN_LONG": act[0] = 0.5
-            elif exp.action == "OPEN_SHORT": act[0] = -0.5
-            elif exp.action == "CLOSE_LONG": act[0] = -0.5
-            elif exp.action == "CLOSE_SHORT": act[0] = 0.5
-            
-            # Clamp returns to realistic percentage boundaries to protect the Critic MSE from legacy outliers
-            r_5m_clean = float(np.clip(r_5m, -5.0, 5.0))
-            r_1h_clean = float(np.clip(r_1h, -15.0, 15.0))
-            r_4h_clean = float(np.clip(r_4h, -25.0, 25.0))
+            # Clamp returns to realistic percentage boundaries to protect the Critic from data glitches
+            r_5m_clean = float(np.clip(exp.reward_5m, -5.0, 5.0))
+            r_1h_clean = float(np.clip(exp.reward_1h, -15.0, 15.0))
+            r_4h_clean = float(np.clip(exp.reward_4h, -25.0, 25.0))
             
             states.append(seq_states)
             actions.append(act)
-            rewards.append([r_5m_clean, r_1h_clean, r_4h_clean])  # 3 output heads!
-            next_states.append(next_seq_states)
-            dones.append([1.0 if getattr(exp, "next_state", None) is None else 0.0])
+            rewards.append([r_5m_clean, r_1h_clean, r_4h_clean])  # 3 critic heads
+            next_states.append(seq_states)
+            # Each sample is an independent one-step decision (contextual bandit): always terminal.
+            dones.append([1.0])
             
+        if not states:
+            return torch.empty(0), torch.empty(0), torch.empty(0), torch.empty(0), torch.empty(0)
         try:
             s = torch.tensor(states, dtype=torch.float32)
             a = torch.tensor(actions, dtype=torch.float32)
             r = torch.tensor(rewards, dtype=torch.float32)
-            s_ = torch.tensor(next_states, dtype=torch.float32)
             d = torch.tensor(dones, dtype=torch.float32)
-            return s, a, r, s_, d
+            # next_states are identical to states (no +1 frame is stored); share the tensor, don't copy 2x RAM.
+            return s, a, r, s, d
         except ValueError:
             return torch.empty(0), torch.empty(0), torch.empty(0), torch.empty(0), torch.empty(0)

@@ -23,18 +23,21 @@ def fetch_data():
         cursor.execute("SELECT action, COUNT(*) as c FROM experiences GROUP BY action")
         actions = cursor.fetchall()
         
-        # 2. Win/Loss (4h Horizon)
-        cursor.execute("SELECT COUNT(*) as c FROM experiences WHERE reward_4h > 0")
+        # 2. Win/Loss (4h Horizon) of ENTRIES. reward_4h is the signed market move (% of price), so a
+        # long wins when it is > 0 and a short wins when it is < 0. Only rows graded with true returns count.
+        graded = "data_quality_flags = 'MKT_RET_V2'"
+        cursor.execute(f"SELECT COUNT(*) as c FROM experiences WHERE {graded} AND ((action = 'OPEN_LONG' AND reward_4h > 0) OR (action = 'OPEN_SHORT' AND reward_4h < 0))")
         wins = cursor.fetchone()['c']
-        
-        cursor.execute("SELECT COUNT(*) as c FROM experiences WHERE reward_4h < 0")
+
+        cursor.execute(f"SELECT COUNT(*) as c FROM experiences WHERE {graded} AND ((action = 'OPEN_LONG' AND reward_4h < 0) OR (action = 'OPEN_SHORT' AND reward_4h > 0))")
         losses = cursor.fetchone()['c']
-        
-        # 3. Average Rewards
+
+        # 3. Average Rewards (immediate shaped reward + average signed market move per horizon)
         rewards_data = {}
         timeframes = ['reward', 'reward_5m', 'reward_1h', 'reward_4h']
         for tf in timeframes:
-            cursor.execute(f"SELECT AVG({tf}) as avg_r FROM experiences WHERE {tf} IS NOT NULL")
+            where = f"{tf} IS NOT NULL" if tf == 'reward' else f"{tf} IS NOT NULL AND {graded}"
+            cursor.execute(f"SELECT AVG({tf}) as avg_r FROM experiences WHERE {where}")
             val = cursor.fetchone()['avg_r']
             rewards_data[tf] = float(val) if val is not None else 0.0
 

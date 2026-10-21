@@ -144,9 +144,21 @@ class SingleSymbolActorCritic(nn.Module):
     Phase 2 Upgrade: ActorCritic for a single symbol state with LSTM Memory and Limit Orders.
     Input dims: 200 (God Mode Architecture with 70 blank padding slots)
     """
+    FEATURE_BUFFERS = ("feat_mean", "feat_std", "feat_mask", "feat_fitted")
+
     def __init__(self, input_dim: int = 200, hidden_dim: int = 256):
         super().__init__()
-        
+
+        # Per-slot input standardization, saved inside the checkpoint so preprocessing always travels
+        # with the weights. Identity by default: checkpoints saved before this existed load unchanged.
+        # LayerNorm across all 200 slots alone let large slots (order-book qty ~1, ratios ~2) drown the
+        # small but important price signals (returns ~0.001); standardizing each slot first fixes that.
+        # feat_mask zeroes RESERVED / DEPRECATED / dead slots so future canvas slots cannot inject noise.
+        self.register_buffer("feat_mean", torch.zeros(input_dim))
+        self.register_buffer("feat_std", torch.ones(input_dim))
+        self.register_buffer("feat_mask", torch.ones(input_dim))
+        self.register_buffer("feat_fitted", torch.zeros(()))
+
         self.shared_norm = nn.LayerNorm(input_dim)
         
         # Replace Linear layers with an LSTM core
@@ -162,7 +174,10 @@ class SingleSymbolActorCritic(nn.Module):
         # Support both (batch_size, input_dim) and (batch_size, seq_len, input_dim)
         if x.dim() == 2:
             x = x.unsqueeze(1) # (batch_size, 1, input_dim)
-            
+
+        if bool(self.feat_fitted):
+            x = torch.clamp((x - self.feat_mean) / self.feat_std, -5.0, 5.0) * self.feat_mask
+
         x = self.shared_norm(x)
         
         lstm_out, new_hidden = self.lstm(x, hidden_state)
@@ -186,3 +201,23 @@ class SingleSymbolActorCritic(nn.Module):
         if return_hidden:
             return actor_out, critic_out, new_hidden
         return actor_out, critic_out
+
+    def set_feature_stats(self, mean: torch.Tensor, std: torch.Tensor, mask: torch.Tensor):
+        with torch.no_grad():
+            self.feat_mean.copy_(mean)
+            self.feat_std.copy_(torch.clamp(std, min=1e-6))
+            self.feat_mask.copy_(mask)
+            self.feat_fitted.fill_(1.0)
+
+    def load_state_dict(self, state_dict, *args, **kwargs):
+        # Checkpoints from before per-slot standardization have no feature buffers: load them as identity.
+        state_dict = dict(state_dict)
+        identity = {
+            "feat_mean": torch.zeros_like(self.feat_mean),
+            "feat_std": torch.ones_like(self.feat_std),
+            "feat_mask": torch.ones_like(self.feat_mask),
+            "feat_fitted": torch.zeros_like(self.feat_fitted),
+        }
+        for name in self.FEATURE_BUFFERS:
+            state_dict.setdefault(name, identity[name])
+        return super().load_state_dict(state_dict, *args, **kwargs)

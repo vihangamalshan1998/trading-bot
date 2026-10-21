@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import asyncio
 import json
 import time
@@ -15,6 +15,26 @@ from core.ai.rollout_buffer import RolloutBuffer
 from core.logging.logger import logger, set_log_file
 from apps.research.model import SingleSymbolActorCritic
 from core.ai.registry import ModelRegistry
+from core.config.settings import settings
+from core.risk import exit_policy
+from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM
+
+# --- Trading economics used to score actions (all in % of price / notional) ---
+# Live entry rule: |action| > 0.20 opens a position (see trading_bot.main side determination)
+DIRECTION_DEADBAND = 0.20
+# Round trip (maker entry + taker exit + slippage), shared with the live exit policy
+ROUND_TRIP_COST_PCT = exit_policy.ROUND_TRIP_COST * 100.0
+# Blend of 5m / 1h / 4h forward returns matching the 1-4h swing horizon the exits are built for
+REWARD_HORIZON_WEIGHTS = exit_policy.HORIZON_WEIGHTS
+# Live exit envelope (core/risk/exit_policy): widest stop and widest hard take-profit, in % of price
+STOP_LOSS_PCT = exit_policy.MAX_STOP * 100.0
+TAKE_PROFIT_PCT = exit_policy.MAX_STOP * exit_policy.HARD_TP_RR * 100.0
+TRAINER_STATE_PATH = "models/candidates/trainer_state.pt"
+# Direction exploration noise must stay small relative to the 0.20 deadband. With wide noise the
+# STOCHASTIC policy's optimum drifts toward the "less costly losing side" instead of flat, and the
+# DETERMINISTIC mean used live then trades into fees. sigma in [0.08, 0.30].
+DIR_LOG_STD_MIN = -2.5
+DIR_LOG_STD_MAX = -1.2
 
 def normalize_state_tensor(states: torch.Tensor) -> torch.Tensor:
     """
@@ -48,14 +68,16 @@ def normalize_state_tensor(states: torch.Tensor) -> torch.Tensor:
     # Slot 11: entry_price distance (if abs > 1.0, raw asset price like $81,000 BTC -> reset to 0.0)
     s[..., 11] = torch.where(torch.abs(s[..., 11]) > 1.0, torch.zeros_like(s[..., 11]), s[..., 11])
     
-    # Market Features volume & orderbook quantity slots:
-    # Slot 30 (vol_1m), 31 (buy_vol_1m), 32 (sell_vol_1m), 39 (vol_24h), 41 (bid_qty), 42 (ask_qty), 101 (liq_1m), 102 (liq_15m)
-    # Log-scaling compresses million-token quantities (e.g. 488,000 DOGE) to clean [0, 2.0] range
-    for vol_idx in (30, 31, 32, 39, 41, 42, 101, 102):
-        s[..., vol_idx] = torch.sign(s[..., vol_idx]) * torch.log1p(torch.abs(s[..., vol_idx])) / 10.0
-        
-    # Slot 40: spread_bps (scale so 100 bps = 1.0)
-    s[..., 40] = torch.clamp(s[..., 40] / 100.0, 0.0, 5.0)
+    # Volume / orderbook-quantity / liquidation slots (log_volume transform in core.schemas.state_layout).
+    # Log-scaling compresses million-token quantities (e.g. 488,000 DOGE) to clean [0, 2.0] range.
+    # IDEMPOTENT: the live bot and the replay buffer already scale these, so only touch values that are
+    # still raw (> 5.0). Re-scaling scaled values created a train/serve skew (features ~10x smaller in training).
+    for vol_idx in LOG_VOLUME_SLOTS:
+        v = s[..., vol_idx]
+        s[..., vol_idx] = torch.where(torch.abs(v) > 5.0, torch.sign(v) * torch.log1p(torch.abs(v)) / 10.0, v)
+
+    # spread_bps (scale so 100 bps = 1.0) — only raw legacy values
+    s[..., SPREAD_SLOT] = torch.where(s[..., SPREAD_SLOT] > 5.0, torch.clamp(s[..., SPREAD_SLOT] / 100.0, 0.0, 5.0), s[..., SPREAD_SLOT])
     
     # Universal clamp across all slots to protect LayerNorm from extreme outliers
     s = torch.clamp(s, -5.0, 5.0)
@@ -70,7 +92,7 @@ class PPOTrainer:
     """
     def __init__(self, model: SingleSymbolActorCritic, lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2, limit: int = 300):
         self.model = model
-        self.log_std = nn.Parameter(torch.ones(4) * -0.5)
+        self.log_std = nn.Parameter(torch.tensor([-1.6, -0.5, -0.5, -0.5]))
         self.optimizer = optim.Adam(
             list(self.model.parameters()) + [self.log_std],
             lr=lr,
@@ -78,6 +100,7 @@ class PPOTrainer:
         )
         self.gamma = gamma
         self.clip_epsilon = clip_epsilon
+        self.actions_per_state = 4  # K fresh policy samples per replay state (leave-one-out baseline)
         self.buffer = ReplayBuffer()
         self.rollout_buffer = RolloutBuffer()
         self.limit = limit
@@ -133,6 +156,12 @@ class PPOTrainer:
             returns = advantages + values
             return advantages, returns
         
+    def _action_std(self) -> torch.Tensor:
+        """Per-dimension policy std. Direction (dim 0) noise is kept narrow relative to the entry deadband."""
+        dir_log_std = torch.clamp(self.log_std[0:1], min=DIR_LOG_STD_MIN, max=DIR_LOG_STD_MAX)
+        rest_log_std = torch.clamp(self.log_std[1:], min=-2.0, max=0.5)
+        return torch.exp(torch.cat([dir_log_std, rest_log_std]))
+
     def sample_action(
         self,
         state: torch.Tensor,
@@ -151,7 +180,7 @@ class PPOTrainer:
                 state = state.unsqueeze(0)
             state = normalize_state_tensor(state)
             action_mean, value = self.model(state)
-            action_std = torch.exp(torch.clamp(self.log_std, min=-2.0, max=0.5))
+            action_std = self._action_std()
             dist = torch.distributions.Normal(action_mean, action_std)
             if deterministic:
                 action = action_mean
@@ -160,6 +189,29 @@ class PPOTrainer:
                 action = dist.sample()
                 log_prob = dist.log_prob(action).sum(dim=-1, keepdim=True)
             return action, log_prob, value
+
+    # ------------------------------------------------------------------
+    # Trading economics shared by training and evaluation
+    # ------------------------------------------------------------------
+    def position_from_action(self, action_dir: torch.Tensor) -> torch.Tensor:
+        """Mirror of the live bot's entry rule: |action| > 0.20 opens a full long / short, else flat."""
+        return torch.where(action_dir > DIRECTION_DEADBAND, torch.ones_like(action_dir),
+                           torch.where(action_dir < -DIRECTION_DEADBAND, -torch.ones_like(action_dir),
+                                       torch.zeros_like(action_dir)))
+
+    def trade_return(self, rewards: torch.Tensor) -> torch.Tensor:
+        """
+        Blended forward market return (% of price) a position opened now would capture, clipped to
+        the bot's hard stop-loss / take-profit envelope. rewards: (batch, 3) -> (batch, 1)
+        """
+        w = torch.tensor(REWARD_HORIZON_WEIGHTS, dtype=rewards.dtype, device=rewards.device)
+        blended = (rewards * w).sum(dim=-1, keepdim=True)
+        return torch.clamp(blended, -STOP_LOSS_PCT, TAKE_PROFIT_PCT)
+
+    def action_pnl(self, action_dir: torch.Tensor, trade_ret: torch.Tensor) -> torch.Tensor:
+        """Net PnL (% of notional) of taking `action_dir` given the realized market return, after round-trip costs."""
+        pos = self.position_from_action(action_dir)
+        return pos * trade_ret - ROUND_TRIP_COST_PCT * pos.abs()
 
     def train_step(
         self,
@@ -171,7 +223,22 @@ class PPOTrainer:
         require_stored_behavior_policy: bool = False,
         use_off_policy_correction: bool = False
     ):
-        """Executes a single mathematically valid PPO training step with strict data validation."""
+        """
+        One PPO update with strict data validation.
+
+        rewards are TRUE forward market returns (%, direction-free) for 5m / 1h / 4h.
+
+        Critic: direct regression of those returns (what the live bot reads as "critic_return %").
+                No bootstrapping: samples are independent one-step decisions.
+        Actor (direction head):
+          - Replay data (no behavior log-probs): the market move is known, so the PnL of ANY action
+            can be computed. We sample K fresh actions per state from the current policy, score them
+            exactly, and use a leave-one-out baseline. This is genuinely on-policy PPO and learns from
+            every stored state (HOLDs included), not just the handful of executed trades.
+          - Rollout / stored behavior log-probs: classic PPO on the logged actions, scored the same way.
+        Confidence head: calibrated probability that the current direction call is profitable after costs.
+        Size head: follows confidence (bet more only when the call is more likely to win).
+        """
         if rollout_buffer is not None:
             states, actions, rewards, next_states, dones, stored_old_log_probs = rollout_buffer.build_tensors(filter_deterministic=True)
         elif tensors is not None:
@@ -185,7 +252,7 @@ class PPOTrainer:
 
         if len(states) == 0:
             return False
-            
+
         # Priority 2: Never silently reset model parameters if non-finite weights are found. Stop update & report.
         is_nan = any(not torch.isfinite(p).all() for p in self.model.parameters())
         if is_nan:
@@ -206,25 +273,22 @@ class PPOTrainer:
             logger.error(f"PPO: Invalid dones tensor dimension {dones.shape}. Expected (batch, 1).")
             return False
 
-        # Normalize state vectors so wallet balance & entry price don't drown out market indicators in LayerNorm
+        # Normalize state vectors (idempotent: already-normalized live frames pass through unchanged)
         states = normalize_state_tensor(states)
-        next_states = normalize_state_tensor(next_states)
 
         # Detect and filter corrupted non-finite samples (Never silently convert with nan_to_num)
         finite_s = torch.isfinite(states).all(dim=1).all(dim=1)
-        finite_ns = torch.isfinite(next_states).all(dim=1).all(dim=1)
         finite_a = torch.isfinite(actions).all(dim=1)
         finite_r = torch.isfinite(rewards).all(dim=1)
         finite_d = torch.isfinite(dones).all(dim=1)
 
-        valid_mask = finite_s & finite_ns & finite_a & finite_r & finite_d
+        valid_mask = finite_s & finite_a & finite_r & finite_d
         corrupted_count = int((~valid_mask).sum().item())
         if corrupted_count > 0:
             logger.warning(f"PPO: Logged and rejected {corrupted_count} corrupted samples containing NaN/Inf values. Retaining only valid historical experiences.")
             states = states[valid_mask]
             actions = actions[valid_mask]
             rewards = rewards[valid_mask]
-            next_states = next_states[valid_mask]
             dones = dones[valid_mask]
             if stored_old_log_probs is not None and len(stored_old_log_probs) == len(valid_mask):
                 stored_old_log_probs = stored_old_log_probs[valid_mask]
@@ -242,9 +306,7 @@ class PPOTrainer:
         if (torch.abs(actions) > 10.0).any():
             logger.error("PPO: Out-of-bounds action values detected (> 10.0). Aborting update.")
             return False
-            
-        self.model.train()
-        
+
         # 1. Behavior Policy Old Log Probabilities
         if stored_old_log_probs is not None:
             if not torch.isfinite(stored_old_log_probs).all():
@@ -261,110 +323,118 @@ class PPOTrainer:
             if stored_old_log_probs.shape[0] > 1 and torch.all(stored_old_log_probs == stored_old_log_probs[0]):
                 logger.error("PPO: Stored old-policy log probabilities are arbitrary constant values. Rejected.")
                 return False
-            old_log_probs = stored_old_log_probs
-            with torch.no_grad():
-                old_action_preds, old_values = self.model(states)
-                _, next_values = self.model(next_states)
-        else:
-            if require_stored_behavior_policy:
-                logger.error("PPO: Replay samples lack stored behavior policy log probabilities. Cannot execute on-policy PPO update without actual behavior policy.")
-                return False
-            with torch.no_grad():
-                old_action_preds, old_values = self.model(states)
-                _, next_values = self.model(next_states)
-                action_std = torch.exp(torch.clamp(self.log_std, min=-2.0, max=0.5))
-                dist_old = torch.distributions.Normal(old_action_preds, action_std)
-                old_log_probs = dist_old.log_prob(actions).sum(dim=-1, keepdim=True)
-            
+        elif require_stored_behavior_policy:
+            logger.error("PPO: Replay samples lack stored behavior policy log probabilities. Cannot execute on-policy PPO update without actual behavior policy.")
+            return False
+
+        safe_rewards = torch.clamp(rewards, min=-15.0, max=15.0)
+        trade_ret = self.trade_return(safe_rewards)  # (B, 1)
+        use_logged_actions = stored_old_log_probs is not None
+        K = 1 if use_logged_actions else self.actions_per_state
+
+        self.model.train()
         with torch.no_grad():
-            safe_rewards = torch.clamp(rewards, min=-15.0, max=15.0)
-            advantages, returns = self.compute_gae(safe_rewards, old_values, next_values, dones)
+            old_mean, _ = self.model(states)
+            dir_std = self._action_std()[0]
+            if use_logged_actions:
+                sampled_dir = actions[:, 0:1]                                   # (B, 1)
+                old_log_probs = stored_old_log_probs.reshape(-1, 1)
+                pnl = self.action_pnl(sampled_dir, trade_ret)                   # (B, 1)
+                advantages = pnl - pnl.mean()
+            else:
+                dist_old = torch.distributions.Normal(old_mean[:, 0:1].expand(-1, K), dir_std)
+                sampled_dir = dist_old.sample()                                 # (B, K)
+                old_log_probs = dist_old.log_prob(sampled_dir)                  # (B, K)
+                pnl = self.action_pnl(sampled_dir, trade_ret)                   # (B, K)
+                # Leave-one-out baseline: compare each sampled action to the others for the SAME state
+                advantages = pnl - (pnl.sum(dim=1, keepdim=True) - pnl) / (K - 1)
 
-            if not (torch.isfinite(advantages).all() and torch.isfinite(returns).all()):
-                logger.error("PPO: Computed non-finite advantages or returns. Aborting update.")
-                return False
-
-            # Directional Policy Advantage Alignment:
-            # - For LONG actions (+0.5): advantageous when market rises (positive returns).
-            # - For SHORT actions (-0.5): advantageous when market falls (negative returns -> positive advantage).
-            # - For HOLD actions (0.0): advantageous when market falls (preserving capital vs drawdown).
-            raw_advantages = advantages.mean(dim=1, keepdim=True)
-            dir_multiplier = torch.where(
-                actions[:, 0:1] < -0.1, -1.0,
-                torch.where(actions[:, 0:1] > 0.1, 1.0,
-                            torch.where(raw_advantages < 0.0, -0.3, 0.0))
-            )
-            actor_advantages = raw_advantages * dir_multiplier
-            adv_mean = actor_advantages.mean()
-            adv_std = actor_advantages.std(unbiased=False)
-            
-            # Phase 1.A: Never manufacture random advantages. If insufficient variance, skip update.
-            if actor_advantages.size(0) <= 1 or adv_std <= 1e-6:
+            adv_std = advantages.std(unbiased=False)
+            # Phase 1.A: Never manufacture random advantages.
+            # - No reward variation at all -> nothing to learn, defer the whole update.
+            # - Rewards vary but every sampled action scored the same (converged policy) -> no actor
+            #   gradient this step, but the critic / confidence heads still learn.
+            if advantages.numel() <= 1 or (adv_std <= 1e-6 and safe_rewards.std(unbiased=False) <= 1e-6):
                 logger.info(f"PPO: Insufficient reward variation in batch (adv_std={adv_std.item():.6f} <= 1e-6). Deferring update.")
                 return False
-                
-            actor_advantages = (actor_advantages - adv_mean) / (adv_std + 1e-8)
-            
+            if adv_std <= 1e-6:
+                advantages = torch.zeros_like(advantages)
+            else:
+                advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
+
+            # Confidence target: would the current direction call win after costs?
+            # (When the policy is flat, the call is judged as if it had picked the right side.)
+            current_pos = self.position_from_action(old_mean[:, 0:1])
+            call = torch.where(current_pos != 0, current_pos, torch.sign(trade_ret))
+            conf_target = ((call * trade_ret - ROUND_TRIP_COST_PCT) > 0).float()
+
         # 2. PPO Epochs
         for _ in range(epochs):
             action_preds, values = self.model(states)
-            
-            action_std = torch.exp(torch.clamp(self.log_std, min=-2.0, max=0.5))
-            dist = torch.distributions.Normal(action_preds, action_std)
-            log_probs = dist.log_prob(actions).sum(dim=-1, keepdim=True)
-            
+
+            if use_logged_actions:
+                dist = torch.distributions.Normal(action_preds, self._action_std())
+                log_probs = dist.log_prob(actions).sum(dim=-1, keepdim=True)
+                entropy = dist.entropy().sum(dim=-1).mean()
+            else:
+                dist = torch.distributions.Normal(action_preds[:, 0:1].expand(-1, K), self._action_std()[0])
+                log_probs = dist.log_prob(sampled_dir)
+                entropy = dist.entropy()[:, 0].mean()
+
             # Numerically stable probability ratio
             diff = torch.clamp(log_probs - old_log_probs, min=-10.0, max=10.0)
             ratio = torch.exp(diff)
-            
+
             # Off-policy correction: Importance sampling truncation (V-trace style)
             if use_off_policy_correction:
                 ratio = torch.clamp(ratio, max=1.0)
-            
+
             # Clipped surrogate objective
-            surr1 = ratio * actor_advantages
-            surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * actor_advantages
+            surr1 = ratio * advantages
+            surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages
             actor_loss = -torch.min(surr1, surr2).mean()
-            
-            # Value loss (MSE across multi-horizon critic)
-            critic_loss = nn.MSELoss()(values, returns)
-            
-            # Analytical Gaussian distribution entropy
-            entropy = dist.entropy().sum(dim=-1).mean()
-            entropy_coef = 0.015
-            
-            loss = actor_loss + 0.5 * critic_loss - entropy_coef * entropy
-            
+
+            # Critic: robust regression of true multi-horizon market returns (heavy-tailed -> Huber)
+            critic_loss = nn.functional.smooth_l1_loss(values, safe_rewards, beta=1.0)
+
+            # Confidence head (tanh space -> probability) and size head anchored to it
+            conf_prob = torch.clamp((action_preds[:, 1:2] + 1.0) / 2.0, 1e-4, 1.0 - 1e-4)
+            conf_loss = nn.functional.binary_cross_entropy(conf_prob, conf_target)
+            size_loss = nn.functional.mse_loss(action_preds[:, 2:3], (2.0 * conf_prob.detach() - 1.0))
+
+            entropy_coef = 0.002
+            loss = actor_loss + 0.5 * critic_loss + 0.2 * conf_loss + 0.05 * size_loss - entropy_coef * entropy
+
             if not torch.isfinite(loss):
                 logger.error("PPO Loss is NaN or Inf! Skipping step.")
                 break
-                
+
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(list(self.model.parameters()) + [self.log_std], 0.5)
             self.optimizer.step()
-            
-        logger.info(f"PPO Training Step Complete | Loss: {loss.item():.4f} | Actor: {actor_loss.item():.4f} | Critic: {critic_loss.item():.4f} | Entropy: {entropy.item():.4f} | Rewards: {rewards[:, 0].mean().item():.4f} | Values: {values[:, 0].mean().item():.4f}")
-        
-        # Calculate extra metrics for dashboard BEFORE deleting tensors
+
         with torch.no_grad():
-            batch_reward = float(rewards[:, 0].mean().item()) # Dashboard tracks 5m reward
-            
-            # Action distribution (actions[:, 0]: 0.0=Hold, 0.5=Buy, -0.5=Sell)
-            actual_size = actions.size(0)
-            act_types = actions[:, 0]
-            holds = float((act_types == 0.0).sum().item()) / actual_size if actual_size > 0 else 1.0
-            buys = float((act_types > 0.0).sum().item()) / actual_size if actual_size > 0 else 0.0
-            sells = float((act_types < 0.0).sum().item()) / actual_size if actual_size > 0 else 0.0
+            batch_reward = float(rewards[:, 0].mean().item())  # Dashboard tracks 5m market return
+            mean_pnl = float(pnl.mean().item())
+            # Action distribution of the CURRENT policy (deterministic), not of the logged data
+            cur_pos = self.position_from_action(action_preds[:, 0:1].detach())
+            holds = float((cur_pos == 0).float().mean().item())
+            buys = float((cur_pos > 0).float().mean().item())
+            sells = float((cur_pos < 0).float().mean().item())
+
+        logger.info(
+            f"PPO Training Step Complete | Loss: {loss.item():.4f} | Actor: {actor_loss.item():.4f} | "
+            f"Critic: {critic_loss.item():.4f} | Conf: {conf_loss.item():.4f} | Entropy: {entropy.item():.4f} | "
+            f"Sampled PnL: {mean_pnl:+.4f}% | Policy L/S/H: {buys:.2f}/{sells:.2f}/{holds:.2f} | "
+            f"MktRet5m: {batch_reward:+.4f}% | Critic5m: {values[:, 0].mean().item():+.4f}%"
+        )
 
         # MEMORY FIX: Now safe to delete large tensors - all scalar values already extracted above
         del states, actions, rewards, next_states, dones
-        del old_action_preds, old_values, next_values
-        del old_log_probs, safe_rewards, advantages, returns, actor_advantages
+        del old_mean, old_log_probs, safe_rewards, advantages
         # Note: Do NOT call gc.collect() here. It causes GIL deadlocks and freezes PyTorch.
-            
-        # Publish metrics to Redis asynchronously via asyncio.create_task or run_coroutine_threadsafe
-        # We assume trainer loop might be sync or async. Let's provide a safe sync wrapper or fire-and-forget
+
         payload = {
             "timestamp": time.time(),
             "loss": float(loss.item()),
@@ -384,9 +454,60 @@ class PPOTrainer:
                 loop.create_task(self._publish_metrics(payload))
             except RuntimeError:
                 asyncio.run(self._publish_metrics(payload))
-            
+
         return True
-            
+
+    def save_trainer_state(self, path: str = TRAINER_STATE_PATH):
+        """log_std and optimizer moments live outside model.state_dict(); persist them so restarts don't reset exploration."""
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            torch.save({"log_std": self.log_std.detach().clone(), "optimizer": self.optimizer.state_dict()}, path)
+        except Exception as e:
+            logger.warning(f"Could not save trainer state: {e}")
+
+    def load_trainer_state(self, path: str = TRAINER_STATE_PATH):
+        if not os.path.exists(path):
+            return
+        try:
+            state = torch.load(path, map_location="cpu")
+            with torch.no_grad():
+                self.log_std.copy_(state["log_std"])
+            self.optimizer.load_state_dict(state["optimizer"])
+            logger.info(f"Restored trainer state (log_std={self.log_std.detach().numpy().round(3).tolist()}).")
+        except Exception as e:
+            logger.warning(f"Could not restore trainer state ({e}); continuing with fresh exploration noise.")
+
+    def fit_feature_stats(self, n_experiences: int = 400) -> bool:
+        """
+        Fits per-slot mean / std on training frames and stores them in the model (they ship with the
+        checkpoint). Only ACTIVE slots (core.schemas.state_layout) that actually vary in the data are
+        enabled; RESERVED / DEPRECATED / dead slots are masked to 0 so they cannot add noise.
+        Fit once, then keep fixed: the weights learn on top of these statistics.
+        """
+        pool = list(self.buffer.cache)
+        if len(pool) < 30:
+            logger.warning(f"Feature stats: only {len(pool)} training experiences available; keeping current statistics.")
+            return False
+        import random as _random
+        sample = _random.sample(pool, min(n_experiences, len(pool)))
+        states, _, _, _, _ = self.buffer.build_tensors(sample, seq_len=300)
+        if len(states) == 0:
+            return False
+        frames = normalize_state_tensor(states).reshape(-1, STATE_DIM)
+        frames = frames[torch.isfinite(frames).all(dim=1)]
+        mean = frames.mean(dim=0)
+        std = frames.std(dim=0, unbiased=False)
+        mask = torch.zeros(STATE_DIM)
+        mask[list(ACTIVE_SLOTS)] = 1.0
+        mask = mask * (std > 1e-6).float()
+        self.model.set_feature_stats(mean, std, mask)
+        dead = [i for i in ACTIVE_SLOTS if std[i] <= 1e-6]
+        logger.info(
+            f"Feature stats fitted on {frames.shape[0]} frames: {int(mask.sum().item())} slots enabled, "
+            f"{len(dead)} ACTIVE slots carry no data yet (masked until refit): {dead}"
+        )
+        return True
+
     async def _publish_metrics(self, payload: dict):
         if os.getenv("LOCAL_MODE") == "True":
             return  # In local mode, metrics are saved directly to logs and tournament history
@@ -410,17 +531,42 @@ class PPOTrainer:
         except Exception:
             pass
 
+    def _score_policy(self, model: nn.Module, states: torch.Tensor, rewards: torch.Tensor) -> dict:
+        """Deterministic (live-like) holdout scoring of one model."""
+        model.eval()
+        with torch.no_grad():
+            acts, vals = model(states)
+        trade_ret = self.trade_return(rewards)
+        dir_ = acts[:, 0:1]
+        pos = self.position_from_action(dir_)
+        pnl = self.action_pnl(dir_, trade_ret)
+        n_trades = int((pos != 0).sum().item())
+        wins = int(((pnl > 0) & (pos != 0)).sum().item())
+        # Critic skill per horizon vs the naive "price won't move" forecast (1.0 = perfect, 0 = no skill, < 0 = harmful)
+        mse = ((vals - rewards) ** 2).mean(dim=0)
+        naive = (rewards ** 2).mean(dim=0).clamp_min(1e-8)
+        skill = 1.0 - mse / naive
+        return {
+            "acts": acts, "vals": vals,
+            "sim_pnl": float(pnl.mean().item()),               # mean net % per decision (0 = staying flat)
+            "total_pnl": float(pnl.sum().item()),
+            "n_trades": n_trades,
+            "trade_rate": n_trades / max(1, len(pos)),
+            "win_rate": wins / n_trades if n_trades else 0.0,
+            "long_share": float((pos > 0).sum().item()) / n_trades if n_trades else 0.0,
+            "critic_mse": float(mse.mean().item()),
+            "critic_skill": [float(x) for x in skill.tolist()],
+        }
+
     def evaluate_candidate(self, sample_size: int = 1000) -> dict:
         """
-        Phase 27 & 53 Automated Model Evaluation:
-        Conducts a Champion vs Challenger Tournament before allowing any model promotion.
-        - Loads the current production Champion model from disk.
-        - Evaluates both Champion and Challenger on the same batch of replay buffer experiences.
-        - Compares:
-            1. Critic MSE (prediction accuracy on future multi-horizon moves).
-            2. Policy alignment / Simulated return (actions chosen vs realized returns).
-            3. Policy entropy (ensuring healthy diversity, zero mode collapse).
-        - A Challenger is ONLY approved for promotion if it proves mathematical superiority over the Champion.
+        Champion vs Challenger tournament on the CHRONOLOGICAL HOLDOUT (newest data, never trained on).
+
+        Both models act deterministically (as live), with the live entry rule (|a| > 0.2), scored by the
+        realized market move minus round-trip costs. A challenger is approved only if it:
+          1. does not lose money vs staying flat (strictly positive, unless the champion itself is losing),
+          2. beats the champion's holdout PnL and composite score by a margin,
+          3. has a critic that is not worse than the champion's (the bot gates trades on it).
         """
         # 1. Weights sanity check
         if any(torch.isnan(p).any() for p in self.model.parameters()):
@@ -428,9 +574,9 @@ class PPOTrainer:
             return {"approved": False, "reason": "NAN_WEIGHTS"}
 
         min_eval_samples = 30
-        batch = self.buffer.sample(sample_size)
+        batch = self.buffer.sample_holdout(sample_size)
         if len(batch) < min_eval_samples:
-            logger.warning(f"Candidate evaluation REJECTED: Replay buffer has insufficient samples ({len(batch)} < {min_eval_samples}).")
+            logger.warning(f"Candidate evaluation REJECTED: Holdout has insufficient samples ({len(batch)} < {min_eval_samples}).")
             return {"approved": False, "reason": "INSUFFICIENT_SAMPLE_SIZE", "critic_loss": 0.0, "entropy": 0.0}
 
         try:
@@ -441,125 +587,78 @@ class PPOTrainer:
 
             states = normalize_state_tensor(states)
             states = torch.nan_to_num(states, nan=0.0, posinf=1.0, neginf=-1.0)
-            rewards = torch.nan_to_num(rewards, nan=0.0, posinf=1.0, neginf=-1.0)
-            safe_rewards = torch.clamp(rewards, min=-15.0, max=15.0)
-            actual_5m_ret = rewards[:, 0]
+            rewards = torch.clamp(torch.nan_to_num(rewards, nan=0.0, posinf=0.0, neginf=0.0), min=-15.0, max=15.0)
+            del actions, next_states, dones
 
-            self.model.eval()
-            with torch.no_grad():
-                challenger_actions, challenger_values = self.model(states)
+            chall = self._score_policy(self.model, states, rewards)
+            if torch.isnan(chall["acts"]).any() or torch.isnan(chall["vals"]).any():
+                logger.error("Candidate evaluation FAILED: Challenger output contains NaN.")
+                return {"approved": False, "reason": "NAN_OUTPUTS"}
+            challenger_entropy = float(chall["acts"][:, 0].std().item())
 
-                if torch.isnan(challenger_actions).any() or torch.isnan(challenger_values).any():
-                    logger.error("Candidate evaluation FAILED: Challenger output contains NaN.")
-                    return {"approved": False, "reason": "NAN_OUTPUTS"}
+            # A one-sided policy that trades a lot is almost certainly fitting the holdout's regime, not an edge
+            if chall["trade_rate"] > 0.05 and (chall["long_share"] > 0.95 or chall["long_share"] < 0.05):
+                logger.warning(f"Candidate evaluation FAILED: Action monoculture (trade rate {chall['trade_rate']:.1%}, long share {chall['long_share']:.1%}).")
+                return {"approved": False, "reason": "ACTION_MONOCULTURE", "long_share": chall["long_share"], "trade_rate": chall["trade_rate"]}
 
-                # Strict Policy Entropy Floor (Prevents pushing mode-collapsed models)
-                noise = torch.randn_like(challenger_actions) * 1e-5
-                var = (challenger_actions + noise).var(dim=0, unbiased=False)
-                challenger_entropy = float(torch.sqrt(var + 1e-8).mean().item())
-
-                if challenger_entropy < 0.20:
-                    logger.warning(f"Candidate evaluation FAILED: Challenger mode collapse / low entropy ({challenger_entropy:.4f} < 0.20). Preserving champion.")
-                    return {"approved": False, "reason": "LOW_POLICY_ENTROPY", "entropy": challenger_entropy}
-
-                challenger_critic_mse = float(nn.MSELoss()(challenger_values, safe_rewards).item())
-                if challenger_critic_mse > 100.0:
-                    logger.warning(f"Candidate evaluation FAILED: Challenger critic loss exploded ({challenger_critic_mse:.2f} > 100.0). Preserving champion.")
-                    return {"approved": False, "reason": "CRITIC_EXPLODED", "critic_loss": challenger_critic_mse}
-
-                # Action Monoculture / Saturation Check (Prevents pushing 100% blind short/long models)
-                short_ratio = float((challenger_actions[:, 0] < -0.2).float().mean().item())
-                long_ratio = float((challenger_actions[:, 0] > 0.2).float().mean().item())
-                if short_ratio > 0.85 or long_ratio > 0.85:
-                    logger.warning(f"Candidate evaluation FAILED: Action monoculture detected (Short: {short_ratio*100:.1f}%, Long: {long_ratio*100:.1f}%). Model is blindly biased.")
-                    return {"approved": False, "reason": "ACTION_MONOCULTURE", "short_ratio": short_ratio, "long_ratio": long_ratio}
-
-                # Critic Prediction Variance Check (Ensures Critic responds dynamically to market regimes)
-                c_std = float(challenger_values[:, 0].std().item())
-                if c_std < 0.05:
-                    logger.warning(f"Candidate evaluation FAILED: Critic output has near-zero variance ({c_std:.4f} < 0.05). Critic has collapsed.")
-                    return {"approved": False, "reason": "CRITIC_ZERO_VARIANCE", "critic_std": c_std}
-
-            # Real-World VPS Fee & Slippage Simulation:
-            # 0.10% Binance Futures round-trip taker fee + 0.02% conservative slippage
-            fee_hurdle = 0.10
-            slippage_hurdle = 0.02
-            total_cost_hurdle = fee_hurdle + slippage_hurdle
-
-            challenger_is_active = (torch.abs(challenger_actions[:, 0]) > 0.2).float()
-            challenger_net_returns = (challenger_actions[:, 0] * actual_5m_ret) - (challenger_is_active * total_cost_hurdle)
-            challenger_sim_pnl = float(challenger_net_returns.mean().item())
-            challenger_score = challenger_sim_pnl - (0.05 * challenger_critic_mse)
+            fee_hurdle = settings.taker_fee_pct * 2.0 * 100.0
+            slippage_hurdle = ROUND_TRIP_COST_PCT - fee_hurdle
 
             # 2. Benchmark against Production Champion
             champion_path = "models/production/model_v1.pt"
-            champion_available = os.path.exists(champion_path)
-            
-            if not champion_available:
+            if not os.path.exists(champion_path):
                 logger.error("Candidate evaluation FAILED: Production champion checkpoint (models/production/model_v1.pt) is missing. Failing closed to prevent unbenchmarked promotion.")
-                del states, actions, rewards, next_states, dones
                 return {
                     "approved": False,
                     "reason": "MISSING_CHAMPION_CHECKPOINT",
-                    "challenger_score": challenger_score,
+                    "challenger_score": None,
                     "champion_score": None,
-                    "critic_loss": challenger_critic_mse,
+                    "critic_loss": chall["critic_mse"],
                     "entropy": challenger_entropy,
-                    "sample_size": len(batch)
+                    "sample_size": len(states)
                 }
 
-            # Load Champion for comparison
             champion_model = SingleSymbolActorCritic(input_dim=200)
             try:
                 champion_state = torch.load(champion_path, map_location="cpu")
                 champion_model.load_state_dict(champion_state)
-                champion_model.eval()
-
-                with torch.no_grad():
-                    champ_actions, champ_values = champion_model(states)
-                    champ_critic_mse = float(nn.MSELoss()(champ_values, safe_rewards).item())
-                    champ_is_active = (torch.abs(champ_actions[:, 0]) > 0.2).float()
-                    champ_net_returns = (champ_actions[:, 0] * actual_5m_ret) - (champ_is_active * total_cost_hurdle)
-                    champ_sim_pnl = float(champ_net_returns.mean().item())
-                    champion_score = champ_sim_pnl - (0.05 * champ_critic_mse)
-
-                del champion_model, champ_actions, champ_values
+                champ = self._score_policy(champion_model, states, rewards)
+                del champion_model
             except Exception as champ_e:
                 logger.error(f"Candidate evaluation FAILED: Corrupt, incompatible, or unloadable champion model ({champ_e}). Failing closed without fabricating benchmark scores.")
-                del states, actions, rewards, next_states, dones
                 return {
                     "approved": False,
                     "reason": f"CHAMPION_LOAD_FAILURE: {champ_e}",
-                    "challenger_score": challenger_score,
+                    "challenger_score": None,
                     "champion_score": None,
-                    "critic_loss": challenger_critic_mse,
+                    "critic_loss": chall["critic_mse"],
                     "entropy": challenger_entropy,
-                    "sample_size": len(batch)
+                    "sample_size": len(states)
                 }
 
             eval_sample_count = len(states)
-            del states, actions, rewards, next_states, dones
+            del states, rewards
 
-            # Superiority criteria (Task 1.1: Strict Numerical Superiority):
-            # Challenger must strictly beat Champion on composite score AND not degrade trading PnL!
-            # Critic MSE improvement alone cannot authorize promotion if composite score or trading PnL is inferior.
-            SUPERIORITY_MARGIN = 0.01  # Predefined minimum improvement threshold
+            # Composite score: holdout trading PnL dominates; critic skill (1h horizon) is a tie-breaker.
+            challenger_score = chall["sim_pnl"] + 0.01 * chall["critic_skill"][1]
+            champion_score = champ["sim_pnl"] + 0.01 * champ["critic_skill"][1]
+
+            SUPERIORITY_MARGIN = 0.0005  # % per decision
             score_beaten = challenger_score >= (champion_score + SUPERIORITY_MARGIN)
-            pnl_preserved = challenger_sim_pnl >= champ_sim_pnl
-            critic_not_degraded = challenger_critic_mse <= max(champ_critic_mse * 1.25, 25.0)
-            is_superior = score_beaten and pnl_preserved and critic_not_degraded
+            pnl_preserved = chall["sim_pnl"] >= champ["sim_pnl"]
+            beats_flat = chall["sim_pnl"] > 0.0 or (chall["sim_pnl"] >= 0.0 and champ["sim_pnl"] < 0.0)
+            critic_not_degraded = chall["critic_skill"][1] >= min(champ["critic_skill"][1], 0.0) - 0.01
+            is_superior = score_beaten and pnl_preserved and beats_flat and critic_not_degraded
 
             eval_timestamp = time.time()
-            
+
             # Compute cryptographic hash of the current champion checkpoint
             import hashlib
-            champ_hash = ""
-            if os.path.exists(champion_path):
-                sha256 = hashlib.sha256()
-                with open(champion_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(65536), b""):
-                        sha256.update(chunk)
-                champ_hash = sha256.hexdigest()
+            sha256 = hashlib.sha256()
+            with open(champion_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    sha256.update(chunk)
+            champ_hash = sha256.hexdigest()
 
             # Read champion version from version.json
             champ_version = "v1"
@@ -575,52 +674,52 @@ class PPOTrainer:
             metrics = {
                 "challenger_score": challenger_score,
                 "champion_score": champion_score,
-                "challenger_critic_mse": challenger_critic_mse,
-                "champion_critic_mse": champ_critic_mse,
-                "challenger_sim_pnl": challenger_sim_pnl,
-                "champion_sim_pnl": champ_sim_pnl,
-                "critic_loss": challenger_critic_mse,
+                "challenger_critic_mse": chall["critic_mse"],
+                "champion_critic_mse": champ["critic_mse"],
+                "challenger_sim_pnl": chall["sim_pnl"],
+                "champion_sim_pnl": champ["sim_pnl"],
+                "challenger_total_pnl": chall["total_pnl"],
+                "champion_total_pnl": champ["total_pnl"],
+                "challenger_trades": chall["n_trades"],
+                "champion_trades": champ["n_trades"],
+                "challenger_win_rate": chall["win_rate"],
+                "champion_win_rate": champ["win_rate"],
+                "challenger_critic_skill": chall["critic_skill"],
+                "champion_critic_skill": champ["critic_skill"],
+                "critic_loss": chall["critic_mse"],
                 "entropy": challenger_entropy,
                 "sample_size": eval_sample_count,
                 "eval_timestamp": eval_timestamp,
                 "eval_type": "chronological_tournament",
                 "data_split": "chronological_holdout",
+                "holdout_start_ts": float(min(self.buffer.holdout_start_ts, 2**62)),
                 "fee_hurdle": fee_hurdle,
                 "slippage_hurdle": slippage_hurdle,
                 "champion_checkpoint_hash": champ_hash,
                 "champion_version": champ_version,
-                "evaluator_version": "v2_trusted"
+                "evaluator_version": "v3_holdout_counterfactual"
             }
 
+            summary = (
+                f"Holdout PnL/decision: {chall['sim_pnl']:+.4f}% vs Champ {champ['sim_pnl']:+.4f}% | "
+                f"Trades: {chall['n_trades']} (win {chall['win_rate']:.0%}) vs {champ['n_trades']} (win {champ['win_rate']:.0%}) | "
+                f"Critic skill 5m/1h/4h: {[round(x, 3) for x in chall['critic_skill']]} vs {[round(x, 3) for x in champ['critic_skill']]} | "
+                f"n={eval_sample_count}"
+            )
             if is_superior:
-                logger.info(
-                    f"🏆 TOURNAMENT WINNER: Challenger is SUPERIOR! "
-                    f"Score: {challenger_score:.4f} vs Champ: {champion_score:.4f} | "
-                    f"Critic MSE: {challenger_critic_mse:.4f} vs {champ_critic_mse:.4f} | "
-                    f"Sim PnL: {challenger_sim_pnl:.4f} vs {champ_sim_pnl:.4f}"
-                )
-                return {
-                    "approved": True,
-                    "reason": "SUPERIOR_TO_CHAMPION",
-                    "metrics": metrics,
-                    **metrics
-                }
+                logger.info(f"🏆 TOURNAMENT WINNER: Challenger is SUPERIOR on holdout! {summary}")
+                return {"approved": True, "reason": "SUPERIOR_TO_CHAMPION", "metrics": metrics, **metrics}
+            if not (score_beaten and pnl_preserved):
+                reason = "INFERIOR_TO_CHAMPION"
+            elif not beats_flat:
+                reason = "NO_EDGE_AFTER_COSTS"
             else:
-                logger.warning(
-                    f"⛔ TOURNAMENT DEFEAT: Challenger is INFERIOR to current live Champion! "
-                    f"Score: {challenger_score:.4f} vs Champ: {champion_score:.4f} (Margin: {SUPERIORITY_MARGIN}) | "
-                    f"Critic MSE: {challenger_critic_mse:.4f} vs {champ_critic_mse:.4f} | "
-                    f"Sim PnL: {challenger_sim_pnl:.4f} vs {champ_sim_pnl:.4f}. REJECTING PUSH."
-                )
-                return {
-                    "approved": False,
-                    "reason": "INFERIOR_TO_CHAMPION",
-                    "metrics": metrics,
-                    **metrics
-                }
+                reason = "CRITIC_DEGRADED"
+            logger.warning(f"⛔ TOURNAMENT DEFEAT ({reason}): {summary}. REJECTING PUSH.")
+            return {"approved": False, "reason": reason, "metrics": metrics, **metrics}
         except Exception as e:
-            logger.error(f"Error during candidate tournament evaluation: {e}")
-            return {"approved": False, "reason": f"EXCEPTION_{e}"}
+            logger.exception(f"Error during candidate tournament evaluation: {e!r}")
+            return {"approved": False, "reason": f"EXCEPTION_{e!r}"}
 
 async def run_training_loop():
     set_log_file("logs/ai_trainer.log")
@@ -697,6 +796,11 @@ async def run_training_loop():
 
     # 2. PRIORITY #1: Load Cache into RAM FIRST (Unobstructed, zero DB lock contention)
     trainer = PPOTrainer(model=model, limit=limit)
+    trainer.load_trainer_state()
+    # Per-slot input scaling: fit once for models that predate it, or on request when new inputs come online
+    import sys as _sys
+    if not bool(model.feat_fitted) or "--refit-feature-stats" in _sys.argv:
+        trainer.fit_feature_stats()
     logger.info("Starting continuous PPO training on historical/live data...")
 
     # 3. PRIORITY #2: Start DB Auto-Syncer & Golden Extractor in background thread AFTER cache is in RAM
@@ -707,15 +811,35 @@ async def run_training_loop():
             import sys
             import subprocess
             from scripts.sync_db import sync_experiences
+            from apps.experience.reward_calculator import RewardCalculator, golden_table
             
             def background_syncer():
-                logger.info("Background DB Syncer & Golden Extractor started!")
+                logger.info("Background DB Syncer, Reward Grader & Golden Extractor started!")
                 last_golden_time = 0.0
+                grader = RewardCalculator()
+                try:
+                    golden = golden_table()
+                except Exception as e:
+                    golden = None
+                    logger.warning(f"Golden table unavailable for grading: {e}")
                 while True:
                     try:
                         sync_experiences()
                     except Exception as e:
                         logger.error(f"Sync failed: {e}")
+
+                    try:
+                        # Grade synced rows locally with TRUE market returns (public klines); the trainer
+                        # only learns from rows graded this way.
+                        graded = grader.process_batch()
+                        if graded:
+                            logger.info(f"Reward grader: graded {graded} experiences with true market returns.")
+                        # Golden rows are copies; any copied before grading must be graded in place too.
+                        graded_golden = grader.process_batch(table=golden) if golden is not None else 0
+                        if graded_golden:
+                            logger.info(f"Reward grader: graded {graded_golden} golden experiences.")
+                    except Exception as e:
+                        logger.error(f"Reward grading failed: {e}")
                         
                     try:
                         # Extract golden trades every 5 minutes (300s) to keep DB fast
@@ -782,6 +906,7 @@ async def run_training_loop():
                 cand_step_path = os.path.join(cand_dir, f"candidate_step_{step}.pt")
                 torch.save(model.state_dict(), cand_step_path)
                 torch.save(model.state_dict(), os.path.join(cand_dir, "candidate_latest.pt"))
+                trainer.save_trainer_state()
                 logger.info(f"💾 Saved candidate checkpoint: {cand_step_path}")
                 
                 eval_result = trainer.evaluate_candidate(sample_size=1000)

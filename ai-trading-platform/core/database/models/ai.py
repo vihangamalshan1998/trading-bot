@@ -2,6 +2,12 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, ForeignKe
 from core.database.base import Base
 from datetime import datetime
 
+# Experience.data_quality_flags markers written by the reward calculator.
+# GRADED_FLAG: reward_5m / reward_1h / reward_4h hold TRUE forward market returns (% of price).
+# Only rows carrying it are trainable; legacy grades summed the shaped `reward` column instead.
+GRADED_FLAG = "MKT_RET_V2"
+UNGRADEABLE_FLAG = "MKT_RET_V2_FAIL"
+
 class ModelVersion(Base):
     __tablename__ = "model_versions"
 

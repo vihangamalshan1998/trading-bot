@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     binance_api_key: str = Field(default="")
     binance_api_secret: str = Field(default="")
     binance_testnet: bool = Field(default=True)
+    # Market data (features, prices for stops) comes from the venue the bot trades on by default so
+    # position PnL and exits use the same prices as the fills. Set True to read mainnet data while
+    # trading testnet (more realistic order book, but prices can differ slightly from testnet fills).
+    market_data_mainnet: bool = Field(default=False)
 
     # ============================================================
     # Phase 1 SAFETY GATES

@@ -54,28 +54,29 @@ def extract_golden_batch():
                 SELECT id FROM experiences 
                 WHERE id NOT IN (SELECT id FROM golden_experiences)
                 AND ((timestamp >= %s AND timestamp <= %s) OR (timestamp >= %s AND timestamp <= %s))
-                AND reward_5m IS NOT NULL /* GUARANTEE: Only extract fully graded/marked data */
+                /* GUARANTEE: Only extract rows graded with TRUE market returns by the Teacher's Assistant
+                   (reward_calculator). reward_5m alone is not enough: rows synced from an old VPS grader
+                   carry non-NULL junk grades. */
+                AND data_quality_flags = 'MKT_RET_V2'
                 AND (
                     /* The Whales: Massive absolute dollar amounts */
-                    (realized_pnl >= 150 OR realized_pnl <= -150) 
-                    OR 
-                    /* The Snipers: High percentage ROI with a minimum $50 floor */
+                    (realized_pnl >= 150 OR realized_pnl <= -150)
+                    OR
+                    /* The Snipers: High percentage ROI with a minimum $50 floor.
+                       (reward_5m is a % price move, not dollars, so it is not divided by margin.) */
                     (
-                        (realized_pnl >= 50 OR realized_pnl <= -50) 
+                        (realized_pnl >= 50 OR realized_pnl <= -50)
                         AND (
-                            (margin > 0 AND (realized_pnl / margin) >= %s) OR 
-                            (margin > 0 AND (realized_pnl / margin) <= %s) OR 
-                            (margin > 0 AND (reward_5m / margin) >= %s) OR 
-                            (margin > 0 AND (reward_5m / margin) <= %s)
+                            (margin > 0 AND (realized_pnl / margin) >= %s) OR
+                            (margin > 0 AND (realized_pnl / margin) <= %s)
                         )
                     )
                 );
             """
-            
+
             params = [
-                start_ts, end_ts, 
-                start_ts * 1000, end_ts * 1000, 
-                MIN_WIN_PCT, MAX_LOSS_PCT,
+                start_ts, end_ts,
+                start_ts * 1000, end_ts * 1000,
                 MIN_WIN_PCT, MAX_LOSS_PCT
             ]
             

@@ -1364,6 +1364,7 @@ class ProductionTradingBot:
                 flat_candidates.sort(key=lambda x: x[0], reverse=True)
                 sorted_eval_symbols = active_symbols + [sym for _, sym in flat_candidates]
                 
+                entries_this_cycle = 0  # new positions sent in this 5s cycle (capped by settings.max_entries_per_cycle)
                 for sym in sorted_eval_symbols:
 
                         
@@ -2043,6 +2044,9 @@ class ProductionTradingBot:
                         if self._entries_last_hour() >= settings.max_entries_per_hour:
                             logger.info(f"[{sym}] SKIPPING OPEN: hourly entry cap reached ({settings.max_entries_per_hour}/h).")
                             continue
+                        if entries_this_cycle >= settings.max_entries_per_cycle:
+                            logger.info(f"[{sym}] SKIPPING OPEN: {settings.max_entries_per_cycle} entries already sent this cycle; re-checking next cycle.")
+                            continue
 
                     # GUARD 5: Institutional Dynamic Volatility & Conviction Margin Sizing (Kelly / ATR Scaling)
                     # Dynamically scales between 20.0% and 40.0% based on conviction, horizon alignment, and coin volatility.
@@ -2146,7 +2150,10 @@ class ProductionTradingBot:
                         de_escalation_mult = 1.00
 
                     max_margin_budget = max(0.0, current_eq * dynamic_margin_pct * kelly_compound_mult * de_escalation_mult)
-                    margin_allocated = min(max(0.0, self.portfolio_state.free_margin), max_margin_budget * max(0.70, target_size))
+                    # Margin reserve: new entries never use the last entry_margin_reserve_pct of equity, so fills, fees
+                    # and adverse moves cannot push free margin under Airbag 4's 15% line (forced market trims).
+                    entry_margin_room = self.portfolio_state.free_margin - settings.entry_margin_reserve_pct * current_eq
+                    margin_allocated = min(max(0.0, entry_margin_room), max_margin_budget * max(0.70, target_size))
                     notional_requested = margin_allocated * pos.leverage
                     
                     # Side determination respecting Hysteresis Deadband (Strict One-Trade-One-Entry: No Add-ons)
@@ -2641,6 +2648,7 @@ class ProductionTradingBot:
                                     if "OPEN_LONG" in side:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
                                             self.recent_entry_times.append(time.time())
+                                            entries_this_cycle += 1
                                             self.portfolio_state.positions[sym].entry_time = time.time()
                                             self.position_entry_times[sym] = time.time()
                                             self.portfolio_state.positions[sym].entry_price = order_exec_price
@@ -2665,6 +2673,7 @@ class ProductionTradingBot:
                                     elif "OPEN_SHORT" in side:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
                                             self.recent_entry_times.append(time.time())
+                                            entries_this_cycle += 1
                                             self.portfolio_state.positions[sym].entry_time = time.time()
                                             self.position_entry_times[sym] = time.time()
                                             self.portfolio_state.positions[sym].entry_price = order_exec_price

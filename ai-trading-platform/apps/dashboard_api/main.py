@@ -362,7 +362,8 @@ def _tail(path: str, n: int) -> list:
 @app.get("/api/services")
 async def get_services():
     procs = await asyncio.to_thread(_pm2_processes)
-    services = list(procs) if procs else await asyncio.to_thread(_local_log_services)
+    # Copies: the log paths are stripped below, and the cached pm2 list must keep them for /api/logs
+    services = [dict(p) for p in (procs or await asyncio.to_thread(_local_log_services))]
     trainer = await _redis_json(TRAINER_STATUS_KEY)
     if trainer:
         age = time.time() - float(trainer.get("timestamp", 0) or 0)

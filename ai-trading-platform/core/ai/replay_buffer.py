@@ -4,7 +4,8 @@ import numpy as np
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 from typing import List, Dict, Any, Tuple
-from core.database.models.ai import Experience, GRADED_FLAG
+from core.database.models.ai import Experience, TradeOutcome, GRADED_FLAG
+from core.risk import exit_policy
 from core.config.settings import settings
 from core.ai.sumtree import SumTree
 from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT
@@ -129,16 +130,43 @@ class ReplayBuffer:
                 except Exception:
                     self.golden_cache = []
                     
+                n_labelled = self._attach_outcomes(session)
+
             # Rebuild SumTree from new cache so priorities are fresh
             if self.capacity > 0 and len(self.cache) > 0:
                 self.sumtree.rebuild_from_list(self.cache, alpha=0.6)
                 
-            logger.info(f"✅ Replay buffer cache loaded successfully ({len(self.cache)} train, {len(self.holdout_cache)} holdout, {len(self.golden_cache)} golden in RAM)!")
+            logger.info(f"✅ Replay buffer cache loaded successfully ({len(self.cache)} train, {len(self.holdout_cache)} holdout, {len(self.golden_cache)} golden in RAM, {n_labelled} with real trade outcomes)!")
                 
         except Exception as e:
             from core.logging.logger import logger
             import traceback
             logger.error(f"CRITICAL ERROR loading cache from DB: {e}\n{traceback.format_exc()}")
+
+    def _attach_outcomes(self, session) -> int:
+        """
+        Attaches path-aware trade outcomes (TradeOutcome rows written by the reward calculator) to the
+        cached experiences as `exp._trade_outcome = (long_pct, short_pct)`. Rows without one fall back
+        to the blended market return in build_tensors().
+        """
+        groups = {"exp": self.cache + self.holdout_cache, "gold": list(self.golden_cache)}
+        labelled = 0
+        for src, exps in groups.items():
+            ids = [e.id for e in exps]
+            found = {}
+            try:
+                for i in range(0, len(ids), 1000):
+                    chunk = ids[i:i + 1000]
+                    for exp_id, lp, sp in session.query(TradeOutcome.exp_id, TradeOutcome.long_pct, TradeOutcome.short_pct).filter(
+                            TradeOutcome.src == src, TradeOutcome.exp_id.in_(chunk)).all():
+                        if lp is not None and sp is not None:
+                            found[exp_id] = (float(lp), float(sp))
+            except Exception:
+                found = {}  # table not created yet
+            for e in exps:
+                e._trade_outcome = found.get(e.id)
+                labelled += e._trade_outcome is not None
+        return labelled
 
     def cleanup_old_data(self, days: int = 30):
         """Automatically deletes experiences older than X days to prevent database bloat."""
@@ -358,6 +386,7 @@ class ReplayBuffer:
         Rows without true market returns are dropped (never guessed).
         """
         states, actions, rewards, next_states, dones = [], [], [], [], []
+        self.last_symbols = []  # symbol of each returned row (same order), used for per-coin holdout stats
         
         for exp in batch:
             if exp.reward_5m is None or exp.reward_1h is None or exp.reward_4h is None:
@@ -376,10 +405,23 @@ class ReplayBuffer:
             r_1h_clean = float(np.clip(exp.reward_1h, -15.0, 15.0))
             r_4h_clean = float(np.clip(exp.reward_4h, -25.0, 25.0))
             
+            # Columns 3 / 4: realized gross % move of a LONG / SHORT opened here under the live exit
+            # policy (stop, TP1, trailing runner, 4h limit). Fallback when no path label exists yet:
+            # the blended market return clipped to the exit envelope (symmetric).
+            outcome = getattr(exp, "_trade_outcome", None)
+            if outcome is not None:
+                long_pct, short_pct = outcome
+            else:
+                w = exit_policy.HORIZON_WEIGHTS
+                blended = w[0] * r_5m_clean + w[1] * r_1h_clean + w[2] * r_4h_clean
+                long_pct = float(np.clip(blended, -exit_policy.MAX_STOP * 100.0, exit_policy.MAX_STOP * exit_policy.HARD_TP_RR * 100.0))
+                short_pct = float(np.clip(-blended, -exit_policy.MAX_STOP * 100.0, exit_policy.MAX_STOP * exit_policy.HARD_TP_RR * 100.0))
+
             states.append(seq_states)
             actions.append(act)
-            rewards.append([r_5m_clean, r_1h_clean, r_4h_clean])  # 3 critic heads
+            rewards.append([r_5m_clean, r_1h_clean, r_4h_clean, long_pct, short_pct])  # 3 critic heads + 2 trade outcomes
             next_states.append(seq_states)
+            self.last_symbols.append(getattr(exp, "symbol", "") or "")
             # Each sample is an independent one-step decision (contextual bandit): always terminal.
             dones.append([1.0])
             

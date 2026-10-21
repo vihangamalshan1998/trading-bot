@@ -14,7 +14,7 @@ New rules:
   - First take-profit (50% of the position): at least 1.5x the stop AND at least stop + 2x costs.
   - Remaining 50%: stop moves to a breakeven that really covers round-trip costs, then trails one
     stop-distance behind the best price reached. Hard take-profit at 3x the stop.
-  - Stale positions (no progress for 4h) are closed to free margin.
+  - Stale positions (no progress for 4h) are closed to free margin; every position closes at 4h (MAX HOLD).
 """
 from dataclasses import dataclass
 
@@ -29,6 +29,9 @@ HARD_TP_RR = 3.0
 DEFAULT_VOLATILITY = 0.0075  # used when the collector has no volatility reading yet
 STALE_SECONDS = 4 * 3600
 STALE_BAND = ROUND_TRIP_COST  # "no progress" = within +/- costs
+# Hard time limit: the critic forecasts at most 4h ahead, and the trainer grades every decision by
+# replaying it for at most 4h, so live positions close at 4h too (training == live).
+MAX_HOLD_SECONDS = 4 * 3600
 
 # Weights of the critic's 5m / 1h / 4h forecasts that define the expected move of a trade under
 # these exits (1-4h swing). Shared by the trainer's reward and the bot's entry hurdle.
@@ -95,4 +98,69 @@ def evaluate_exit(move: float, peak_move: float, tp1_done: bool, held_seconds: f
             return ExitDecision(close_all=True, reason=reason)
     if held_seconds >= STALE_SECONDS and abs(move) < STALE_BAND:
         return ExitDecision(close_all=True, reason="STALE PRUNE")
+    if held_seconds >= MAX_HOLD_SECONDS:
+        return ExitDecision(close_all=True, reason="MAX HOLD")
     return ExitDecision()
+
+
+def volatility_1h_from_ohlc(ohlc) -> float:
+    """
+    1h ATR(14) as a fraction of price from 1-minute bars (rows: open, high, low, close), oldest first.
+    Same definition as FeatureEngine.volatility_1h() so the grader replays trades with the exact
+    stop distance the live bot would have used. 0.0 until 3 hourly bars exist.
+    """
+    import numpy as np
+    bars = np.asarray(ohlc, dtype=np.float64)
+    usable = (len(bars) // 60) * 60
+    if usable < 180:
+        return 0.0
+    b = bars[len(bars) - usable:].reshape(-1, 60, 4)
+    highs, lows, closes = b[:, :, 1].max(axis=1), b[:, :, 2].min(axis=1), b[:, -1, 3]
+    tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
+    atr = float(np.mean(tr[-14:])) if len(tr) else 0.0
+    return atr / max(float(closes[-1]), 1e-12)
+
+
+def simulate_trade(direction: int, entry: float, bars, levels: ExitLevels, bar_seconds: int = 60) -> float:
+    """
+    Replays one position opened at `entry` through 1-minute bars (rows: high, low, close) with the
+    live exit rules and returns the realized favourable price move (fraction, GROSS of costs),
+    averaged over the position (the 50% TP1 slice and the runner).
+
+    Inside a bar the adverse extreme is assumed to come first (conservative: a bar that touches
+    both the stop and a target counts as a stop). Positions still open at MAX_HOLD_SECONDS, or when
+    the data ends, close at that bar's close.
+    """
+    if entry <= 0 or direction == 0:
+        return 0.0
+    banked = 0.0          # move realized by the TP1 half
+    tp1_done = False
+    peak = 0.0
+    move_close = 0.0
+    held = 0
+    for high, low, close in bars:
+        held += bar_seconds
+        if direction > 0:
+            best, worst, move_close = (high - entry) / entry, (low - entry) / entry, (close - entry) / entry
+        else:
+            best, worst, move_close = (entry - low) / entry, (entry - high) / entry, (entry - close) / entry
+        # 1. adverse side first
+        if not tp1_done:
+            if worst <= -levels.stop:
+                return -levels.stop
+        else:
+            floor = max(levels.breakeven, peak - levels.trail_gap)
+            if worst <= floor:
+                return 0.5 * banked + 0.5 * floor
+        # 2. favourable side
+        if best >= levels.hard_tp:
+            return 0.5 * banked + 0.5 * levels.hard_tp if tp1_done else levels.hard_tp
+        if not tp1_done and best >= levels.tp1:
+            tp1_done, banked = True, levels.tp1
+        peak = max(peak, best)
+        # 3. time limit
+        if held >= MAX_HOLD_SECONDS:
+            break
+    if tp1_done:
+        return 0.5 * banked + 0.5 * move_close
+    return move_close

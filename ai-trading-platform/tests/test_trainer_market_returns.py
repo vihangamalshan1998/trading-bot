@@ -57,8 +57,14 @@ def test_build_tensors_uses_only_true_market_returns():
                                      data_quality_flags=None, action="OPEN_LONG", next_state=None)
     s, a, r, ns, d = buf.build_tensors([graded, legacy, ungraded], seq_len=5)
     assert s.shape == (1, 5, 200)
-    assert torch.allclose(r, torch.tensor([[0.2, -0.5, 1.1]]))
+    # 3 critic targets + LONG / SHORT outcome (no path label -> blended return 0.1*0.2 + 0.6*-0.5 + 0.3*1.1)
+    assert torch.allclose(r, torch.tensor([[0.2, -0.5, 1.1, 0.05, -0.05]]), atol=1e-6)
     assert d.item() == 1.0
+
+    # With a path-aware label the outcome columns carry it (asymmetric: both sides can lose)
+    graded._trade_outcome = (-0.45, -0.35)
+    _, _, r, _, _ = buf.build_tensors([graded], seq_len=5)
+    assert torch.allclose(r[0, 3:], torch.tensor([-0.45, -0.35]))
 
 
 @pytest.fixture

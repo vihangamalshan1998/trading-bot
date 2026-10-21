@@ -70,7 +70,9 @@ _MARKET = _block(MARKET_OFFSET, "market", [
     ("vwap_dev_1m", A, N), ("vwap_dev_15m", A, N), ("realized_vol_1m", A, N), ("vol_24h", A, LOG),
     # Orderbook & StatArb [15]
     ("spread_bps", A, BPS), ("bid_qty", A, LOG), ("ask_qty", A, LOG), ("ob_imbalance", A, N), ("ob_skew_l2", A, N),
-    ("pad_45", R, N), ("pad_46", R, N), ("pad_47", R, N), ("pad_48", R, N), ("pad_49", R, N),
+    # Binance mainnet REST book (1000 levels): notional imbalance within 0.1% / 1% of mid, resting $ within 1%
+    ("depth_imb_0p1pct", A, N), ("depth_imb_1pct", A, N), ("depth_bid_usd_1pct", A, LOG), ("depth_ask_usd_1pct", A, LOG),
+    ("pad_49", R, N),
     ("hurst", A, N), ("acf_1", A, N), ("return_skew", A, N), ("return_kurtosis", A, N), ("pad_54", R, N),
     # Technical indicators [35]
     ("rsi_1m", A, N), ("rsi_5m", A, N), ("rsi_15m", A, N), ("rsi_1h", A, N),
@@ -84,7 +86,9 @@ _MARKET = _block(MARKET_OFFSET, "market", [
     ("body_1", A, N), ("wick_up_2", A, N), ("wick_dn_2", A, N), ("body_2", A, N), ("pad_99", R, N),
     # Derivatives [10]
     ("funding_rate", A, N), ("liq_1m", A, LOG), ("liq_15m", A, LOG), ("oi_delta_1m", A, N), ("long_short_ratio", A, N),
-    ("mark_premium", A, N), ("pad_106", R, N), ("pad_107", R, N), ("pad_108", R, N), ("pad_109", R, N),
+    ("mark_premium", A, N),
+    # time to next funding payment (fraction of 8h) and Binance + Bybit + OKX crowding
+    ("time_to_funding", A, N), ("xex_funding_spread", A, N), ("xex_funding_mean", A, N), ("xex_oi_change_1h", A, N),
 ])
 _MACRO = _block(110, "macro", [
     ("time_sin", A, N), ("time_cos", A, N), ("day_sin", A, N), ("day_cos", A, N), ("cross_coin_beta", A, N),
@@ -100,9 +104,21 @@ _STATARB = _block(140, "statarb", [
     # okx_momentum_lead is hard-coded to 0 by the statarb collector (never implemented) -> RESERVED until it is
     ("okx_premium", A, N), ("bybit_premium", A, N), ("okx_momentum_lead", R, N),
 ] + [(f"pad_{143 + i}", R, N) for i in range(7)])
-_FUTURE = [Slot(i, f"reserved_{i}", "future", RESERVED) for i in range(150, STATE_DIM)]
+# Cross-sectional ranking (computed by the live bot from all coins' market states at the same moment):
+# the coin's return minus the basket average, its percentile rank in [-1, 1], funding rank, basket moves.
+_CROSS_SECTION = _block(150, "cross_section", [
+    ("rel_ret_5m", A, N), ("rel_ret_15m", A, N), ("rel_ret_30m", A, N), ("rel_ret_24h", A, N),
+    ("rank_ret_15m", A, N), ("rank_ret_30m", A, N), ("rank_ret_24h", A, N), ("rank_funding", A, N),
+    ("basket_ret_15m", A, N), ("basket_ret_30m", A, N),
+])
+# Market-wide signals (apps/market_collector/global_context.py -> Redis market:global_context)
+_GLOBAL = _block(160, "global", [
+    ("coinbase_premium_btc", A, N), ("coinbase_premium_eth", A, N), ("dvol_btc", A, N), ("dvol_eth", A, N),
+    ("dvol_btc_change_1h", A, N),
+] + [(f"pad_{165 + i}", R, N) for i in range(5)])
+_FUTURE = [Slot(i, f"reserved_{i}", "future", RESERVED) for i in range(170, STATE_DIM)]
 
-SLOTS: List[Slot] = _PORTFOLIO + _POSITION + _MARKET + _MACRO + _WHALE + _STATARB + _FUTURE
+SLOTS: List[Slot] = _PORTFOLIO + _POSITION + _MARKET + _MACRO + _WHALE + _STATARB + _CROSS_SECTION + _GLOBAL + _FUTURE
 
 assert len(SLOTS) == STATE_DIM and all(s.index == i for i, s in enumerate(SLOTS)), "state layout must cover 0..199 in order"
 
@@ -112,6 +128,13 @@ SPREAD_SLOT = next(s.index for s in SLOTS if s.transform == BPS)
 SLOT_BY_NAME = {s.name: s.index for s in SLOTS}
 WHALE_IMBALANCE_SLOT = SLOT_BY_NAME["whale_imbalance"]
 WHALE_VOLUME_SLOT = SLOT_BY_NAME["whale_volume_norm"]
+CROSS_SECTION_START = SLOT_BY_NAME["rel_ret_5m"]
+CROSS_SECTION_DIM = len(_CROSS_SECTION)
+GLOBAL_START = SLOT_BY_NAME["coinbase_premium_btc"]
+GLOBAL_KEYS = tuple(s.name for s in _GLOBAL if s.status == ACTIVE)
+# Inputs switched on in October 2026 (formerly always 0). Models without fitted feature statistics
+# (legacy champions) never saw them, so the live bot zeroes them for those models at inference time.
+ADDED_2026_10_SLOTS = tuple(range(45, 49)) + tuple(range(106, 110)) + tuple(range(150, 165))
 
 # FeatureEngine-relative indices (0..89) for the live bot's per-feature transforms
 MARKET_LOG_VOLUME_FEATURES = tuple(i - MARKET_OFFSET for i in LOG_VOLUME_SLOTS if MARKET_OFFSET <= i < MARKET_OFFSET + MARKET_DIM)

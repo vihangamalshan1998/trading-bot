@@ -17,7 +17,7 @@ from apps.research.model import SingleSymbolActorCritic
 from core.ai.registry import ModelRegistry
 from core.config.settings import settings
 from core.risk import exit_policy
-from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT
+from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT, ADDED_2026_10_SLOTS
 
 # --- Trading economics used to score actions (all in % of price / notional) ---
 # Live entry rule: |action| > 0.20 opens a position (see trading_bot.main side determination)
@@ -214,10 +214,23 @@ class PPOTrainer:
         blended = (rewards * w).sum(dim=-1, keepdim=True)
         return torch.clamp(blended, -STOP_LOSS_PCT, TAKE_PROFIT_PCT)
 
-    def action_pnl(self, action_dir: torch.Tensor, trade_ret: torch.Tensor) -> torch.Tensor:
-        """Net PnL (% of notional) of taking `action_dir` given the realized market return, after round-trip costs."""
+    def trade_outcomes(self, rewards: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        (long_pct, short_pct), each (batch, 1): gross % a LONG / SHORT opened at that state actually
+        realized under the live exit policy (replay buffer columns 3 / 4, path-aware: a trade that hits
+        its stop before the price recovers is a LOSS). 3-column rewards fall back to the blended return.
+        """
+        if rewards.shape[-1] >= 5:
+            return rewards[:, 3:4], rewards[:, 4:5]
+        blended = self.trade_return(rewards[:, :3])
+        return blended, -blended
+
+    def action_pnl(self, action_dir: torch.Tensor, long_ret: torch.Tensor, short_ret: torch.Tensor) -> torch.Tensor:
+        """Net PnL (% of notional) of taking `action_dir`, from the realized LONG / SHORT outcome, after round-trip costs."""
         pos = self.position_from_action(action_dir)
-        return pos * trade_ret - ROUND_TRIP_COST_PCT * pos.abs()
+        gross = torch.where(pos > 0, long_ret.expand_as(pos),
+                            torch.where(pos < 0, short_ret.expand_as(pos), torch.zeros_like(pos)))
+        return gross - ROUND_TRIP_COST_PCT * pos.abs()
 
     def train_step(
         self,
@@ -272,8 +285,8 @@ class PPOTrainer:
         if actions.ndim != 2 or actions.shape[-1] != 4:
             logger.error(f"PPO: Invalid action tensor dimension {actions.shape}. Expected (batch, 4).")
             return False
-        if rewards.ndim != 2 or rewards.shape[-1] != 3:
-            logger.error(f"PPO: Invalid reward tensor dimension {rewards.shape}. Expected (batch, 3).")
+        if rewards.ndim != 2 or rewards.shape[-1] not in (3, 5):
+            logger.error(f"PPO: Invalid reward tensor dimension {rewards.shape}. Expected (batch, 3) or (batch, 5).")
             return False
         if dones.ndim != 2 or dones.shape[-1] != 1:
             logger.error(f"PPO: Invalid dones tensor dimension {dones.shape}. Expected (batch, 1).")
@@ -334,7 +347,8 @@ class PPOTrainer:
             return False
 
         safe_rewards = torch.clamp(rewards, min=-15.0, max=15.0)
-        trade_ret = self.trade_return(safe_rewards)  # (B, 1)
+        market_ret = safe_rewards[:, :3]                         # critic targets (5m / 1h / 4h)
+        long_ret, short_ret = self.trade_outcomes(safe_rewards)  # actor targets, (B, 1) each
         use_logged_actions = stored_old_log_probs is not None
         K = 1 if use_logged_actions else self.actions_per_state
 
@@ -345,13 +359,13 @@ class PPOTrainer:
             if use_logged_actions:
                 sampled_dir = actions[:, 0:1]                                   # (B, 1)
                 old_log_probs = stored_old_log_probs.reshape(-1, 1)
-                pnl = self.action_pnl(sampled_dir, trade_ret)                   # (B, 1)
+                pnl = self.action_pnl(sampled_dir, long_ret, short_ret)         # (B, 1)
                 advantages = pnl - pnl.mean()
             else:
                 dist_old = torch.distributions.Normal(old_mean[:, 0:1].expand(-1, K), dir_std)
                 sampled_dir = dist_old.sample()                                 # (B, K)
                 old_log_probs = dist_old.log_prob(sampled_dir)                  # (B, K)
-                pnl = self.action_pnl(sampled_dir, trade_ret)                   # (B, K)
+                pnl = self.action_pnl(sampled_dir, long_ret, short_ret)         # (B, K)
                 # Leave-one-out baseline: compare each sampled action to the others for the SAME state
                 advantages = pnl - (pnl.sum(dim=1, keepdim=True) - pnl) / (K - 1)
 
@@ -360,7 +374,7 @@ class PPOTrainer:
             # - No reward variation at all -> nothing to learn, defer the whole update.
             # - Rewards vary but every sampled action scored the same (converged policy) -> no actor
             #   gradient this step, but the critic / confidence heads still learn.
-            if advantages.numel() <= 1 or (adv_std <= 1e-6 and safe_rewards.std(unbiased=False) <= 1e-6):
+            if advantages.numel() <= 1 or (adv_std <= 1e-6 and market_ret.std(unbiased=False) <= 1e-6):
                 logger.info(f"PPO: Insufficient reward variation in batch (adv_std={adv_std.item():.6f} <= 1e-6). Deferring update.")
                 return False
             if adv_std <= 1e-6:
@@ -368,11 +382,12 @@ class PPOTrainer:
             else:
                 advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
 
-            # Confidence target: would the current direction call win after costs?
-            # (When the policy is flat, the call is judged as if it had picked the right side.)
+            # Confidence target: would the current direction call win after costs (real trade outcome)?
+            # (When the policy is flat, the call is judged as if it had picked the better side.)
             current_pos = self.position_from_action(old_mean[:, 0:1])
-            call = torch.where(current_pos != 0, current_pos, torch.sign(trade_ret))
-            conf_target = ((call * trade_ret - ROUND_TRIP_COST_PCT) > 0).float()
+            call_ret = torch.where(current_pos > 0, long_ret,
+                                   torch.where(current_pos < 0, short_ret, torch.maximum(long_ret, short_ret)))
+            conf_target = ((call_ret - ROUND_TRIP_COST_PCT) > 0).float()
 
         # 2. PPO Epochs
         for _ in range(epochs):
@@ -401,7 +416,7 @@ class PPOTrainer:
             actor_loss = -torch.min(surr1, surr2).mean()
 
             # Critic: robust regression of true multi-horizon market returns (heavy-tailed -> Huber)
-            critic_loss = nn.functional.smooth_l1_loss(values, safe_rewards, beta=1.0)
+            critic_loss = nn.functional.smooth_l1_loss(values, market_ret, beta=1.0)
 
             # Confidence head (tanh space -> probability) and size head anchored to it
             conf_prob = torch.clamp((action_preds[:, 1:2] + 1.0) / 2.0, 1e-4, 1.0 - 1e-4)
@@ -438,7 +453,7 @@ class PPOTrainer:
 
         # MEMORY FIX: Now safe to delete large tensors - all scalar values already extracted above
         del states, actions, rewards, next_states, dones
-        del old_mean, old_log_probs, safe_rewards, advantages
+        del old_mean, old_log_probs, safe_rewards, market_ret, long_ret, short_ret, advantages
         # Note: Do NOT call gc.collect() here. It causes GIL deadlocks and freezes PyTorch.
 
         payload = {
@@ -540,20 +555,25 @@ class PPOTrainer:
     def _score_policy(self, model: nn.Module, states: torch.Tensor, rewards: torch.Tensor) -> dict:
         """Deterministic (live-like) holdout scoring of one model."""
         model.eval()
+        if not bool(getattr(model, "feat_fitted", False)):
+            # Legacy (unfitted) models get 0 in the October 2026 inputs, exactly as the live bot feeds them
+            states = states.clone()
+            states[..., list(ADDED_2026_10_SLOTS)] = 0.0
         with torch.no_grad():
             acts, vals = model(states)
-        trade_ret = self.trade_return(rewards)
+        long_ret, short_ret = self.trade_outcomes(rewards)
+        market_ret = rewards[:, :3]
         dir_ = acts[:, 0:1]
         pos = self.position_from_action(dir_)
-        pnl = self.action_pnl(dir_, trade_ret)
+        pnl = self.action_pnl(dir_, long_ret, short_ret)
         n_trades = int((pos != 0).sum().item())
         wins = int(((pnl > 0) & (pos != 0)).sum().item())
         # Critic skill per horizon vs the naive "price won't move" forecast (1.0 = perfect, 0 = no skill, < 0 = harmful)
-        mse = ((vals - rewards) ** 2).mean(dim=0)
-        naive = (rewards ** 2).mean(dim=0).clamp_min(1e-8)
+        mse = ((vals - market_ret) ** 2).mean(dim=0)
+        naive = (market_ret ** 2).mean(dim=0).clamp_min(1e-8)
         skill = 1.0 - mse / naive
         return {
-            "acts": acts, "vals": vals,
+            "acts": acts, "vals": vals, "pnl": pnl, "pos": pos,
             "sim_pnl": float(pnl.mean().item()),               # mean net % per decision (0 = staying flat)
             "total_pnl": float(pnl.sum().item()),
             "n_trades": n_trades,
@@ -563,6 +583,88 @@ class PPOTrainer:
             "critic_mse": float(mse.mean().item()),
             "critic_skill": [float(x) for x in skill.tolist()],
         }
+
+    @staticmethod
+    def _monotone_rates(rates: List[float], weights: List[int]) -> List[float]:
+        """Pool-adjacent-violators: closest non-decreasing sequence (weighted)."""
+        blocks = [[r, w, 1] for r, w in zip(rates, weights)]
+        i = 0
+        while i < len(blocks) - 1:
+            if blocks[i][0] > blocks[i + 1][0]:
+                a, b = blocks[i], blocks[i + 1]
+                w = a[1] + b[1]
+                blocks[i] = [(a[0] * a[1] + b[0] * b[1]) / max(w, 1), w, a[2] + b[2]]
+                del blocks[i + 1]
+                i = max(i - 1, 0)
+            else:
+                i += 1
+        out = []
+        for r, _, n in blocks:
+            out.extend([r] * n)
+        return out
+
+    def derive_trade_policy(self, acts: torch.Tensor, pnl: torch.Tensor, pos: torch.Tensor, symbols: List[str]) -> dict:
+        """
+        Live trading policy learned on the holdout (shipped in version.json with the model):
+
+        1. Honest confidence: the raw confidence head is mapped to the win rate it ACTUALLY achieved on
+           unseen data (binned, forced monotone). The live bot logs / sizes with the calibrated value.
+        2. Confidence threshold: the raw confidence above which holdout trades made the most money
+           after costs (at least MIN_POLICY_TRADES trades), replacing the hand-set session hurdles.
+        3. Per-coin filter: coins whose trades above that threshold lost money on the holdout (with at
+           least MIN_COIN_TRADES trades of evidence) are blocked for this model.
+
+        Selection only RESTRICTS trading; the approval decision itself is made on the unfiltered policy.
+        """
+        MIN_POLICY_TRADES, MIN_COIN_TRADES, N_BINS = 30, 20, 6
+        conf = torch.clamp((acts[:, 1] + 1.0) / 2.0, 0.05, 0.99)   # same mapping as the live bot
+        traded = (pos[:, 0] != 0)
+        conf_t = conf[traded].tolist()
+        pnl_t = pnl[traded, 0].tolist()
+        sym_t = [s for s, k in zip(symbols, traded.tolist()) if k]
+        policy = {"version": 1, "min_confidence": None, "calibration": None, "blocked_symbols": [], "coin_stats": {}}
+        if len(conf_t) < MIN_POLICY_TRADES:
+            policy["note"] = f"only {len(conf_t)} holdout trades: no filters derived"
+            return policy
+
+        order = sorted(range(len(conf_t)), key=lambda i: conf_t[i])
+        # 1. Calibration bins (equal-count)
+        size = max(1, len(order) // N_BINS)
+        raw_pts, rates, weights = [], [], []
+        for b in range(0, len(order), size):
+            idx = order[b:b + size]
+            if len(idx) < max(5, size // 2) and raw_pts:
+                weights[-1] += len(idx)  # fold a small tail into the last bin
+                continue
+            raw_pts.append(sum(conf_t[i] for i in idx) / len(idx))
+            rates.append(sum(1 for i in idx if pnl_t[i] > 0) / len(idx))
+            weights.append(len(idx))
+        policy["calibration"] = {"raw": [round(x, 4) for x in raw_pts],
+                                 "win_rate": [round(x, 4) for x in self._monotone_rates(rates, weights)]}
+
+        # 2. Best confidence threshold by total holdout PnL
+        best_t, best_total = conf_t[order[0]], sum(pnl_t)
+        for k in range(len(order) - MIN_POLICY_TRADES + 1):
+            total = sum(pnl_t[i] for i in order[k:])
+            if total > best_total:
+                best_t, best_total = conf_t[order[k]], total
+        policy["min_confidence"] = round(float(best_t), 4)
+
+        # 3. Per-coin filter on the trades the live bot would take
+        kept = [i for i in order if conf_t[i] >= best_t]
+        stats = {}
+        for i in kept:
+            st = stats.setdefault(sym_t[i], {"n": 0, "pnl": 0.0, "wins": 0})
+            st["n"] += 1
+            st["pnl"] += pnl_t[i]
+            st["wins"] += pnl_t[i] > 0
+        policy["coin_stats"] = {s: {"n": v["n"], "mean_pnl": round(v["pnl"] / v["n"], 5), "win_rate": round(v["wins"] / v["n"], 3)}
+                                for s, v in stats.items()}
+        policy["blocked_symbols"] = sorted(s for s, v in stats.items() if v["n"] >= MIN_COIN_TRADES and v["pnl"] <= 0.0)
+        allowed = [i for i in kept if sym_t[i] not in policy["blocked_symbols"]]
+        policy["filtered_trades"] = len(allowed)
+        policy["filtered_pnl_per_trade"] = round(sum(pnl_t[i] for i in allowed) / len(allowed), 5) if allowed else 0.0
+        return policy
 
     def evaluate_candidate(self, sample_size: int = 1000) -> dict:
         """
@@ -587,6 +689,9 @@ class PPOTrainer:
 
         try:
             states, actions, rewards, next_states, dones = self.buffer.build_tensors(batch, seq_len=300)
+            row_symbols = list(getattr(self.buffer, "last_symbols", []) or [])
+            if len(row_symbols) != len(states):
+                row_symbols = [""] * len(states)
             if len(states) < min_eval_samples:
                 logger.warning(f"Candidate evaluation REJECTED: Insufficient valid sequence tensors ({len(states)} < {min_eval_samples}).")
                 return {"approved": False, "reason": "INSUFFICIENT_TENSORS", "critic_loss": 0.0, "entropy": 0.0}
@@ -644,6 +749,9 @@ class PPOTrainer:
 
             eval_sample_count = len(states)
             del states, rewards
+
+            # Per-coin filter + honest confidence, derived on the same unseen holdout (restrict-only)
+            trade_policy = self.derive_trade_policy(chall["acts"], chall["pnl"], chall["pos"], row_symbols)
 
             # Composite score: holdout trading PnL dominates; critic skill (1h horizon) is a tie-breaker.
             challenger_score = chall["sim_pnl"] + 0.01 * chall["critic_skill"][1]
@@ -703,14 +811,17 @@ class PPOTrainer:
                 "slippage_hurdle": slippage_hurdle,
                 "champion_checkpoint_hash": champ_hash,
                 "champion_version": champ_version,
-                "evaluator_version": "v3_holdout_counterfactual"
+                "evaluator_version": "v3_holdout_counterfactual",
+                "label_type": "path_aware_trade_outcome",
+                "trade_policy": trade_policy,
             }
 
             summary = (
                 f"Holdout PnL/decision: {chall['sim_pnl']:+.4f}% vs Champ {champ['sim_pnl']:+.4f}% | "
                 f"Trades: {chall['n_trades']} (win {chall['win_rate']:.0%}) vs {champ['n_trades']} (win {champ['win_rate']:.0%}) | "
                 f"Critic skill 5m/1h/4h: {[round(x, 3) for x in chall['critic_skill']]} vs {[round(x, 3) for x in champ['critic_skill']]} | "
-                f"n={eval_sample_count}"
+                f"n={eval_sample_count} | Policy: min conf {trade_policy.get('min_confidence')}, "
+                f"blocked {trade_policy.get('blocked_symbols')}, filtered PnL/trade {trade_policy.get('filtered_pnl_per_trade')}"
             )
             if is_superior:
                 logger.info(f"🏆 TOURNAMENT WINNER: Challenger is SUPERIOR on holdout! {summary}")
@@ -844,6 +955,13 @@ async def run_training_loop():
                         graded_golden = grader.process_batch(table=golden) if golden is not None else 0
                         if graded_golden:
                             logger.info(f"Reward grader: graded {graded_golden} golden experiences.")
+                        # Path-aware labels: what a LONG / SHORT opened at each record really earned
+                        # under the live exits (stop before recovery = loss). Backfills the history too.
+                        labelled = grader.process_outcomes()
+                        if golden is not None:
+                            labelled += grader.process_outcomes(table=golden, src="gold")
+                        if labelled:
+                            logger.info(f"Reward grader: added {labelled} real trade outcomes.")
                     except Exception as e:
                         logger.error(f"Reward grading failed: {e}")
                         

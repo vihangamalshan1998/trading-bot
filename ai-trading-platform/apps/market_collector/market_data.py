@@ -11,6 +11,7 @@ from apps.feature_engine.engine import FeatureEngine
 from core.data_quality.validator import DataQualityValidator
 from apps.market_collector.context_poller import market_data_is_mainnet, poll_context, seed_engines
 from core.exchange.binance_streams import combined_stream_urls
+from apps.market_collector.global_context import poll_global_context
 
 class BinanceWebSocketCollector:
     """
@@ -157,6 +158,8 @@ class BinanceWebSocketCollector:
             index = float(data.get('i', 1.0))
             if index > 0:
                 self.latest_raw[symbol]["mark_price_premium"] = (mark - index) / index
+            if data.get('T'):
+                self.latest_raw[symbol]["next_funding_ms"] = float(data['T'])
                 
             await self.publish_features(symbol)
         except Exception as e:
@@ -288,9 +291,11 @@ async def run_collector():
     
     try:
         # Run the WebSocket listener, REST poller, and dynamic Universe Screener concurrently
+        await redis_manager.connect()
         await asyncio.gather(
             collector.listen(),
             collector.poll_rest_data(),
+            poll_global_context(redis_manager.redis),
             screener.start()
         )
     except asyncio.CancelledError:

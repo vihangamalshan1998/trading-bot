@@ -7,15 +7,18 @@ import urllib.parse
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import create_engine, update, or_, Table, MetaData
+from sqlalchemy import create_engine, update, or_, func, insert, Table, MetaData
 from sqlalchemy.orm import sessionmaker
-from core.database.models.ai import Experience, GRADED_FLAG, UNGRADEABLE_FLAG
+from core.database.models.ai import Experience, TradeOutcome, GRADED_FLAG, UNGRADEABLE_FLAG
+from core.risk import exit_policy
 from core.config.settings import settings
 from core.logging.logger import logger, set_log_file
 
 HORIZONS_SEC = (300, 3600, 14400)  # 5m, 1h, 4h
 KLINE_MS = 60_000
 KLINES_PER_REQUEST = 1500
+VOL_HISTORY_MIN = 1000  # 1m bars before entry used for the 1h ATR stop distance (same window as the live FeatureEngine)
+OUTCOME_BARS = exit_policy.MAX_HOLD_SECONDS // 60
 
 
 class KlinePriceSource:
@@ -29,8 +32,8 @@ class KlinePriceSource:
     """
     def __init__(self):
         self.base_url = "https://testnet.binancefuture.com" if settings.binance_testnet else "https://fapi.binance.com"
-        # {symbol: {minute_open_ms: open_price}}
-        self.cache: Dict[str, Dict[int, float]] = defaultdict(dict)
+        # {symbol: {minute_open_ms: (open, high, low, close)}}
+        self.cache: Dict[str, Dict[int, Tuple[float, float, float, float]]] = defaultdict(dict)
         self.fetched_ranges: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
 
     def _fetch(self, symbol: str, start_ms: int, end_ms: int):
@@ -44,7 +47,7 @@ class KlinePriceSource:
             if not rows:
                 break
             for k in rows:
-                self.cache[symbol][int(k[0])] = float(k[1])
+                self.cache[symbol][int(k[0])] = (float(k[1]), float(k[2]), float(k[3]), float(k[4]))
             last_open = int(rows[-1][0])
             if last_open + KLINE_MS <= cursor:
                 break
@@ -65,10 +68,25 @@ class KlinePriceSource:
         candles = self.cache.get(symbol, {})
         # Tolerate up to 2 missing candles (exchange maintenance gaps)
         for k in range(3):
-            p = candles.get(minute + k * KLINE_MS)
-            if p and p > 0:
-                return p
+            bar = candles.get(minute + k * KLINE_MS)
+            if bar and bar[0] > 0:
+                return bar[0]
         return None
+
+    def entry_minute(self, t_sec: int) -> int:
+        """Open time (ms) of the candle whose open is the entry price used by price_at()."""
+        t_ms = int(t_sec) * 1000
+        return ((t_ms + KLINE_MS - 1) // KLINE_MS) * KLINE_MS
+
+    def bars(self, symbol: str, start_ms: int, n: int) -> List[Tuple[float, float, float, float]]:
+        """Up to n consecutive 1m candles from start_ms (missing minutes are skipped)."""
+        candles = self.cache.get(symbol, {})
+        out = []
+        for i in range(n):
+            bar = candles.get(start_ms + i * KLINE_MS)
+            if bar:
+                out.append(bar)
+        return out
 
 
 class RewardCalculator:
@@ -140,6 +158,79 @@ class RewardCalculator:
             logger.error(f"Reward Calculator Error: {e}")
             return 0
 
+    def outcome_for(self, symbol: str, t_sec: int) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """
+        (long_pct, short_pct, stop_pct): realized gross price move of a LONG / SHORT opened at t_sec under
+        the live exit policy, replayed on 1m klines. Klines for [t - 1000m, t + 4h] must be loaded.
+        """
+        start = self.prices.entry_minute(t_sec)
+        fwd = self.prices.bars(symbol, start, OUTCOME_BARS)
+        if len(fwd) < int(OUTCOME_BARS * 0.9) or fwd[0][0] <= 0:
+            return None, None, None
+        hist = self.prices.bars(symbol, start - VOL_HISTORY_MIN * KLINE_MS, VOL_HISTORY_MIN)
+        levels = exit_policy.exit_levels(exit_policy.volatility_1h_from_ohlc(hist) if hist else 0.0)
+        entry = fwd[0][0]
+        path = [(h, l, c) for _, h, l, c in fwd]
+        long_pct = exit_policy.simulate_trade(1, entry, path, levels) * 100.0
+        short_pct = exit_policy.simulate_trade(-1, entry, path, levels) * 100.0
+        return float(long_pct), float(short_pct), float(levels.stop * 100.0)
+
+    def process_outcomes(self, table: Optional[Table] = None, src: str = "exp", batch_size: int = 2000) -> int:
+        """
+        Adds path-aware trade outcomes (trade_outcomes table) for graded rows that do not have one yet.
+        Rows are processed in id order after the last labelled id, so each call is a cheap range scan.
+        """
+        t = Experience.__table__ if table is None else table
+        o = TradeOutcome.__table__
+        try:
+            o.create(self.engine, checkfirst=True)
+            with self.SessionLocal() as session:
+                last_id = session.query(func.max(o.c.exp_id)).filter(o.c.src == src).scalar() or 0
+                rows = session.query(t.c.id, t.c.symbol, t.c.timestamp).filter(
+                    t.c.id > last_id, t.c.data_quality_flags == GRADED_FLAG
+                ).order_by(t.c.id.asc()).limit(batch_size).all()
+                if not rows:
+                    return 0
+                by_symbol = defaultdict(list)
+                for r in rows:
+                    by_symbol[r.symbol].append(r)
+                values, missing_klines = [], False
+                for symbol, sym_rows in by_symbol.items():
+                    t_min = min(r.timestamp for r in sym_rows)
+                    t_max = max(r.timestamp for r in sym_rows)
+                    try:
+                        self.prices.ensure(symbol, (t_min - VOL_HISTORY_MIN * 60) * 1000 - KLINE_MS,
+                                           (t_max + exit_policy.MAX_HOLD_SECONDS) * 1000 + 3 * KLINE_MS)
+                    except Exception as e:
+                        logger.warning(f"Trade outcomes: kline fetch failed for {symbol}: {e}. Will retry later.")
+                        missing_klines = True
+                        continue
+                    for r in sym_rows:
+                        long_pct, short_pct, stop_pct = self.outcome_for(symbol, r.timestamp)
+                        values.append({"src": src, "exp_id": r.id, "symbol": symbol, "timestamp": r.timestamp,
+                                       "long_pct": long_pct, "short_pct": short_pct, "stop_pct": stop_pct})
+                if missing_klines:
+                    # Keep id order intact: never skip past rows whose klines could not be fetched
+                    done = {v["exp_id"] for v in values}
+                    first_missing = min(r.id for r in rows if r.id not in done)
+                    values = [v for v in values if v["exp_id"] < first_missing]
+                if values:
+                    session.execute(insert(o), values)
+                    session.commit()
+                return len(values)
+        except Exception as e:
+            logger.error(f"Trade outcome labelling error: {e}")
+            return 0
+
+    def outcomes_all(self, table: Optional[Table] = None, src: str = "exp") -> int:
+        total = 0
+        while True:
+            n = self.process_outcomes(table=table, src=src)
+            if n == 0:
+                return total
+            total += n
+            logger.info(f"Trade outcomes: labelled {total} {src} rows so far...")
+
     def grade_all(self, table: Optional[Table] = None) -> int:
         """Grades the whole backlog (used for the one-off re-grade of legacy rows)."""
         total = 0
@@ -160,6 +251,16 @@ async def main():
     set_log_file("logs/reward_calculator.log")
     logger.info("Starting Teacher's Assistant (Reward Calculator, true market returns)...")
     calculator = RewardCalculator()
+
+    if "--outcomes" in sys.argv:
+        n = calculator.outcomes_all()
+        logger.info(f"Trade outcomes complete: {n} experiences.")
+        try:
+            n = calculator.outcomes_all(table=golden_table(), src="gold")
+            logger.info(f"Trade outcomes complete: {n} golden experiences.")
+        except Exception as e:
+            logger.warning(f"Golden table outcomes skipped: {e}")
+        return
 
     if "--regrade" in sys.argv:
         n = calculator.grade_all()

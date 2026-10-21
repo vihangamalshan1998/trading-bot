@@ -117,6 +117,22 @@ class ModelRegistry:
         except Exception:
             return ""
 
+    def get_trade_policy(self) -> dict:
+        """
+        Holdout-derived live trading policy of the active champion (per-coin filter, confidence
+        threshold and calibration; see PPOTrainer.derive_trade_policy). {} for older champions.
+        """
+        version_file = os.path.join(self.model_dir, "version.json")
+        try:
+            import json
+            with open(version_file, "r") as f:
+                metrics = json.load(f).get("metrics") or {}
+            nested = metrics.get("metrics") if isinstance(metrics.get("metrics"), dict) else {}
+            policy = metrics.get("trade_policy") or nested.get("trade_policy") or {}
+            return policy if isinstance(policy, dict) else {}
+        except Exception:
+            return {}
+
     def check_for_updates(self) -> bool:
         """Returns True if a newer model checkpoint exists on disk."""
         checkpoint_path = os.path.join(self.model_dir, "model_v1.pt")

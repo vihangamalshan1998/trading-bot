@@ -14,7 +14,8 @@ from typing import Dict, Any
 from core.db.redis import redis_manager
 from core.ai.registry import ModelRegistry
 from core.risk import exit_policy
-from core.schemas.state_layout import MARKET_LOG_VOLUME_FEATURES, MARKET_SPREAD_FEATURE, MARKET_DEPRECATED_FEATURES
+from core.schemas.state_layout import MARKET_LOG_VOLUME_FEATURES, MARKET_SPREAD_FEATURE, MARKET_DEPRECATED_FEATURES, CROSS_SECTION_DIM, GLOBAL_KEYS, ADDED_2026_10_SLOTS
+from apps.market_collector.global_context import GLOBAL_CONTEXT_KEY
 from apps.research.model import SingleSymbolActorCritic
 from core.risk.risk_manager import RiskManager
 from core.exchange.binance_client import BinanceFuturesAdapter
@@ -65,6 +66,7 @@ class ProductionTradingBot:
         # 4. Strict Model Checkpoint Loading (graceful if no checkpoint yet)
         self.has_valid_model = False
         self.actor_signal_offset = 0.50
+        self.trade_policy = {}  # holdout-derived per-coin filter + confidence threshold / calibration (version.json)
         self.model = SingleSymbolActorCritic(input_dim=200)
         
         # VPS CPU FIX: Restrict PyTorch inference to 1 core so the trading bot doesn't hog the host CPU
@@ -97,6 +99,7 @@ class ProductionTradingBot:
         self.market_states: Dict[str, MarketState] = {}
         self.whale_states: Dict[str, dict] = {}
         self.statarb_states: Dict[str, dict] = {}
+        self.global_context: Dict[str, float] = {}  # Coinbase premium / DVOL (Redis market:global_context)
         
         # Phase 12: LSTM Sliding Window Sequence (300 steps = 5 minutes)
         self.sequence_length = 300
@@ -171,6 +174,33 @@ class ProductionTradingBot:
         evaluator = self.registry.get_evaluator_version()
         self.actor_signal_offset = 0.0 if evaluator.startswith("v3") else 0.50
         logger.info(f"Actor signal offset = {self.actor_signal_offset:.2f} (champion evaluator: {evaluator or 'legacy'})")
+        self.trade_policy = self.registry.get_trade_policy() if evaluator.startswith("v3") else {}
+        if self.trade_policy:
+            logger.info(
+                f"Model trade policy: min confidence {self.trade_policy.get('min_confidence')}, "
+                f"blocked coins {self.trade_policy.get('blocked_symbols') or []}, "
+                f"holdout PnL/trade {self.trade_policy.get('filtered_pnl_per_trade')}"
+            )
+
+    def _mask_unseen_inputs(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Legacy champions (no fitted feature statistics) were trained when the October 2026 inputs were
+        always 0; feed them 0 there so new data cannot shift their behaviour. Fitted models mask unseen
+        slots themselves (feat_mask). Stored experience frames always keep the real values.
+        """
+        if bool(getattr(self.model, "feat_fitted", False)):
+            return x
+        x = x.clone()
+        x[..., list(ADDED_2026_10_SLOTS)] = 0.0
+        return x
+
+    def _calibrated_confidence(self, raw_conf: float) -> float:
+        """Honest confidence: the win rate the champion's raw confidence actually achieved on unseen data."""
+        cal = (self.trade_policy or {}).get("calibration") or {}
+        xs, ys = cal.get("raw") or [], cal.get("win_rate") or []
+        if len(xs) >= 2 and len(xs) == len(ys):
+            return float(np.interp(raw_conf, xs, ys))
+        return float(raw_conf)
 
     def is_valid_contract(self, sym: str) -> bool:
         """
@@ -438,6 +468,55 @@ class ProductionTradingBot:
                 logger.warning(f"Error in HTF regime loop: {e}")
             await asyncio.sleep(180.0) # Refresh every 3 minutes
                     
+    async def poll_global_context_loop(self):
+        """Refreshes market-wide signals published by the market collector (apps/market_collector/global_context.py)."""
+        while self.running:
+            try:
+                if self.redis.redis:
+                    raw = await self.redis.redis.get(GLOBAL_CONTEXT_KEY)
+                    if raw:
+                        self.global_context = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+            except Exception as e:
+                logger.debug(f"Global context refresh failed: {e}")
+            await asyncio.sleep(30.0)
+
+    def _cross_section_features(self, symbol: str) -> list:
+        """
+        Ranks this coin against every coin with fresh data at the same moment (state slots 150-159):
+        return relative to the basket average (5m / 15m / 30m / 24h), percentile rank in [-1, 1]
+        (15m / 30m / 24h, funding) and the basket's own 15m / 30m move. Lets the model learn
+        "will this coin beat the others", which survives market-wide crashes better than direction alone.
+        """
+        now = time.time()
+        fresh = {s: m for s, m in self.market_states.items()
+                 if m is not None and len(m.features) == 90 and now - float(getattr(m, "timestamp", 0.0) or 0.0) < 120.0}
+        if symbol not in fresh or len(fresh) < 4:
+            return [0.0] * CROSS_SECTION_DIM
+
+        def col(i):
+            return {s: float(m.features[i]) for s, m in fresh.items()}
+
+        def rel(d):
+            return d[symbol] - sum(d.values()) / len(d)
+
+        def rank(d):
+            v = d[symbol]
+            below = sum(1 for x in d.values() if x < v)
+            equal = sum(1 for x in d.values() if x == v)
+            return 2.0 * (below + (equal - 1) / 2.0) / (len(d) - 1) - 1.0
+
+        r5, r15, r30, r24, fund = col(3), col(4), col(5), col(6), col(80)
+        return [rel(r5), rel(r15), rel(r30), rel(r24),
+                rank(r15), rank(r30), rank(r24), rank(fund),
+                sum(r15.values()) / len(r15), sum(r30.values()) / len(r30)]
+
+    def _global_features(self) -> list:
+        g = self.global_context or {}
+        if time.time() - float(g.get("timestamp", 0.0) or 0.0) > 600.0:
+            g = {}
+        vals = [float(g.get(k, 0.0) or 0.0) for k in GLOBAL_KEYS]
+        return vals + [0.0] * (10 - len(vals))
+
     def _build_state_vector(self, symbol: str) -> tuple[torch.Tensor, list]:
         obs = []
         
@@ -621,8 +700,12 @@ class ProductionTradingBot:
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ])
         
-        # Fill remaining 50 slots with zeros (150-199)
-        obs.extend([0.0] * 50)
+        # 6. Cross-sectional ranking (150-159) and market-wide signals (160-169), core/schemas/state_layout.py
+        obs.extend(self._cross_section_features(symbol))
+        obs.extend(self._global_features())
+
+        # Reserved canvas for future connections (170-199)
+        obs.extend([0.0] * 30)
         
         if len(obs) != 200:
             raise ValueError(f"State vector dimension mismatch. Expected 200, got {len(obs)}")
@@ -974,7 +1057,7 @@ class ProductionTradingBot:
                         final_batch = torch.nan_to_num(final_batch, nan=0.0, posinf=1.0, neginf=-1.0)
                         
                         with torch.no_grad():
-                            batch_logits, batch_critic = self.model(final_batch, hidden_state=None, return_hidden=False)
+                            batch_logits, batch_critic = self.model(self._mask_unseen_inputs(final_batch), hidden_state=None, return_hidden=False)
                         for i, sym in enumerate(batch_syms):
                             precomputed_actions[sym] = batch_logits[i].numpy()
                             precomputed_critics[sym] = batch_critic[i].numpy()
@@ -1011,6 +1094,11 @@ class ProductionTradingBot:
 
                 active_symbols = []
                 flat_candidates = []
+                # Book balance for ranking: with slots and the hourly entry cap scarce, a new trade that evens
+                # out longs vs shorts is preferred (a balanced book survives market-wide moves). Never blocks.
+                n_longs = sum(1 for p in self.portfolio_state.positions.values() if p.quantity > 1e-5)
+                n_shorts = sum(1 for p in self.portfolio_state.positions.values() if p.quantity < -1e-5)
+                rank_conf_floor = float((self.trade_policy or {}).get("min_confidence") or 0.70)
                 
                 for sym in self.symbols:
                     if sym not in self.market_states:
@@ -1033,8 +1121,15 @@ class ProductionTradingBot:
                             raw_act = float(act_logits[0])
                             raw_conf = float(np.clip((act_logits[1] + 1.0) / 2.0, 0.05, 0.99))
                             exp_move = abs(exit_policy.expected_move_pct(crit_vals))
-                            if abs(raw_act) > 0.20 and raw_conf >= 0.70:
-                                score = raw_conf * exp_move
+                            if abs(raw_act - self.actor_signal_offset) > 0.20 and raw_conf >= rank_conf_floor:
+                                # Honest (holdout-calibrated) win probability x expected move
+                                score = self._calibrated_confidence(raw_conf) * exp_move
+                                is_long = (raw_act - self.actor_signal_offset) > 0
+                                imbalance = n_longs - n_shorts
+                                if (is_long and imbalance < 0) or (not is_long and imbalance > 0):
+                                    score *= 1.25
+                                elif (is_long and imbalance >= 2) or (not is_long and imbalance <= -2):
+                                    score *= 0.75
                         flat_candidates.append((score, sym))
                 
                 # Sort flat symbols descending by opportunity score (highest score first)
@@ -1263,7 +1358,7 @@ class ProductionTradingBot:
                         state_tensor = torch.tensor([seq], dtype=torch.float32)
                         state_tensor = torch.nan_to_num(state_tensor, nan=0.0, posinf=1.0, neginf=-1.0)
                         with torch.no_grad():
-                            action_logits_t, expected_return = self.model(state_tensor, hidden_state=None, return_hidden=False)
+                            action_logits_t, expected_return = self.model(self._mask_unseen_inputs(state_tensor), hidden_state=None, return_hidden=False)
                             action_logits = action_logits_t[0].numpy()
                             precomputed_critics[sym] = expected_return[0].numpy()
 
@@ -1342,6 +1437,9 @@ class ProductionTradingBot:
                                 trailing_stop_triggered = True
                             elif decision.reason == "STALE PRUNE":
                                 logger.info(f"[{sym}] ♻️ STALE TRADE PRUNER: Held {held_seconds/3600.0:.1f}h with no progress ({pnl_pct*100:+.2f}%). Pruning to recycle capital!")
+                                stale_trade_triggered = True
+                            elif decision.reason == "MAX HOLD":
+                                logger.info(f"[{sym}] ⏱️ MAX HOLD: Held {held_seconds/3600.0:.1f}h (limit {exit_policy.MAX_HOLD_SECONDS/3600:.0f}h, same as training). Closing at {pnl_pct*100:+.2f}%.")
                                 stale_trade_triggered = True
                         else:
                             self.peak_pnl_pct[sym] = 0.0
@@ -1443,6 +1541,7 @@ class ProductionTradingBot:
                         ai_state = {
                             "predicted_side": predicted_side,
                             "confidence": float(confidence),
+                            "confidence_calibrated": self._calibrated_confidence(float(confidence)),
                             "target_size": float(target_size),
                             "critic_return": float(pred_ret_5m),
                             "critic_1h": float(pred_ret_1h),
@@ -1559,10 +1658,18 @@ class ProductionTradingBot:
                             logger.info(f"[{sym}] ⏳ MICRO-SWING BREATHING: Minimum hold (900s / 15m) not met yet ({time_held:.1f}s, PnL: {pnl_pct_leveraged*100:+.2f}%). Giving swing room to run!")
                             continue
 
-                    # GUARD 3: Confidence Filter (Session Adaptive & Profit Ratchet Modulated)
-                    effective_conf_hurdle = max(0.74 if self.profit_ratchet_active else session_conf_hurdle, session_conf_hurdle)
+                    # GUARD 3: Confidence Filter. A champion approved on the holdout ships the threshold above
+                    # which its unseen-data trades made money after costs; legacy champions use session hurdles.
+                    policy_conf = (self.trade_policy or {}).get("min_confidence")
+                    if policy_conf is not None:
+                        effective_conf_hurdle = float(policy_conf) + (0.05 if self.profit_ratchet_active else 0.0)
+                    else:
+                        effective_conf_hurdle = max(0.74 if self.profit_ratchet_active else session_conf_hurdle, session_conf_hurdle)
                     if not is_closing and confidence < effective_conf_hurdle: 
-                        reason = "Profit Ratchet Preservation" if self.profit_ratchet_active and effective_conf_hurdle > session_conf_hurdle else session_name
+                        if policy_conf is not None:
+                            reason = f"model holdout threshold, honest win rate {self._calibrated_confidence(confidence):.0%}"
+                        else:
+                            reason = "Profit Ratchet Preservation" if self.profit_ratchet_active and effective_conf_hurdle > session_conf_hurdle else session_name
                         logger.info(f"[{sym}] SKIPPING OPEN (Low Confidence: {confidence:.2f} < {effective_conf_hurdle:.2f} in {reason})")
                         
                         # Emit authentic live HOLD experience into DB when flat (throttled to once per 5 mins per coin to protect VPS disk)
@@ -1809,6 +1916,11 @@ class ProductionTradingBot:
                     else:
                         if sym in getattr(settings, 'excluded_trading_symbols', []):
                             side = "HOLD"
+                        elif sym in ((self.trade_policy or {}).get("blocked_symbols") or []) and abs(action_val) > 0.20:
+                            # Per-coin filter: this champion lost money on this coin in its unseen-data test.
+                            # Still HOLD (not skip) so the coin keeps producing training records.
+                            side = "HOLD"
+                            logger.info(f"[{sym}] SKIPPING OPEN: coin blocked by model per-coin filter (lost money on holdout).")
                         elif action_val < -0.20:
                             side = "OPEN_SHORT"
                         elif action_val > 0.20:
@@ -2694,6 +2806,7 @@ class ProductionTradingBot:
             asyncio.create_task(self.sync_dashboard()),
             asyncio.create_task(self.monitor_kill_switch()),
             asyncio.create_task(self.update_htf_regimes_loop()),
+            asyncio.create_task(self.poll_global_context_loop()),
             asyncio.create_task(self.listen_liquidation_cascade()),
             asyncio.create_task(self.listen_macro_shield_loop()),
             asyncio.create_task(self.monitor_heartbeat_watchdog())

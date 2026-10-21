@@ -3,6 +3,14 @@ import collections
 from typing import Dict, List, Optional
 import time
 
+from core.risk.exit_policy import volatility_1h_from_ohlc
+
+
+# Latest-value context polled over REST (apps/market_collector/context_poller.py); not time series
+CONTEXT_KEYS = ("depth_imb_0p1pct", "depth_imb_1pct", "depth_bid_usd_1pct", "depth_ask_usd_1pct",
+                "next_funding_ms", "xex_funding_spread", "xex_funding_mean", "xex_oi_change_1h")
+FUNDING_INTERVAL_SEC = 8 * 3600
+
 
 class FeatureEngine:
     """
@@ -53,6 +61,8 @@ class FeatureEngine:
         self._cur_bar: Optional[List[float]] = None
         self._bar_cache: Dict[str, float] = {}
 
+        self.context: Dict[str, float] = {}
+
         self.last_update_time = time.time()
 
     def add_tick(self, data: Dict, ts: Optional[float] = None):
@@ -90,6 +100,9 @@ class FeatureEngine:
         self.price_changes_24h.append(data.get("price_change_24h", 0.0))
         self.volumes_24h.append(data.get("volume_24h", 0.0))
         self.mark_price_premiums.append(data.get("mark_price_premium", 0.0))
+        for key in CONTEXT_KEYS:
+            if key in data:
+                self.context[key] = float(data[key] or 0.0)
 
         if mid_price:
             self._update_bar(int(now // 60), float(mid_price), float(vol))
@@ -168,9 +181,10 @@ class FeatureEngine:
             c["atr_1m"] = self._atr(highs, lows, closes, 14)
         if len(closes) >= 30:
             c["adx"] = self._adx(highs, lows, closes, 14)
-        h1 = self._resample(ohlc, 60)
-        if len(h1) >= 3:
-            c["volatility_1h"] = self._atr(h1[:, 1], h1[:, 2], h1[:, 3], 14) / max(h1[-1, 3], 1e-12)
+        # Shared with the reward grader (exit_policy) so replayed trades use the exact live stop distance
+        vol_1h = volatility_1h_from_ohlc(ohlc)
+        if vol_1h > 0:
+            c["volatility_1h"] = vol_1h
         self._bar_cache = c
 
     def volatility_1h(self) -> float:
@@ -388,19 +402,29 @@ class FeatureEngine:
         ls_ratio = self.ls_ratios[-1] if len(self.ls_ratios) > 0 else 1.0
         mp_premium = self.mark_price_premiums[-1] if len(self.mark_price_premiums) > 0 else 0.0
 
+        # 7. Context inputs in former padding slots (see core/schemas/state_layout.py)
+        ctx = self.context
+        next_funding = ctx.get("next_funding_ms", 0.0) / 1000.0
+        now_s = self.last_update_time
+        time_to_funding = float(np.clip((next_funding - now_s) / FUNDING_INTERVAL_SEC, 0.0, 1.0)) if next_funding > 0 else 0.0
+
         features = [
             # 1. Price [10]
             ret_1s, ret_10s, ret_1m, ret_5m, ret_15m, ret_30m, ret_24h, 0.0, price_range, momentum,
             # 2. Volume [10] — slots 14/15 (raw VWAP prices) are DEPRECATED and kept at 0; the deviations carry the signal
             vol_1m, buy_vol_1m, sell_vol_1m, trade_imbalance, 0.0, 0.0, vwap_dev_1m, vwap_dev_15m, realized_vol, vol_24h,
             # 3. Orderbook & StatArb [15] (Slots 40-54)
-            spread_bps, bid_qty, ask_qty, ob_imbalance, ob_skew_l2, 0.0, 0.0, 0.0, 0.0, 0.0, hurst, float(acf), float(skew), float(kurt), 0.0,
+            spread_bps, bid_qty, ask_qty, ob_imbalance, ob_skew_l2,
+            ctx.get("depth_imb_0p1pct", 0.0), ctx.get("depth_imb_1pct", 0.0),
+            ctx.get("depth_bid_usd_1pct", 0.0), ctx.get("depth_ask_usd_1pct", 0.0), 0.0,
+            hurst, float(acf), float(skew), float(kurt), 0.0,
             # 4. Tech Indicators [35]
             rsi_1m, rsi_5m, rsi_15m, rsi_1h, macd_line, macd_sig, macd_hist, ema_9_dist, ema_21_dist, ema_50_dist, ema_200_dist, sma_50_dist, sma_200_dist, bb_width, bb_pos, ema_4h_dist, atr, stoch_k, stoch_d, adx, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             # 5. Candlesticks [10]
             wicks[0], wicks[1], bodies[0], wicks[2], wicks[3], bodies[1], wicks[4], wicks[5], bodies[2], 0.0,
             # 6. Derivatives [10]
-            funding_rate, liq_1m, liq_15m, oi_1m_delta, ls_ratio, mp_premium, 0.0, 0.0, 0.0, 0.0
+            funding_rate, liq_1m, liq_15m, oi_1m_delta, ls_ratio, mp_premium,
+            time_to_funding, ctx.get("xex_funding_spread", 0.0), ctx.get("xex_funding_mean", 0.0), ctx.get("xex_oi_change_1h", 0.0)
         ]
 
         # Ensure exactly 90 slots

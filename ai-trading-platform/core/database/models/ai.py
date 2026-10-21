@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, ForeignKey, BigInteger
+from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, ForeignKey, BigInteger, UniqueConstraint
 from core.database.base import Base
 from datetime import datetime
 
@@ -7,6 +7,28 @@ from datetime import datetime
 # Only rows carrying it are trainable; legacy grades summed the shaped `reward` column instead.
 GRADED_FLAG = "MKT_RET_V2"
 UNGRADEABLE_FLAG = "MKT_RET_V2_FAIL"
+
+class TradeOutcome(Base):
+    """
+    Path-aware label of one experience: the realized price move (% of price, GROSS of costs) a LONG
+    and a SHORT opened at that moment would have earned under the live exit policy (stop, TP1,
+    breakeven / trailing runner, 4h limit), replayed on 1-minute klines by the reward calculator.
+    Lives in its own small table on the training machine (src 'exp' = experiences, 'gold' =
+    golden_experiences), so the large experiences table and the VPS schema stay untouched.
+    long_pct / short_pct are NULL when the price path could not be reconstructed.
+    """
+    __tablename__ = "trade_outcomes"
+    __table_args__ = (UniqueConstraint("src", "exp_id", name="uq_trade_outcome_src_exp"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    src = Column(String(8), nullable=False)
+    exp_id = Column(Integer, nullable=False, index=True)
+    symbol = Column(String(20))
+    timestamp = Column(BigInteger)
+    long_pct = Column(Float, nullable=True)
+    short_pct = Column(Float, nullable=True)
+    stop_pct = Column(Float, nullable=True)
+
 
 class ModelVersion(Base):
     __tablename__ = "model_versions"

@@ -44,11 +44,13 @@ def test_expected_move_blends_horizons():
 
 # ---------------------------------------------------------------- slot layout
 def test_layout_matches_previous_hardcoded_indices():
-    assert L.LOG_VOLUME_SLOTS == (30, 31, 32, 39, 41, 42, 101, 102)
+    # original slots never move; depth $ slots (47, 48) were added from former padding
+    assert L.LOG_VOLUME_SLOTS == (30, 31, 32, 39, 41, 42, 47, 48, 101, 102)
     assert L.SPREAD_SLOT == 40
-    assert L.MARKET_LOG_VOLUME_FEATURES == (10, 11, 12, 19, 21, 22, 81, 82)
+    assert L.MARKET_LOG_VOLUME_FEATURES == (10, 11, 12, 19, 21, 22, 27, 28, 81, 82)
     assert L.MARKET_SPREAD_FEATURE == 20
-    assert all(L.SLOTS[i].status == L.RESERVED for i in range(150, 200))
+    assert L.CROSS_SECTION_START == 150 and L.GLOBAL_START == 160
+    assert all(L.SLOTS[i].status == L.RESERVED for i in range(170, 200))
 
 
 # ---------------------------------------------------------------- feature engine

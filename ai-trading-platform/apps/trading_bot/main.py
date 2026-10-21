@@ -118,6 +118,7 @@ class ProductionTradingBot:
         self.last_win_time = time.time()
         self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
         self.last_close_time = {sym: 0.0 for sym in self.symbols} # Cooldown tracking per symbol
+        self.recent_entry_times = collections.deque()  # new-position timestamps for the hourly entry cap
         self.position_entry_times = {sym: 0.0 for sym in self.symbols} # Minimum holding tracking per symbol
         self.peak_pnl_pct = {sym: 0.0 for sym in self.symbols} # Peak leveraged PnL tracking for trailing profit locks
         self.pnl_history = {sym: collections.deque(maxlen=30) for sym in self.symbols} # (timestamp, pnl_pct_leveraged) for velocity shock detection
@@ -140,7 +141,7 @@ class ProductionTradingBot:
         self.loss_lockout_until = {sym: {"LONG": 0.0, "SHORT": 0.0} for sym in self.symbols}
         self.htf_regimes = {sym: {"trend": "NEUTRAL", "adx": 0.0, "ema20": 0.0, "ema50": 0.0, "last_updated": 0.0} for sym in self.symbols}
         self.alpha_engine = InstitutionalAlphaEngine(symbols=self.symbols)
-        self.edge_estimator = EdgeEstimator(min_net_edge_pct=0.08)
+        self.edge_estimator = EdgeEstimator(min_net_edge_pct=0.08, default_horizon_seconds=4 * 3600.0)
         self.dynamic_active_symbols = set(self.symbols)
         self.last_universe_check_time = 0.0
         self._symbol_tasks: Dict[str, list] = {}
@@ -153,6 +154,12 @@ class ProductionTradingBot:
         self.recent_losses_history: collections.deque = collections.deque(maxlen=30)
         self.last_market_tick_time = time.time()
         self.last_margin_trim_time = 0.0
+
+    def _entries_last_hour(self) -> int:
+        cutoff = time.time() - 3600.0
+        while self.recent_entry_times and self.recent_entry_times[0] < cutoff:
+            self.recent_entry_times.popleft()
+        return len(self.recent_entry_times)
 
     def _refresh_actor_signal_offset(self):
         """
@@ -1177,7 +1184,8 @@ class ProductionTradingBot:
                                     actual_qty = abs(float(actual_pos.get('positionAmt', 0.0))) if actual_pos else 0.0
                                     
                                     if actual_qty > 0:
-                                        entry_px_val = float(actual_pos.get('entryPrice', 0.0)) or market.mid_price
+                                        mkt_fb = self.market_states.get(sym)
+                                        entry_px_val = float(actual_pos.get('entryPrice', 0.0)) or (mkt_fb.mid_price if mkt_fb else 0.0)
                                         notional_filled = actual_qty * entry_px_val
                                         if notional_filled >= 25.0:
                                             logger.info(f"[{sym}] Substantial partial fill confirmed (${notional_filled:.2f} notional >= $25.00). Letting position ride cleanly to preserve fees!")
@@ -1412,17 +1420,8 @@ class ProductionTradingBot:
                         logger.info(f"[{sym}] SKIPPING OPEN: Trading temporarily paused via Telegram ({rem_p:.1f}m remaining).")
                         continue
 
-                    # Institutional Upgrade 2: Multi-Exchange Liquidation Cascade Hunter (Bottom-Wick Sniper)
-                    if not exit_override and pos.quantity == 0:
-                        liq_sig = liquidation_hunter.evaluate_exhaustion_wick(sym, market, self.global_liq_state)
-                        if liq_sig:
-                            action_val = 0.85
-                            confidence = liq_sig.confidence
-                            target_size = 0.50
-                            logger.info(f"[{sym}] 🎯 LIQUIDATION CASCADE HUNTER SNIPER: {liq_sig.reason}")
-                            asyncio.create_task(
-                                telegram_notifier.broadcast_alert("LIQUIDATION_CASCADE", "", liq_sig.to_dict())
-                            )
+                    # (Removed: the liquidation "sniper" used to overwrite the AI action with a forced 0.85 LONG.
+                    #  Liquidation volume is a model input (slots 101/102); the AI decides, the gates only protect.)
 
                     # 2. Institutional Hysteresis Deadband
                     # Entries from flat require |action_val| > 0.20
@@ -1464,29 +1463,13 @@ class ProductionTradingBot:
                         logger.warning(f"[{sym}] 🛑 CIRCUIT BREAKER ACTIVE: Halting new entries ({time_left_cb:.1f}h remaining). Preserving capital!")
                         continue
 
-                    # GUARD 1: Anti-Churn Cooldown with High-Conviction Fast-Pass (180s Baseline, 120s Ironclad Rest)
-                    if not is_closing:
+                    # GUARD 1: Per-coin cooldown after ANY close (no fast-pass). Re-opening a coin minutes after
+                    # closing it paid a full round-trip fee for no new information (fees were 5x the trading loss).
+                    if not is_closing and pos.quantity == 0:
                         time_since_close = time.time() - self.last_close_time.get(sym, 0.0)
-                        cooldown_period = 180.0 # 3 minutes baseline cooldown
-                        mandatory_rest_period = 120.0 # 2 minutes ironclad minimum rest
-                        
-                        if time_since_close < cooldown_period:
-                            # 1. Ironclad Mandatory Rest: Zero trades permitted within 120s of close (kills 5-second flip-flop trap)
-                            if time_since_close < mandatory_rest_period:
-                                logger.info(f"[{sym}] SKIPPING OPEN: In mandatory post-trade rest ({time_since_close:.1f}s / {mandatory_rest_period:.0f}s). Cooling down book.")
-                                continue
-                                
-                            # 2. High-Conviction Fast-Pass Override (only eligible between 120s and 180s)
-                            critic_vals = precomputed_critics.get(sym)
-                            pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
-                            fast_pass_critic_hurdle = 0.85 # Raised to 0.85% move required to bypass remaining 60s
-                            has_critic_conviction = (action_val > 0.2 and pred_ret_5m >= fast_pass_critic_hurdle) or (action_val < -0.2 and pred_ret_5m <= -fast_pass_critic_hurdle)
-                            
-                            if confidence >= 0.78 and has_critic_conviction:
-                                logger.info(f"[{sym}] 🎯 HIGH-CONVICTION FAST-PASS: Bypassing remaining cooldown ({time_since_close:.1f}s/{cooldown_period:.0f}s) due to extreme confidence ({confidence:.2f} >= 0.78) & massive Critic return ({pred_ret_5m:+.2f}% >= {fast_pass_critic_hurdle:.2f}%)!")
-                            else:
-                                logger.info(f"[{sym}] SKIPPING OPEN: In anti-churn cooldown ({time_since_close:.1f}s / {cooldown_period:.0f}s).")
-                                continue
+                        if time_since_close < settings.entry_cooldown_seconds:
+                            logger.debug(f"[{sym}] SKIPPING OPEN: cooldown after last close ({max(0.0, time_since_close):.0f}s / {settings.entry_cooldown_seconds:.0f}s).")
+                            continue
 
                     # GUARD 1.2: Net Portfolio Beta & Correlation Exposure Governor
                     # Caps simultaneous unidirectional open positions to max 5 Longs or 5 Shorts
@@ -1529,36 +1512,6 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🛑 PENALTY BOX ACTIVE: {intended_dir} locked out for {rem_mins:.1f} more mins after recent stop-loss. Refusing to fight trend!")
                                 continue
 
-                    # GUARD 1.4: Higher-Timeframe (1H) Regime Gate (Jump Crypto Trend Expansion Filter)
-                    # "No counter-trend trades during high-momentum expansions."
-                    # If Price > 1h EMA20 > 1h EMA50 and ADX > 20: SHORTS ARE STRICTLY LOCKED OUT!
-                    # If Price < 1h EMA20 < 1h EMA50 and ADX > 20: LONGS ARE STRICTLY LOCKED OUT!
-                    if not is_closing and pos.quantity == 0:
-                        htf_data = self.htf_regimes.get(sym, {})
-                        htf_trend = htf_data.get("trend", "NEUTRAL")
-                        htf_adx = float(htf_data.get("adx", 0.0))
-                        
-                        # Real-time multi-timeframe fast momentum features
-                        ret_30m = float(market.features[5]) if market and len(market.features) == 90 else 0.0
-                        ret_15m = float(market.features[4]) if market and len(market.features) == 90 else 0.0
-                        rsi_1h = float(market.features[38]) if market and len(market.features) == 90 else 0.0
-                        
-                        # 1. Bullish Momentum Squeeze Expansion -> Strict Short Lockout
-                        if action_val < -0.20:
-                            is_bull_expansion = (htf_trend == "STRONG_BULL" and htf_adx >= 20.0) or (ret_30m >= 0.018) or (ret_15m >= 0.012) or (rsi_1h >= 0.65)
-                            if is_bull_expansion:
-                                reason = f"1H Trend: {htf_trend} (ADX: {htf_adx:.1f})" if htf_trend == "STRONG_BULL" else f"Fast Ret30m: {ret_30m*100:+.2f}%, RSI1h: {rsi_1h*100:+.1f}%"
-                                logger.warning(f"[{sym}] 🛑 HTF REGIME GATE: Bullish momentum expansion active ({reason}). SHORTS ARE STRICTLY LOCKED OUT to prevent squeeze bleed!")
-                                continue
-                                
-                        # 2. Bearish Momentum Breakdown -> Strict Long Lockout
-                        elif action_val > 0.20:
-                            is_bear_expansion = (htf_trend == "STRONG_BEAR" and htf_adx >= 20.0) or (ret_30m <= -0.018) or (ret_15m <= -0.012) or (rsi_1h <= -0.65)
-                            if is_bear_expansion:
-                                reason = f"1H Trend: {htf_trend} (ADX: {htf_adx:.1f})" if htf_trend == "STRONG_BEAR" else f"Fast Ret30m: {ret_30m*100:+.2f}%, RSI1h: {rsi_1h*100:+.1f}%"
-                                logger.warning(f"[{sym}] 🛑 HTF REGIME GATE: Bearish breakdown active ({reason}). LONGS ARE STRICTLY LOCKED OUT to prevent falling knife!")
-                                continue
-
                     # GUARD 1.5: Spread Firewall (Protect against illiquid book slippage bleed)
                     if not is_closing and market and market.mid_price > 0:
                         spread_pct = market.spread / market.mid_price
@@ -1566,118 +1519,12 @@ class ProductionTradingBot:
                             logger.warning(f"[{sym}] 🛑 SPREAD FIREWALL ({session_name}): Spread {spread_pct*100:.3f}% > {session_max_spread*100:.3f}% limit. Skipping entry to protect from slippage fee bleed!")
                             continue
 
-                    # GUARD 1.6: Whale Order Flow Absorption Gate (Institutional CVD & Depth Wall Shield)
-                    # Connects to real-time whale tracker stream.
-                    # If net whale volume in last 15m is heavily net-buying (>= +$500k), veto all Shorts.
-                    # If net whale volume in last 15m is heavily net-selling (<= -$500k), veto all Longs.
-                    # Also protects against shorting directly into an institutional Buy Wall (< 0.3% distance).
-                    if not is_closing and pos.quantity == 0:
-                        whale_info = self.whale_states.get(sym)
-                        if whale_info and (time.time() - float(whale_info.get("timestamp", 0.0))) < 120.0:
-                            w_net_15m = float(whale_info.get("whale_net_flow_15m", 0.0))
-                            buy_wall_dist = float(whale_info.get("buy_wall_distance", 1.0))
-                            sell_wall_dist = float(whale_info.get("sell_wall_distance", 1.0))
-                            
-                            is_mega = sym in ["BTCUSDT", "ETHUSDT"]
-                            is_large = sym in ["SOLUSDT", "BNBUSDT", "XRPUSDT"]
-                            whale_flow_hurdle = 1_000_000.0 if is_mega else (500_000.0 if is_large else 250_000.0)
-                            
-                            if action_val < -0.20:
-                                if w_net_15m >= whale_flow_hurdle:
-                                    logger.warning(f"[{sym}] 🛑 WHALE ABSORPTION GATE: Institutional Whales are net-buying (+${w_net_15m:,.0f} in 15m >= ${whale_flow_hurdle:,.0f} hurdle). Vetoing Short into whale accumulation!")
-                                    continue
-                                if 0.0 < buy_wall_dist < 0.003:
-                                    logger.warning(f"[{sym}] 🛑 WHALE BUY-WALL SHIELD: Institutional Buy Wall resting directly below price ({buy_wall_dist*100:.2f}% away). Vetoing Short into wall!")
-                                    continue
-                                    
-                            elif action_val > 0.20:
-                                if w_net_15m <= -whale_flow_hurdle:
-                                    logger.warning(f"[{sym}] 🛑 WHALE ABSORPTION GATE: Institutional Whales are net-selling (-${abs(w_net_15m):,.0f} in 15m <= -${whale_flow_hurdle:,.0f} hurdle). Vetoing Long into whale dump!")
-                                    continue
-                                if 0.0 < sell_wall_dist < 0.003:
-                                    logger.warning(f"[{sym}] 🛑 WHALE SELL-WALL SHIELD: Institutional Sell Wall resting directly above price ({sell_wall_dist*100:.2f}% away). Vetoing Long into wall!")
-                                    continue
-
-                    # =========================================================================
-                    # INSTITUTIONAL ALPHA ENGINE: 6 HEDGE FUND STRUCTURAL PILLARS
-                    # =========================================================================
-                    if not is_closing and pos.quantity == 0:
-                        side_str = "LONG" if action_val > 0.20 else ("SHORT" if action_val < -0.20 else None)
-                        if side_str:
-                            # PILLAR 1: Liquidation Cluster & Stop-Hunt Mapping
-                            p1_ok, p1_reason = self.alpha_engine.evaluate_stop_hunt(sym, market, side_str)
-                            if not p1_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 1 (Stop-Hunt Mapping): {p1_reason}")
-                                continue
-                                
-                            # PILLAR 2: Open Interest (OI) Delta Divergence
-                            p2_ok, oi_mult_eval, p2_reason = self.alpha_engine.evaluate_oi_divergence(sym, market, side_str)
-                            if not p2_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 2 (OI Divergence): {p2_reason}")
-                                continue
-                            if oi_mult_eval != 1.0:
-                                logger.info(f"[{sym}] 🚀 PILLAR 2 (OI Divergence): {p2_reason}")
-                                
-                            # PILLAR 3: Lead-Lag Cross-Asset Velocity (BTC/ETH Drivers)
-                            p3_ok, p3_reason = self.alpha_engine.evaluate_btc_lead_lag(sym, self.market_states, side_str)
-                            if not p3_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 3 (BTC Lead-Lag): {p3_reason}")
-                                continue
-                                
-                            # PILLAR 4: Perpetual-Spot Basis & Mark Price Premium Gate
-                            p4_ok, p4_reason = self.alpha_engine.evaluate_perp_spot_basis(sym, market, side_str)
-                            if not p4_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 4 (Perp-Spot Basis): {p4_reason}")
-                                continue
-                                
-                            # PILLAR 5: Order Flow Toxicity (VPIN)
-                            p5_ok, p5_reason = self.alpha_engine.evaluate_vpin_toxicity(sym, market, side_str)
-                            if not p5_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 5 (VPIN Toxicity): {p5_reason}")
-                                continue
-                                
-                            # PILLAR 6: Real-Time Market Regime Classification (Shock / Trend / Chop)
-                            htf_t = self.htf_regimes.get(sym, {}).get("trend", "NEUTRAL")
-                            p6_ok, regime_name, p6_reason = self.alpha_engine.classify_and_filter_regime(sym, market, htf_t, side_str)
-                            if not p6_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 6 ({regime_name}): {p6_reason}")
-                                continue
-
-                            # PILLAR 7: Market Breadth (Advance/Decline & VWAP Ratio)
-                            p7_ok, breadth_mult, p7_reason = self.alpha_engine.evaluate_market_breadth(self.market_states, side_str)
-                            if not p7_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 7 (Market Breadth): {p7_reason}")
-                                continue
-                                
-                            # PILLAR 8: Market-Wide CVD (Total Net Taker Flow Across All Coins)
-                            p8_ok, cvd_mult, p8_reason = self.alpha_engine.evaluate_market_wide_cvd(sym, market, self.whale_states, side_str)
-                            if not p8_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 8 (Market CVD): {p8_reason}")
-                                continue
-                                
-                            # PILLAR 9: Funding Rate Heatmap & Crowded Trade Index
-                            p9_ok, funding_mult, p9_reason = self.alpha_engine.evaluate_funding_heatmap(sym, self.market_states, side_str)
-                            if not p9_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 9 (Funding Heatmap): {p9_reason}")
-                                continue
-                                
-                            # PILLAR 10: Bitcoin Dominance (BTC.D) & Altcoin Season Index
-                            p10_ok, dom_mult, p10_reason = self.alpha_engine.evaluate_btc_dominance_regime(sym, self.market_states, side_str)
-                            if not p10_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 10 (BTC Dominance): {p10_reason}")
-                                continue
-                                
-                            # PILLAR 11: Multi-Exchange Liquidation Ratio (Squeeze vs Flush)
-                            p11_ok, p11_reason = self.alpha_engine.evaluate_liquidation_cascade(sym, self.market_states, side_str)
-                            if not p11_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 11 (Liquidation Cascade): {p11_reason}")
-                                continue
-                                
-                            # PILLAR 12: Volatility Squeeze Indicator (John Carter Squeeze)
-                            p12_ok, sq_mult, p12_reason = self.alpha_engine.evaluate_volatility_squeeze(sym, market, side_str)
-                            if not p12_ok:
-                                logger.warning(f"[{sym}] 🛑 PILLAR 12 (Volatility Squeeze): {p12_reason}")
-                                continue
+                    # ENTRY GATES SIMPLIFIED (2026-10): the HTF/ADX regime gate, whale gates, the 12 alpha-engine
+                    # "pillars", macro-trend / anti-countertrend / over-extension / lead-lag / OFI / statarb / funding /
+                    # liquidation-waterfall gates were removed. Every one of those signals is already a model input,
+                    # and hand rules vetoing the AI meant (a) it never learned from the trades it wanted and (b) results
+                    # could not be attributed. Kept: kill switch / circuit breaker / pause, exposure caps, cooldowns and
+                    # rate limit, spread firewall, AI confidence, expected-move and net-edge cost checks, size floors.
 
                     # GUARD 2: Minimum Hold Duration (900s / 15 mins with Massive Reversal Escape Door)
                     if is_closing and not exit_override:
@@ -1757,254 +1604,7 @@ class ProductionTradingBot:
                             asyncio.create_task(redis_manager.publish_binary("experience:completed", msgpack.packb(hold_exp_data, use_bin_type=True)))
                         continue 
 
-                    # PILLAR 3: Macro Regime Trend-Alignment Gate (Block Counter-Trend Whipsaws)
-                    if not is_closing:
-                        btc_market = self.market_states.get("BTCUSDT")
-                        eth_market = self.market_states.get("ETHUSDT")
-                        btc_mom_15m = btc_market.features[4] if btc_market and len(btc_market.features) == 90 else 0.0
-                        eth_mom_15m = eth_market.features[4] if eth_market and len(eth_market.features) == 90 else 0.0
-                        
-                        btc_crit = precomputed_critics.get("BTCUSDT", [0.0, 0.0, 0.0])
-                        eth_crit = precomputed_critics.get("ETHUSDT", [0.0, 0.0, 0.0])
-                        btc_critic_5m = float(btc_crit[0]) if len(btc_crit) > 0 else 0.0
-                        btc_critic_1h = float(btc_crit[1]) if len(btc_crit) > 1 else btc_critic_5m
-                        btc_critic_4h = float(btc_crit[2]) if len(btc_crit) > 2 else btc_critic_1h
-                        
-                        eth_critic_5m = float(eth_crit[0]) if len(eth_crit) > 0 else 0.0
-                        eth_critic_1h = float(eth_crit[1]) if len(eth_crit) > 1 else eth_critic_5m
-                        eth_critic_4h = float(eth_crit[2]) if len(eth_crit) > 2 else eth_critic_1h
-
-                        # HIGH-CONVICTION FAST PASS: If symbol has strong conviction (>= 70%) and large predicted move, bypass macro noise!
-                        sym_critic = precomputed_critics.get(sym, [0.0, 0.0, 0.0])
-                        sym_c5m = float(sym_critic[0]) if len(sym_critic) > 0 else 0.0
-                        has_high_conviction = confidence >= 0.70 and abs(sym_c5m) >= 0.40
-
-                        # Macro Downtrend: Clear downward momentum on both BTC & ETH (>= -0.80% move)
-                        is_macro_down = (btc_mom_15m < -0.008 and eth_mom_15m < -0.008) or \
-                                        (btc_critic_1h < -0.40 and eth_critic_1h < -0.40)
-                        # Macro Uptrend: Clear upward momentum on both BTC & ETH (>= +0.80% move)
-                        is_macro_up = (btc_mom_15m > 0.008 and eth_mom_15m > 0.008) or \
-                                      (btc_critic_1h > 0.40 and eth_critic_1h > 0.40)
-
-                        # Macro Trend Gate: BTC & ETH Market-Wide Breakdown/Breakout Protection
-                        if action_val > 0.2 and is_macro_down:
-                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH severe breakdown (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%). Blocking counter-trend OPEN_LONG!")
-                            continue
-                        elif action_val < -0.2 and is_macro_up:
-                            logger.info(f"[{sym}] 🛑 MACRO TREND GATE: BTC/ETH severe breakout (15m: {btc_mom_15m*100:+.2f}%/{eth_mom_15m*100:+.2f}%). Blocking counter-trend OPEN_SHORT!")
-                            continue
-
-                        # GUARD 3.1: Anti-Countertrend Iron Guard & Falling Knife Gate (Asset-Level Protection)
-                        # Forbids opening Shorts into an asset that is actively rallying,
-                        # and strictly forbids opening Longs into an asset that is actively dumping!
-                        if market and len(market.features) == 90:
-                            sym_mom_15m = float(market.features[4])
-                            sym_critic = precomputed_critics.get(sym, [0.0, 0.0, 0.0])
-                            sym_c1h = float(sym_critic[1]) if len(sym_critic) > 1 else 0.0
-                            sym_c4h = float(sym_critic[2]) if len(sym_critic) > 2 else sym_c1h
-                            ret_24h = float(market.features[6]) if len(market.features) > 6 else 0.0
-                            
-                            # 1. Macro Trend Gate (Falling Knife Defense & Bear-Market Reversal Confirmation):
-                            # When the 4-Hour Critic is negative (<= -0.30%) OR the coin is down >= 3.0% over 24h,
-                            # strictly forbid OPEN_LONG unless BOTH the 1-Hour Critic has confirmed a real reversal (> 0.00%)
-                            # AND 15-minute momentum has turned positive (> 0.00%).
-                            # This completely prevents buying dead-cat bounces in a heavy bear trend!
-                            if action_val > 0.20:
-                                is_macro_bearish = (sym_c4h <= -0.30 or ret_24h <= -0.030)
-                                if is_macro_bearish and (sym_c1h <= 0.00 or sym_mom_15m <= 0.00):
-                                    logger.info(f"[{sym}] 🛑 MACRO TREND GATE: Coin is in heavy macro downtrend (4h Critic: {sym_c4h:+.2f}%, 24h: {ret_24h*100:+.2f}%). Blocking falling knife OPEN_LONG until 1h/15m confirms reversal (1h Critic: {sym_c1h:+.2f}%, 15m: {sym_mom_15m*100:+.2f}%)!")
-                                    continue
-                                    
-                            # Symmetric Rocket-Ship Defense:
-                            # When 4-Hour Critic is positive (>= +0.30%) OR the coin is up >= 3.0% over 24h,
-                            # strictly forbid OPEN_SHORT unless BOTH the 1-Hour Critic has confirmed a real reversal (< 0.00%)
-                            # AND 15-minute momentum has turned negative (< 0.00%).
-                            elif action_val < -0.20:
-                                is_macro_bullish = (sym_c4h >= 0.30 or ret_24h >= 0.030)
-                                if is_macro_bullish and (sym_c1h >= 0.00 or sym_mom_15m >= 0.00):
-                                    logger.info(f"[{sym}] 🛑 MACRO TREND GATE: Coin is in heavy macro uptrend (4h Critic: {sym_c4h:+.2f}%, 24h: {ret_24h*100:+.2f}%). Blocking counter-trend OPEN_SHORT until 1h/15m confirms reversal (1h Critic: {sym_c1h:+.2f}%, 15m: {sym_mom_15m*100:+.2f}%)!")
-                                    continue
-                            
-                            # 2. Short Protection: If coin is rallying (15m momentum >= +0.35% OR 1h Critic >= +0.20%),
-                            # block OPEN_SHORT to prevent fighting an authentic uptrend!
-                            if action_val < -0.20 and (sym_mom_15m >= 0.0035 or sym_c1h >= 0.20):
-                                logger.info(f"[{sym}] 🛑 ANTI-COUNTERTREND GUARD: Coin is rallying (15m: {sym_mom_15m*100:+.2f}%, 1h Critic: {sym_c1h:+.2f}%). Blocking counter-trend OPEN_SHORT!")
-                                continue
-                                
-                            # 3. Long Protection: If coin is dumping (15m momentum <= -0.35% OR 1h Critic <= -0.20%),
-                            # block OPEN_LONG to avoid catching a falling knife!
-                            elif action_val > 0.20 and (sym_mom_15m <= -0.0035 or sym_c1h <= -0.20):
-                                logger.info(f"[{sym}] 🛑 ANTI-COUNTERTREND GUARD: Coin is dumping (15m: {sym_mom_15m*100:+.2f}%, 1h Critic: {sym_c1h:+.2f}%). Blocking counter-trend OPEN_LONG!")
-                                continue
-
-                        # GUARD 3.2: Over-Extension & Exhaustion Guard (Anti-Chasing at Tops & Bottoms)
-                        # Prevents the classic "Buying the Top Wick" or "Shorting the Bottom Wick" trap!
-                        # When price stretches too far from its mean, probability of continuation collapses.
-                        if market and len(market.features) == 90:
-                            ret_15m = float(market.features[4])
-                            rsi_norm = float(market.features[35]) # (RSI - 50) / 50 -> +0.50 is RSI 75, -0.50 is RSI 25
-                            bb_pos = float(market.features[48])  # Bollinger band relative position (-1.0 to +1.0)
-                            
-                            # 1. Top Exhaustion (Ceiling): Block OPEN_LONG if price is over-extended at the top
-                            # Triggers if 15m pump exceeds +1.20% AND price is pinned against extreme upper BB (>= +0.80) or RSI >= 75
-                            if action_val > 0.20 and (ret_15m >= 0.0120 and (bb_pos >= 0.80 or rsi_norm >= 0.50)):
-                                rsi_actual = (rsi_norm * 50.0) + 50.0
-                                logger.info(f"[{sym}] 🛑 OVER-EXTENSION GUARD: Coin is over-extended at the top (15m: +{ret_15m*100:.2f}%, BB: {bb_pos:+.2f}, RSI: {rsi_actual:.1f}). Skipping Long to prevent buying the top wick!")
-                                continue
-                                
-                            # 2. Bottom Exhaustion (Floor): Block OPEN_SHORT if price is over-extended at the bottom
-                            # Triggers if 15m dump exceeds -1.20% AND price is pinned against extreme lower BB (<= -0.80) or RSI <= 25
-                            elif action_val < -0.20 and (ret_15m <= -0.0120 and (bb_pos <= -0.80 or rsi_norm <= -0.50)):
-                                rsi_actual = (rsi_norm * 50.0) + 50.0
-                                logger.info(f"[{sym}] 🛑 OVER-EXTENSION GUARD: Coin is over-extended at the bottom (15m: {ret_15m*100:.2f}%, BB: {bb_pos:+.2f}, RSI: {rsi_actual:.1f}). Skipping Short to prevent selling the bottom wick!")
-                                continue
-
-                        # GUARD 3.4: Cross-Asset Lead-Lag Sniping ("The Crypto Echo" Momentum Front-Running)
-                        # Altcoins lag Bitcoin impulse moves by 30-180 seconds.
-                        # 1. Flash Dump Defense: Block Altcoin Longs if BTC is dumping (<= -0.35% in 1m)
-                        # 2. Flash Pump Defense: Block Altcoin Shorts if BTC is pumping (>= +0.35% in 1m)
-                        # 3. Echo Breakout Front-Running: Boost conviction 1.15x if BTC is breaking out and altcoin is lagging
-                        if sym != "BTCUSDT":
-                            btc_market = self.market_states.get("BTCUSDT")
-                            if btc_market and len(btc_market.features) == 90 and market and len(market.features) == 90:
-                                btc_1m_mom = float(btc_market.features[2])
-                                sym_1m_mom = float(market.features[2])
-                                
-                                # Defense 1: Flash BTC Dump blocks Alt Longs
-                                if action_val > 0.20 and btc_1m_mom <= -0.0035:
-                                    logger.info(f"[{sym}] 🛑 LEAD-LAG DEFENSE: BTC 1m Flash Dump ({btc_1m_mom*100:+.2f}%). Blocking Altcoin Long to prevent correlated crash!")
-                                    continue
-                                # Defense 2: Flash BTC Pump blocks Alt Shorts
-                                elif action_val < -0.20 and btc_1m_mom >= 0.0035:
-                                    logger.info(f"[{sym}] 🛑 LEAD-LAG DEFENSE: BTC 1m Flash Pump ({btc_1m_mom*100:+.2f}%). Blocking Altcoin Short to prevent short-squeeze!")
-                                    continue
-                                    
-                                # Offensive Echo Front-Running:
-                                # If BTC has broken out (>= +0.20% in 1m) and this altcoin is lagging behind BTC (sym_1m_mom < btc_1m_mom):
-                                if action_val > 0.20 and btc_1m_mom >= 0.0020 and sym_1m_mom < btc_1m_mom:
-                                    lead_lag_mult = 1.15
-                                    logger.info(f"[{sym}] ⚡ ECHO FRONT-RUNNER: BTC surging (+{btc_1m_mom*100:.2f}%) while {sym} lags (+{sym_1m_mom*100:.2f}%). Boosting conviction 1.15x to front-run the echo wave!")
-                                # If BTC has broken down (<= -0.20% in 1m) and this altcoin is lagging behind BTC (sym_1m_mom > btc_1m_mom):
-                                elif action_val < -0.20 and btc_1m_mom <= -0.0020 and sym_1m_mom > btc_1m_mom:
-                                    lead_lag_mult = 1.15
-                                    logger.info(f"[{sym}] ⚡ ECHO FRONT-RUNNER: BTC dumping ({btc_1m_mom*100:.2f}%) while {sym} lags ({sym_1m_mom*100:+.2f}%). Boosting Short conviction 1.15x to front-run the echo breakdown!")
-
-                        # GUARD 3.5: Level-2 Order Flow Imbalance (OFI / Book Depth Wall Defense)
-                        # Prevents buying directly into massive institutional sell walls or shorting into buy walls
-                        if market and hasattr(market, 'order_book_imbalance') and market.order_book_imbalance is not None:
-                            ob_imbalance = float(market.order_book_imbalance)
-                            if action_val > 0.20 and ob_imbalance < -0.30:
-                                logger.info(f"[{sym}] 🛑 OFI WALL DEFENSE: Orderbook skewed to sellers (Imbalance: {ob_imbalance:.2f} < -0.30). Skipping buy into sell wall!")
-                                continue
-                            elif action_val < -0.20 and ob_imbalance > 0.30:
-                                logger.info(f"[{sym}] 🛑 OFI WALL DEFENSE: Orderbook skewed to buyers (Imbalance: {ob_imbalance:.2f} > +0.30). Skipping short into buy wall!")
-                                continue
-
-                        # GUARD 3.6: Cross-Exchange StatArb Confirmation (OKX & Bybit Lead-Lag Filter)
-                        # Prevents buying into Binance-only local fakeout wicks; requires global market consensus
-                        statarb_data = self.statarb_states.get(sym)
-                        if statarb_data and (time.time() - float(statarb_data.get("timestamp", 0.0))) < 15.0:
-                            okx_prem = float(statarb_data.get("okx_premium", 0.0))
-                            bybit_prem = float(statarb_data.get("bybit_premium", 0.0))
-                            
-                            if action_val > 0.20 and (okx_prem < -0.0015 or bybit_prem < -0.0015):
-                                logger.info(f"[{sym}] 🛑 STATARB DIVERGENCE: Global exchanges at discount (OKX: {okx_prem*100:+.2f}%, Bybit: {bybit_prem*100:+.2f}%). Blocking Binance fakeout LONG!")
-                                continue
-                            elif action_val < -0.20 and (okx_prem > 0.0015 or bybit_prem > 0.0015):
-                                logger.info(f"[{sym}] 🛑 STATARB DIVERGENCE: Global exchanges at premium (OKX: {okx_prem*100:+.2f}%, Bybit: {bybit_prem*100:+.2f}%). Blocking Binance fakeout SHORT!")
-                                continue
-
-                        # GUARD 3.7: Whale Market Order Flow Momentum (Asset-Tiered Whale Tracker Integration)
-                        # Prevents taking adverse trades when real institutional whales are dumping or sweeping the book.
-                        # Whale Tracker streams 100% authentic Mainnet Binance Futures data, protecting capital against real market dumps.
-                        whale_data = self.whale_states.get(sym)
-                        if whale_data and (time.time() - float(whale_data.get("timestamp", 0.0))) < 60.0:
-                            w_buy = float(whale_data.get("whale_buy_pressure", 0.0))
-                            w_sell = float(whale_data.get("whale_sell_pressure", 0.0))
-                            
-                            sym_mom_15m = market.features[4] if market and len(market.features) == 90 else 0.0
-                            critic_vals = precomputed_critics.get(sym)
-                            c1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else 0.0
-                            
-                            # Asset-Tiered Whale Pressure Hurdles (scaled to 24h market liquidity):
-                            # Tier 1 (BTC, ETH): $500k pressure / $100k counter-pressure base
-                            # Tier 2 (SOL, BNB, XRP): $300k pressure / $60k counter-pressure base
-                            # Tier 3 (ADA, LINK, AVAX, NEAR, LTC): $180k pressure / $35k counter-pressure base
-                            if sym in ["BTCUSDT", "ETHUSDT"]:
-                                whale_pressure_hurdle = 500_000.0
-                                whale_base_counter = 100_000.0
-                            elif sym in ["SOLUSDT", "BNBUSDT", "XRPUSDT"]:
-                                whale_pressure_hurdle = 300_000.0
-                                whale_base_counter = 60_000.0
-                            else:
-                                whale_pressure_hurdle = 180_000.0
-                                whale_base_counter = 35_000.0
-                            
-                            # Extreme whale selling: Never buy into whale dumps UNLESS price/critic is surging
-                            if action_val > 0.20 and w_sell >= whale_pressure_hurdle and w_sell > (2.5 * max(whale_base_counter, w_buy)):
-                                if sym_mom_15m > 0.002 or c1h > 0.10:
-                                    logger.info(f"[{sym}] ⚠️ BYPASSING WHALE SELL DEFENSE: Real price momentum (+{sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bullish. Overriding whale sell pressure (${w_sell:,.0f}).")
-                                else:
-                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Real mainnet whale dump detected (${w_sell:,.0f} vs ${w_buy:,.0f}, hurdle: ${whale_pressure_hurdle:,.0f}). Blocking Long entry!")
-                                    continue
-                            # Extreme whale buying: Never short into whale sweeps UNLESS price/critic is dumping
-                            elif action_val < -0.20 and w_buy >= whale_pressure_hurdle and w_buy > (2.5 * max(whale_base_counter, w_sell)):
-                                if sym_mom_15m < -0.002 or c1h < -0.10:
-                                    logger.info(f"[{sym}] ⚠️ BYPASSING WHALE BUY DEFENSE: Real price momentum ({sym_mom_15m*100:.2f}%) / 1h Critic ({c1h:+.2f}%) is strongly bearish. Overriding whale buy pressure (${w_buy:,.0f}).")
-                                else:
-                                    logger.info(f"[{sym}] 🛑 WHALE FLOW DEFENSE: Real mainnet whale sweep detected (${w_buy:,.0f} vs ${w_sell:,.0f}, hurdle: ${whale_pressure_hurdle:,.0f}). Blocking Short entry!")
-                                    continue
-
-                        # GUARD 3.8: Funding Rate Asymmetry & Squeeze Sniping
-                        # Protects against paying high funding fees; exploits deep negative funding short squeezes
-                        if market and hasattr(market, 'funding_rate') and market.funding_rate is not None:
-                            f_rate = float(market.funding_rate)
-                            # 1. Deep Negative Funding (<= -0.03%): Shorts are trapped paying longs (prime short squeeze zone)
-                            if f_rate <= -0.0003:
-                                if action_val < -0.20:
-                                    logger.info(f"[{sym}] 🛑 FUNDING DEFENSE: Deep negative funding ({f_rate*100:.3f}%). Blocking Short to avoid funding drain & squeeze trap!")
-                                    continue
-                                elif action_val > 0.20:
-                                    logger.info(f"[{sym}] 🧲 SHORT SQUEEZE SNIPER: Deep negative funding ({f_rate*100:.3f}%). Short squeeze conditions active!")
-                            # 2. Overheated Positive Funding (>= +0.05%): Overcrowded long froth
-                            elif f_rate >= 0.0005:
-                                if action_val > 0.20:
-                                    logger.info(f"[{sym}] 🛑 FUNDING DEFENSE: Frothy positive funding ({f_rate*100:.3f}%). Blocking Long to avoid heavy funding drain!")
-                                    continue
-
-                        # GUARD 3.9: Liquidation Cascade Bounce Sniper & Waterfall Shield (Jump Crypto Model)
-                        # Exploits forced retail liquidation wicks and protects against active falling-knife margin cascades.
-                        if market and len(market.features) == 90:
-                            liq_1m = float(market.features[81])
-                            ob_imb = float(market.order_book_imbalance) if hasattr(market, 'order_book_imbalance') and market.order_book_imbalance is not None else 0.0
-                            
-                            # Asset-tiered liquidation volume hurdles:
-                            # BTC/ETH: $250k in 1m; SOL/BNB/XRP: $120k; Alts: $50k
-                            if sym in ["BTCUSDT", "ETHUSDT"]:
-                                liq_hurdle = 250_000.0
-                            elif sym in ["SOLUSDT", "BNBUSDT", "XRPUSDT"]:
-                                liq_hurdle = 120_000.0
-                            else:
-                                liq_hurdle = 50_000.0
-                                
-                            if liq_1m >= liq_hurdle:
-                                # 1. Long Waterfall Defense: Forced long liquidations cascading down with book collapsing
-                                if action_val > 0.20 and ob_imb < -0.35:
-                                    logger.info(f"[{sym}] 🛑 LIQUIDATION WATERFALL DEFENSE: Active cascading liquidations (${liq_1m:,.0f}) with no bid support (OFI: {ob_imb:.2f}). Skipping entry to avoid falling knife!")
-                                    continue
-                                # 2. Short Squeeze Waterfall Defense: Forced short liquidations cascading up with asks collapsing
-                                elif action_val < -0.20 and ob_imb > 0.35:
-                                    logger.info(f"[{sym}] 🛑 LIQUIDATION SHORT-SQUEEZE DEFENSE: Active cascading short liquidations (${liq_1m:,.0f}). Skipping short into squeeze!")
-                                    continue
-                                # 3. Liquidation Absorption Bounce Sniper (Reversal impulse!):
-                                elif action_val > 0.20 and ob_imb >= -0.10:
-                                    liq_mult = 1.12
-                                    logger.info(f"[{sym}] 💥 LIQUIDATION CASCADE BOUNCE SNIPER: Massive liquidations (${liq_1m:,.0f}) absorbed by bids (OFI: {ob_imb:+.2f}). Boosting conviction 1.12x for mean-reversion bounce!")
-                                elif action_val < -0.20 and ob_imb <= 0.10:
-                                    liq_mult = 1.12
-                                    logger.info(f"[{sym}] 💥 LIQUIDATION CASCADE BLOWOFF SNIPER: Short liquidations (${liq_1m:,.0f}) absorbed by asks (OFI: {ob_imb:+.2f}). Boosting Short conviction 1.12x!")
-
-                    elif is_closing and not exit_override:
+                    if is_closing and not exit_override:
                         # PILLAR 2: Dynamic Profit Harvesting & Multi-Horizon Critic-Assisted Reversal Exit
                         critic_vals = precomputed_critics.get(sym)
                         pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
@@ -2055,7 +1655,8 @@ class ProductionTradingBot:
                         pred_ret_1h = float(critic_vals[1]) if len(critic_vals) > 1 else pred_ret_5m
                         pred_ret_4h = float(critic_vals[2]) if len(critic_vals) > 2 else pred_ret_1h
                         
-                        min_hurdle = max(session_critic_hurdle, settings.min_open_expected_return_pct) # Dynamic session fee hurdle
+                        min_hurdle = max(session_critic_hurdle, settings.min_open_expected_return_pct,
+                                     settings.min_edge_cost_multiple * exit_policy.ROUND_TRIP_COST * 100.0)  # >= 2x fees
                         
                         # 1. Expected-Move Entry Hurdle: the blended 1-4h forecast (the horizon the exits are built
                         #    for) must clear costs with margin. A 5m forecast almost never exceeds this hurdle.
@@ -2083,6 +1684,12 @@ class ProductionTradingBot:
                             if pred_ret_4h > 0.30 and pred_ret_1h >= 0.00:
                                 logger.info(f"[{sym}] 🛑 SKIPPING OPEN_SHORT: 4h Critic ({pred_ret_4h:+.2f}%) is heavily bullish and 1h Critic ({pred_ret_1h:+.2f}%) has not confirmed reversal!")
                                 continue
+
+                    # GUARD 4.5: Entry rate limit (safety net against overtrading / runaway loops)
+                    if not is_closing and pos.quantity == 0 and abs(action_val) > 0.20:
+                        if self._entries_last_hour() >= settings.max_entries_per_hour:
+                            logger.info(f"[{sym}] SKIPPING OPEN: hourly entry cap reached ({settings.max_entries_per_hour}/h).")
+                            continue
 
                     # GUARD 5: Institutional Dynamic Volatility & Conviction Margin Sizing (Kelly / ATR Scaling)
                     # Dynamically scales between 20.0% and 40.0% based on conviction, horizon alignment, and coin volatility.
@@ -2283,14 +1890,14 @@ class ProductionTradingBot:
                                 continue
                                 
                             # Phase 2: Pre-Trade Net-Edge Estimator (Ensures positive expectancy after fees, spread, and slippage)
-                            c5m_pred = float(precomputed_critics[sym][0]) if (sym in precomputed_critics and len(precomputed_critics[sym]) > 0) else (0.25 if "LONG" in side else -0.25)
+                            edge_move_pred = exit_policy.expected_move_pct(precomputed_critics[sym]) if (sym in precomputed_critics and len(precomputed_critics[sym]) > 0) else (0.25 if "LONG" in side else -0.25)
                             active_regime = "NEUTRAL"
                             if sym in self.htf_regimes:
                                 active_regime = self.htf_regimes[sym].get("trend", "NEUTRAL")
                             edge_result = self.edge_estimator.estimate(
                                 symbol=sym,
                                 side=side,
-                                predicted_move_pct=c5m_pred,
+                                predicted_move_pct=edge_move_pred,
                                 confidence=float(confidence),
                                 market=market,
                                 is_maker=True,
@@ -2649,6 +2256,7 @@ class ProductionTradingBot:
 
                                     if "OPEN_LONG" in side:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
+                                            self.recent_entry_times.append(time.time())
                                             self.portfolio_state.positions[sym].entry_time = time.time()
                                             self.position_entry_times[sym] = time.time()
                                             self.portfolio_state.positions[sym].entry_price = order_exec_price
@@ -2672,6 +2280,7 @@ class ProductionTradingBot:
                                                 self.pnl_history[sym].clear()
                                     elif "OPEN_SHORT" in side:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
+                                            self.recent_entry_times.append(time.time())
                                             self.portfolio_state.positions[sym].entry_time = time.time()
                                             self.position_entry_times[sym] = time.time()
                                             self.portfolio_state.positions[sym].entry_price = order_exec_price

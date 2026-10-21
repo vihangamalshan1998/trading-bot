@@ -115,7 +115,9 @@ _CROSS_SECTION = _block(150, "cross_section", [
 _GLOBAL = _block(160, "global", [
     ("coinbase_premium_btc", A, N), ("coinbase_premium_eth", A, N), ("dvol_btc", A, N), ("dvol_eth", A, N),
     ("dvol_btc_change_1h", A, N),
-] + [(f"pad_{165 + i}", R, N) for i in range(5)])
+    # US economic calendar (Fed / CPI / jobs): time to next and since last high-impact release, size of the next
+    ("econ_time_to_next", A, N), ("econ_time_since_last", A, N), ("econ_next_importance", A, N),
+] + [(f"pad_{168 + i}", R, N) for i in range(2)])
 _FUTURE = [Slot(i, f"reserved_{i}", "future", RESERVED) for i in range(170, STATE_DIM)]
 
 SLOTS: List[Slot] = _PORTFOLIO + _POSITION + _MARKET + _MACRO + _WHALE + _STATARB + _CROSS_SECTION + _GLOBAL + _FUTURE
@@ -134,7 +136,7 @@ GLOBAL_START = SLOT_BY_NAME["coinbase_premium_btc"]
 GLOBAL_KEYS = tuple(s.name for s in _GLOBAL if s.status == ACTIVE)
 # Inputs switched on in October 2026 (formerly always 0). Models without fitted feature statistics
 # (legacy champions) never saw them, so the live bot zeroes them for those models at inference time.
-ADDED_2026_10_SLOTS = tuple(range(45, 49)) + tuple(range(106, 110)) + tuple(range(150, 165))
+ADDED_2026_10_SLOTS = tuple(range(45, 49)) + tuple(range(106, 110)) + tuple(range(150, 168))
 
 # FeatureEngine-relative indices (0..89) for the live bot's per-feature transforms
 MARKET_LOG_VOLUME_FEATURES = tuple(i - MARKET_OFFSET for i in LOG_VOLUME_SLOTS if MARKET_OFFSET <= i < MARKET_OFFSET + MARKET_DIM)

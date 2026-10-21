@@ -102,3 +102,21 @@ def test_cross_section_rank():
     assert len(f) == 10
     assert abs(f[1] - (0.02 - 0.005)) < 1e-12   # relative 15m return
     assert f[4] == 1.0                           # strongest coin -> rank +1
+
+
+def test_economic_calendar_features():
+    from apps.market_collector.global_context import econ_calendar_features, parse_calendar
+    rows = [
+        {"country": "USD", "title": "Federal Funds Rate", "impact": "High", "date": "2026-10-29T14:00:00-04:00"},
+        {"country": "USD", "title": "Unemployment Claims", "impact": "Medium", "date": "2026-10-29T08:30:00-04:00"},
+        {"country": "EUR", "title": "ECB Rate", "impact": "High", "date": "2026-10-29T08:00:00-04:00"},
+        {"country": "USD", "title": "Housing Starts", "impact": "Low", "date": "2026-10-29T09:00:00-04:00"},
+    ]
+    ev = parse_calendar(rows)
+    assert [w for _, w in ev] == [0.2, 1.0]           # USD only, low impact dropped, Fed = 1.0
+    fed = ev[1][0]
+    before = econ_calendar_features(ev, fed - 2 * 3600)
+    assert abs(before["econ_time_to_next"] - 2 / 24) < 1e-9 and before["econ_next_importance"] == 1.0
+    after = econ_calendar_features(ev, fed + 6 * 3600)
+    assert after["econ_time_to_next"] == 1.0 and abs(after["econ_time_since_last"] - 0.25) < 1e-9
+    assert econ_calendar_features([], fed) == {"econ_time_to_next": 1.0, "econ_time_since_last": 1.0, "econ_next_importance": 0.0}

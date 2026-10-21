@@ -15,6 +15,7 @@ from core.ai.rollout_buffer import RolloutBuffer
 from core.logging.logger import logger, set_log_file
 from apps.research.model import SingleSymbolActorCritic
 from core.ai.registry import ModelRegistry
+from core.ai import trainer_status
 from core.config.settings import settings
 from core.risk import exit_policy
 from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT, ADDED_2026_10_SLOTS
@@ -977,6 +978,13 @@ async def run_training_loop():
                     except Exception as e:
                         pass
                         
+                    try:
+                        # Heartbeat + log tail for the VPS dashboard (through the SSH tunnel's Redis)
+                        trainer_status.publish(getattr(trainer, "step_count", 0), {
+                            "train_rows": len(trainer.buffer.cache), "holdout_rows": len(trainer.buffer.holdout_cache),
+                        })
+                    except Exception:
+                        pass
                     time.sleep(30) # Check for new trades every 30 seconds
                     
             threading.Thread(target=background_syncer, daemon=True).start()
@@ -1021,6 +1029,7 @@ async def run_training_loop():
                 await asyncio.sleep(sleep_time)
 
             step += 1
+            trainer.step_count = step
             if step % 100 == 0:
                 logger.info(f"Completed {step} training steps. Evaluating candidate brain before deployment...")
                 

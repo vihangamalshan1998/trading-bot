@@ -31,6 +31,7 @@ def test_big_market_close_is_split_into_parts():
     a, sent = _adapter()
     res = asyncio.run(a.create_order("TAOUSDT", "SELL", 23.456, "ai_bot_x", order_type="MARKET", reduce_only=True))
     assert [p["quantity"] for p in sent] == ["10", "10", "3.456"]
+    assert all(p["newOrderRespType"] == "RESULT" for p in sent)
     assert [p["newClientOrderId"] for p in sent] == ["ai_bot_x_1", "ai_bot_x_2", "ai_bot_x_3"]
     assert all(p["reduceOnly"] == "true" and p["type"] == "MARKET" for p in sent)
     assert float(res["executedQty"]) == pytest.approx(23.456)

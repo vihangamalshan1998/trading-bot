@@ -321,3 +321,14 @@ def test_aggregate_multi_symbol_portfolio_exposure(base_state):
     decision = rm.evaluate(req, portfolio, market)
     assert not decision.approved
     assert decision.reason == "EXCESSIVE_PORTFOLIO_EXPOSURE"
+
+
+def test_close_is_never_blocked_by_stale_data_or_margin(base_state):
+    market, portfolio = base_state
+    market.timestamp = time.time() - 600          # very stale feed
+    portfolio.free_margin = -5.0                  # brief negative free margin
+    portfolio.positions["BTCUSDT"] = PositionState(symbol="BTCUSDT", quantity=2.0, leverage=20)
+    rm = RiskManager()
+    req = OrderRequest(symbol="BTCUSDT", action_type="CLOSE_LONG", confidence=1.0, requested_quantity=2.0, target_position=0.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert decision.approved and decision.adjusted_quantity == 2.0

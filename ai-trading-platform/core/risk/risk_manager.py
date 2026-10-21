@@ -162,6 +162,17 @@ class RiskManager:
         if price <= 0:
             return self._reject("INVALID_PRICE")
 
+        # Risk-reducing orders are never blocked by the checks below (stale feed, stale portfolio, a brief
+        # negative free margin): a stop-loss that cannot close is worse than any of those conditions.
+        if "CLOSE" in order_request.action_type.upper():
+            return RiskDecision(
+                approved=True,
+                reason="Approved",
+                adjusted_quantity=qty,
+                max_allowed_quantity=qty,
+                risk_flags=[],
+            )
+
         # ========================================================
         # 3. Market freshness
         # ========================================================

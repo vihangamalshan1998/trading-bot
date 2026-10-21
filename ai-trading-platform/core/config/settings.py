@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     entry_topup_min_move_pct: float = Field(default=0.30, ge=0.0)        # predicted move must be >= 0.30% (normal hurdle 0.22%)
     entry_topup_below_fill_frac: float = Field(default=0.5, ge=0.0, le=1.0)  # only if less than half of the order filled
     entry_topup_max_adverse_pct: float = Field(default=0.05, ge=0.0)     # skip if price already ran > 0.05% past our limit
+    # Exchange-side backup stop for every open position (fires only if the bot is down / its feed is stale)
+    disaster_stop_enabled: bool = Field(default=True)
+    disaster_stop_mult: float = Field(default=1.5, ge=1.0, le=5.0)  # x the trade's own stop (max 0.75% -> 1.125%)
     experience_snapshot_seconds: float = Field(default=600.0, ge=60.0)  # one training record per coin every 10 min, whatever the bot decides (~2,600/day)
     experience_retention_days: int = Field(default=21, ge=3)            # VPS keeps 3 weeks of records; the laptop trainer syncs them within minutes
     min_net_edge_hurdle_pct: float = Field(default=0.08, ge=0.0)        # 0.08% min net edge after fees, spread, slippage, and uncertainty penalty

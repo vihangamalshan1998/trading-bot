@@ -131,6 +131,10 @@ class ProductionTradingBot:
         self._entry_guard_loaded = False
         self._last_history_save = 0.0
         self._warmup_logged = set()
+        self.position_exit_levels = {}   # sym -> ExitLevels frozen at entry (the trainer scores trades with entry-time levels)
+        self.disaster_stops = {}         # sym -> exchange-side backup stop {"algo_id", "trigger", "side", "entry_px", "qty"}
+        self._disaster_stop_retry = {}   # sym -> earliest time a failed stop placement is retried
+        self._restored_pos_state = {}    # sym -> per-position state from Redis, applied once Binance confirms the same position
         self.position_entry_times = {sym: 0.0 for sym in self.symbols} # Minimum holding tracking per symbol
         self.peak_pnl_pct = {sym: 0.0 for sym in self.symbols} # Peak leveraged PnL tracking for trailing profit locks
         self.pnl_history = {sym: collections.deque(maxlen=30) for sym in self.symbols} # (timestamp, pnl_pct_leveraged) for velocity shock detection
@@ -189,6 +193,7 @@ class ProductionTradingBot:
             self.recent_entry_times = collections.deque(sorted(list(self.recent_entry_times) + restored))
             for sym, t in (data.get("last_close") or {}).items():
                 self.last_close_time[sym] = max(self.last_close_time.get(sym, 0.0), float(t))
+            self._restore_risk_state(data.get("risk") or {})
             logger.info(f"Restored entry guard: {len(self.recent_entry_times)} entries in the last hour, "
                         f"{len(data.get('last_close') or {})} coin cooldowns.")
         except Exception as e:
@@ -201,14 +206,243 @@ class ProductionTradingBot:
         state = {
             "entries": list(self.recent_entry_times),
             "last_close": {s: t for s, t in self.last_close_time.items() if t > time.time() - 7200.0},
+            "risk": self._safe_risk_state(),
         }
         if state == self._saved_entry_guard:
             return
         try:
-            await self.redis.redis.set(ENTRY_GUARD_KEY, json.dumps(state), ex=7200)
+            await self.redis.redis.set(ENTRY_GUARD_KEY, json.dumps(state), ex=3 * 86400)
             self._saved_entry_guard = state
         except Exception as e:
             logger.warning(f"Could not save entry guard: {e}")
+
+    def _exit_levels_for(self, sym: str, market) -> "exit_policy.ExitLevels":
+        """Exit levels frozen when the position opened (volatility at entry), like the trainer's replay of the trade."""
+        lv = self.position_exit_levels.get(sym)
+        if lv is None:
+            lv = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
+            self.position_exit_levels[sym] = lv
+        return lv
+
+    def _close_record(self, base: dict, entry_px: float, parts) -> dict:
+        """
+        Trade-history row for a close made of several fills. parts: [(qty, price, fee_rate), ...].
+        PnL uses the real fill prices (maker part at its limit price, market part at Binance's average fill).
+        """
+        rec = dict(base)
+        parts = [(float(q), float(px), float(r)) for q, px, r in parts if q and q > 0 and px and px > 0]
+        qty = sum(q for q, _, _ in parts)
+        if qty <= 0 or entry_px <= 0:
+            return rec
+        exit_px = sum(q * px for q, px, _ in parts) / qty
+        is_long = "LONG" in str(rec.get("side", ""))
+        lev = float(rec.get("leverage") or settings.max_leverage)
+        gross = (exit_px - entry_px) * qty * (1 if is_long else -1)
+        fees = entry_px * qty * settings.maker_fee_pct + sum(q * px * r for q, px, r in parts)
+        margin = entry_px * qty / lev if lev else 0.0
+        rec.update({
+            "timestamp": time.time(),
+            "quantity": qty,
+            "price": exit_px,
+            "entry_price": entry_px,
+            "gross_pnl": gross,
+            "fees_paid": fees,
+            "realized_pnl": gross - fees,
+            "roi_pct": (gross - fees) / margin * 100.0 if margin > 0 else 0.0,
+            "notional": exit_px * qty,
+        })
+        return rec
+
+    def _risk_state(self) -> dict:
+        """Safety state that must survive restarts (daily loss / drawdown stops, penalty box, open-trade tracking)."""
+        rm = self.risk_manager
+        pos_state = {}
+        for sym, pos in self.portfolio_state.positions.items():
+            if abs(pos.quantity) > 1e-9 and pos.entry_price > 0:
+                lv = self.position_exit_levels.get(sym)
+                pos_state[sym] = {
+                    "entry_px": float(pos.entry_price),
+                    "entry_time": float(self.position_entry_times.get(sym) or 0.0),
+                    "peak": float(self.peak_pnl_pct.get(sym, 0.0)),
+                    "tp1": bool(self.partial_tp_triggered.get(sym, False)),
+                    "levels": [lv.stop, lv.tp1, lv.hard_tp, lv.breakeven, lv.trail_gap] if lv else None,
+                }
+        return {
+            "daily_start_equity": self.daily_start_equity,
+            "daily_peak_equity": self.daily_peak_equity,
+            "daily_equity_reset_time": self.daily_equity_reset_time,
+            "circuit_breaker_active_until": self.circuit_breaker_active_until,
+            "profit_ratchet_active": self.profit_ratchet_active,
+            "max_equity": self.max_equity,
+            "rm_daily_high": rm.daily_high_equity,
+            "rm_global_high": rm.global_high_equity,
+            "rm_last_day_reset": rm.last_day_reset,
+            "consecutive_losses": {s: n for s, n in self.consecutive_losses.items() if n},
+            "lockouts": {s: d for s, d in self.loss_lockout_until.items() if max(list(d.values()) or [0.0]) > time.time()},
+            "positions": pos_state,
+        }
+
+    def _safe_risk_state(self) -> dict:
+        # Called every inference tick: a failure here must never reach the loop (it halts the bot on any error)
+        try:
+            return self._risk_state()
+        except Exception as e:
+            logger.warning(f"Could not build risk state for saving: {e}")
+            return {}
+
+    def _restore_risk_state(self, risk: dict):
+        if not risk:
+            return
+        rm = self.risk_manager
+        self.daily_start_equity = float(risk.get("daily_start_equity") or 0.0)
+        self.daily_peak_equity = float(risk.get("daily_peak_equity") or 0.0)
+        self.daily_equity_reset_time = float(risk.get("daily_equity_reset_time") or time.time())
+        self.circuit_breaker_active_until = float(risk.get("circuit_breaker_active_until") or 0.0)
+        self.profit_ratchet_active = bool(risk.get("profit_ratchet_active", False))
+        self.max_equity = max(self.max_equity, float(risk.get("max_equity") or 0.0))
+        rm.daily_high_equity = max(rm.daily_high_equity, float(risk.get("rm_daily_high") or 0.0))
+        rm.global_high_equity = max(rm.global_high_equity, float(risk.get("rm_global_high") or 0.0))
+        rm.last_day_reset = float(risk.get("rm_last_day_reset") or rm.last_day_reset)
+        for sym, n in (risk.get("consecutive_losses") or {}).items():
+            self.consecutive_losses[sym] = int(n)
+        for sym, d in (risk.get("lockouts") or {}).items():
+            self.loss_lockout_until[sym] = {"LONG": float(d.get("LONG", 0.0)), "SHORT": float(d.get("SHORT", 0.0))}
+        self._restored_pos_state = dict(risk.get("positions") or {})
+        logger.info(f"Restored risk state: daily start ${self.daily_start_equity:.2f}, circuit breaker "
+                    f"{'ON' if self.circuit_breaker_active_until > time.time() else 'off'}, "
+                    f"{len(risk.get('lockouts') or {})} penalty-box coins, {len(self._restored_pos_state)} open-trade states.")
+
+    def _apply_restored_position(self, sym: str, entry_px: float):
+        """Called by the Binance sync for an open position: reuse the saved trade state only if it is the same trade."""
+        r = self._restored_pos_state.pop(sym, None)
+        if not r:
+            return
+        saved_px = float(r.get("entry_px") or 0.0)
+        if saved_px <= 0 or abs(entry_px - saved_px) / saved_px > 1e-5:
+            logger.info(f"[{sym}] Saved trade state ignored (entry {saved_px} != live {entry_px}).")
+            return
+        if r.get("entry_time"):
+            self.position_entry_times[sym] = float(r["entry_time"])
+            self.portfolio_state.positions[sym].entry_time = float(r["entry_time"])
+        self.peak_pnl_pct[sym] = float(r.get("peak") or 0.0)
+        self.partial_tp_triggered[sym] = bool(r.get("tp1", False))
+        if r.get("levels"):
+            self.position_exit_levels[sym] = exit_policy.ExitLevels(*[float(x) for x in r["levels"]])
+        logger.info(f"[{sym}] Restored trade state: held {(time.time() - float(r.get('entry_time') or time.time())) / 60:.0f} min, "
+                    f"50% profit taken: {bool(r.get('tp1'))}, best move so far {float(r.get('peak') or 0.0) * 100:+.2f}% (leveraged).")
+
+    def _stops_allowed(self) -> bool:
+        return (settings.disaster_stop_enabled and self.trading_enabled and not self.dry_run
+                and not self.emergency_stop and (settings.allow_testnet or settings.allow_live_trading))
+
+    async def _load_disaster_stops(self):
+        """Adopts backup stops already on Binance (they survive bot restarts and order cleanups)."""
+        if not self._stops_allowed():
+            return
+        try:
+            for o in await self.binance.get_open_algo_orders():
+                sym = o.get("symbol")
+                if str(o.get("orderType") or o.get("type")) != "STOP_MARKET" or not o.get("closePosition"):
+                    continue
+                if sym in self.disaster_stops:
+                    await self.binance.cancel_algo_order(o.get("algoId"))  # duplicate
+                    continue
+                self.disaster_stops[sym] = {"algo_id": o.get("algoId"), "trigger": float(o.get("triggerPrice") or 0.0),
+                                            "side": str(o.get("side", "")).upper(), "entry_px": None, "qty": 0.0}
+            if self.disaster_stops:
+                logger.info(f"Found exchange backup stops for: {sorted(self.disaster_stops)}")
+        except Exception as e:
+            logger.warning(f"Could not list exchange backup stops: {e}")
+
+    async def _ensure_disaster_stops(self, live_positions):
+        """
+        Every open position gets a Binance-side STOP_MARKET (closePosition) at disaster_stop_mult x its own stop.
+        The bot's own stop fires first; this one only matters when the bot, VPS or price feed is down.
+        """
+        if not self._stops_allowed():
+            return
+        now_t = time.time()
+        open_syms = {}
+        for p in live_positions:
+            amt = float(p.get("positionAmt", 0) or 0.0)
+            if amt != 0 and p.get("symbol") in self.portfolio_state.positions:
+                open_syms[p.get("symbol")] = (amt, float(p.get("entryPrice", 0) or 0.0))
+
+        # Positions that disappeared: was it our backup stop that closed them?
+        for sym in [x for x in self.disaster_stops if x not in open_syms]:
+            info = self.disaster_stops.pop(sym)
+            if now_t - self.last_close_time.get(sym, 0.0) < 120.0:
+                continue  # the bot closed it
+            try:
+                st = await self.binance._request("GET", "/fapi/v1/algoOrder", signed=True, params={"algoId": info["algo_id"]})
+                status = str(st.get("algoStatus", "")).upper()
+            except Exception:
+                status = ""
+            if "TRIGGER" in status or "FINISH" in status:
+                await self._record_disaster_stop_fill(sym, info)
+
+        for sym, (amt, entry_px) in open_syms.items():
+            if entry_px <= 0 or now_t < self._disaster_stop_retry.get(sym, 0.0):
+                continue
+            market = self.market_states.get(sym)
+            lv = self._exit_levels_for(sym, market)
+            dist = lv.stop * settings.disaster_stop_mult
+            is_long = amt > 0
+            cfg = registry.get_symbol(sym)
+            if not cfg:
+                continue
+            trigger = float(cfg.format_price(entry_px * (1 - dist) if is_long else entry_px * (1 + dist)))
+            side = "SELL" if is_long else "BUY"
+            cur = self.disaster_stops.get(sym)
+            if cur and cur["side"] == side and cur["trigger"] > 0 and abs(cur["trigger"] - trigger) / trigger < 0.002:
+                cur.update({"entry_px": entry_px, "qty": abs(amt)})
+                continue
+            try:
+                if cur:
+                    try:
+                        await self.binance.cancel_algo_order(cur["algo_id"])
+                    except Exception:
+                        pass
+                    self.disaster_stops.pop(sym, None)
+                res = await self.binance.place_close_stop(sym, side, cfg.format_price(trigger), f"ai_dstop_{uuid.uuid4().hex[:10]}")
+                self.disaster_stops[sym] = {"algo_id": res.get("algoId"), "trigger": trigger, "side": side,
+                                            "entry_px": entry_px, "qty": abs(amt)}
+                logger.info(f"[{sym}] 🛡️ Exchange backup stop set at {trigger} ({dist * 100:.2f}% from entry {entry_px}).")
+            except Exception as e:
+                self._disaster_stop_retry[sym] = now_t + 60.0
+                logger.warning(f"[{sym}] Could not set exchange backup stop: {e}")
+
+    async def _record_disaster_stop_fill(self, sym: str, info: dict):
+        is_long = info.get("side") == "SELL"
+        entry_px = float(info.get("entry_px") or 0.0)
+        qty = float(info.get("qty") or 0.0)
+        gross, fees = None, None
+        try:
+            income = await self.binance._request("GET", "/fapi/v1/income", signed=True, params={"symbol": sym, "limit": 20})
+            recent = [i for i in (income or []) if time.time() * 1000 - float(i.get("time", 0)) < 600000]
+            if any(i.get("incomeType") == "REALIZED_PNL" for i in recent):
+                gross = sum(float(i.get("income", 0)) for i in recent if i.get("incomeType") == "REALIZED_PNL")
+                fees = sum(abs(float(i.get("income", 0))) for i in recent if i.get("incomeType") == "COMMISSION")
+        except Exception as e:
+            logger.warning(f"[{sym}] Income lookup for backup stop failed: {e}")
+        self.last_close_time[sym] = time.time()
+        closed_dir = "LONG" if is_long else "SHORT"
+        self.loss_lockout_until.setdefault(sym, {"LONG": 0.0, "SHORT": 0.0})[closed_dir] = time.time() + 3600.0
+        logger.critical(f"[{sym}] 🛡️ EXCHANGE BACKUP STOP FIRED: the bot did not close this {closed_dir} in time "
+                        f"(trigger {info.get('trigger')}, entry {entry_px}). {closed_dir} locked for 60 min.")
+        if self.redis.redis and qty > 0 and entry_px > 0:
+            exit_px = float(info.get("trigger") or entry_px)
+            margin = entry_px * qty / settings.max_leverage
+            if gross is None:
+                gross = (exit_px - entry_px) * qty * (1 if is_long else -1)
+                fees = (entry_px * settings.maker_fee_pct + exit_px * settings.taker_fee_pct) * qty
+            rec = {"timestamp": time.time(), "symbol": sym, "side": "CLOSE_LONG" if is_long else "CLOSE_SHORT",
+                   "quantity": qty, "price": exit_px, "confidence": 0.0, "order_id": info.get("algo_id"),
+                   "entry_price": entry_px, "gross_pnl": gross, "fees_paid": fees, "realized_pnl": gross - fees,
+                   "roi_pct": (gross - fees) / margin * 100.0 if margin > 0 else 0.0, "leverage": settings.max_leverage,
+                   "notional": exit_px * qty, "order_type": "EXCHANGE STOP", "exit_reason": "EXCHANGE BACKUP STOP"}
+            await self.redis.redis.lpush("dashboard:trade_history", json.dumps(rec))
+            await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
 
     def _history_warm(self, sym: str) -> bool:
         """
@@ -1033,6 +1267,8 @@ class ProductionTradingBot:
                             self.portfolio_state.positions[sym].leverage = int(p.get("leverage", 10))
                             if amt != 0:
                                 self.portfolio_state.positions[sym].entry_price = float(p.get("entryPrice", 0))
+                                if sym in self._restored_pos_state:
+                                    self._apply_restored_position(sym, float(p.get("entryPrice", 0)))
                                 # MEMORY RESILIENCE: If position is open but entry time was not tracked (e.g. after PM2 restart),
                                 # recover the exact entry timestamp from Binance updateTime so the 600s breathing room stays active!
                                 if self.position_entry_times.get(sym, 0.0) == 0.0:
@@ -1050,6 +1286,7 @@ class ProductionTradingBot:
                                 self.position_entry_times[sym] = 0.0
                                 self.portfolio_state.positions[sym].entry_price = 0.0
                                 self.partial_tp_triggered[sym] = False
+                                self.position_exit_levels.pop(sym, None)
                                 
                         # CRITICAL: Only send active positions to the dashboard (once per active position)
                         if abs(amt) > 0:
@@ -1120,6 +1357,9 @@ class ProductionTradingBot:
                             self.portfolio_state.positions[s].quantity = 0.0
                             self.portfolio_state.positions[s].entry_price = 0.0
                             self.partial_tp_triggered[s] = False
+                            self.position_exit_levels.pop(s, None)
+
+                    await self._ensure_disaster_stops(live_positions)
                     
                     if self.redis.redis:
                         payload = {
@@ -1443,31 +1683,54 @@ class ProductionTradingBot:
                                 margin_used = (qty * price) / settings.max_leverage
                                 
                                 # If an unfilled MAKER CLOSE timed out, fall back immediately to MARKET CLOSE to secure the exit!
+                                # Sizes come from Binance: whatever the maker order already filled is not sold twice, and a
+                                # 50% take-profit keeps its runner (entry time, best move and exit levels stay intact).
                                 if "CLOSE" in side and qty > 0 and (self.trading_enabled and not self.dry_run):
                                     logger.info(f"[{sym}] ⏰ MAKER EXIT TIMEOUT. Executing immediate MARKET CLOSE fallback to secure exit!")
                                     close_binance_side = "BUY" if "SHORT" in side else "SELL"
+                                    is_partial = side.startswith("PARTIAL_")
                                     try:
+                                        live = await self.binance.get_positions()
+                                        lp = next((x for x in live if x.get('symbol') == sym), None)
+                                        live_abs = abs(float(lp.get('positionAmt', 0.0))) if lp else 0.0
+                                        before_abs = float(self.active_orders[sym].get('pos_qty_before') or 0.0)
+                                        maker_filled = min(qty, max(0.0, before_abs - live_abs)) if before_abs > 0 else 0.0
+                                        rest = max(0.0, qty - maker_filled) if is_partial else live_abs
                                         sym_config = registry.get_symbol(sym)
-                                        fmt_qty = float(sym_config.format_quantity(qty))
+                                        fmt_qty = float(sym_config.format_quantity(min(rest, live_abs))) if rest > 0 else 0.0
+                                        fb_order = {}
                                         if fmt_qty > 0:
                                             fb_order = await self.binance.create_order(
-                                                sym, close_binance_side, fmt_qty, 
-                                                f"ai_mkt_fb_{uuid.uuid4().hex[:8]}", 
+                                                sym, close_binance_side, fmt_qty,
+                                                f"ai_mkt_fb_{uuid.uuid4().hex[:8]}",
                                                 order_type="MARKET", reduce_only=True
                                             )
-                                            self.last_close_time[sym] = time.time()
+                                        self.last_close_time[sym] = time.time()
+                                        remaining_abs = max(0.0, live_abs - fmt_qty)
+                                        if is_partial and remaining_abs > 0:
+                                            self.portfolio_state.positions[sym].quantity = remaining_abs if "LONG" in side else -remaining_abs
+                                            self.partial_tp_triggered[sym] = True
+                                        else:
                                             self.portfolio_state.positions[sym].quantity = 0.0
                                             self.portfolio_state.positions[sym].entry_price = 0.0
                                             self.position_entry_times[sym] = 0.0
-                                            
-                                            # Record the confirmed fallback market exit in dashboard history
-                                            if self.redis.redis and 'trade_record' in self.active_orders[sym]:
-                                                fb_rec = dict(self.active_orders[sym]['trade_record'])
-                                                fb_rec['timestamp'] = time.time()
-                                                fb_rec['quantity'] = fmt_qty
-                                                fb_rec['order_id'] = fb_order.get('orderId', fb_rec.get('order_id'))
-                                                await self.redis.redis.lpush("dashboard:trade_history", json.dumps(fb_rec))
-                                                await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
+                                            self.position_exit_levels.pop(sym, None)
+
+                                        # Record the close with the real fill prices
+                                        if self.redis.redis and 'trade_record' in self.active_orders[sym] and (fmt_qty + maker_filled) > 0:
+                                            base_rec = self.active_orders[sym]['trade_record']
+                                            mkt_px = float(fb_order.get('avgPrice') or 0.0) if isinstance(fb_order, dict) else 0.0
+                                            if mkt_px <= 0:
+                                                m_fb = self.market_states.get(sym)
+                                                mkt_px = float(m_fb.mid_price) if m_fb else price
+                                            fb_rec = self._close_record(base_rec, float(base_rec.get('entry_price') or 0.0), [
+                                                (maker_filled, price, settings.maker_fee_pct),
+                                                (fmt_qty, mkt_px, settings.taker_fee_pct),
+                                            ])
+                                            fb_rec['order_id'] = fb_order.get('orderId', base_rec.get('order_id')) if isinstance(fb_order, dict) else base_rec.get('order_id')
+                                            fb_rec['order_type'] = "MAKER + MARKET FALLBACK" if maker_filled > 0 else "MARKET (maker timeout)"
+                                            await self.redis.redis.lpush("dashboard:trade_history", json.dumps(fb_rec))
+                                            await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
                                     except Exception as fb_err:
                                         logger.warning(f"[{sym}] Fallback market exit error: {fb_err}")
                                 else:
@@ -1657,7 +1920,7 @@ class ProductionTradingBot:
                             # of leverage and identical to what the trainer scores. Stop <= 0.75% (never wider
                             # than before), first take-profit >= 1.5x the stop, fee-covering breakeven, and the
                             # runner trails one stop-distance behind its peak only after TP1 is banked.
-                            levels = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
+                            levels = self._exit_levels_for(sym, market)
                             lev = float(pos_check.leverage) if pos_check.leverage else 1.0
                             peak_move = prev_peak / lev
                             entry_time = self.position_entry_times.get(sym, 0.0)
@@ -1971,7 +2234,7 @@ class ProductionTradingBot:
                         # Thresholds follow the shared exit policy (price moves): an AI close of a winner must be
                         # worth at least one stop-distance, otherwise wins stay smaller than losses.
                         cur_move = pnl_pct_leveraged / max(1.0, float(pos.leverage or 1))
-                        close_levels = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
+                        close_levels = self._exit_levels_for(sym, market)
 
                         # 1. Critic-Assisted Exit: in profit beyond 2x costs and the Critic forecasts an adverse reversal
                         if cur_move >= 2.0 * exit_policy.ROUND_TRIP_COST and has_reversal_critic:
@@ -2639,7 +2902,8 @@ class ProductionTradingBot:
                                         
                                     # Only track pending LIMIT orders (market closes fill immediately)
                                     if not is_market_exit:
-                                        self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time(), 'trade_record': trade_record}
+                                        self.active_orders[sym] = {'order_id': actual_order_id, 'timestamp': time.time(), 'trade_record': trade_record,
+                                                                   'pos_qty_before': abs(self.portfolio_state.positions[sym].quantity)}
                                     
                                     # Update local position state immediately to prevent over-buying before the next sync
                                     notional_cost = float(qty_str) * order_exec_price
@@ -2649,6 +2913,7 @@ class ProductionTradingBot:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
                                             self.recent_entry_times.append(time.time())
                                             entries_this_cycle += 1
+                                            self.position_exit_levels[sym] = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
                                             self.portfolio_state.positions[sym].entry_time = time.time()
                                             self.position_entry_times[sym] = time.time()
                                             self.portfolio_state.positions[sym].entry_price = order_exec_price
@@ -2668,12 +2933,14 @@ class ProductionTradingBot:
                                             self.position_entry_times[sym] = 0.0
                                             self.peak_pnl_pct[sym] = 0.0
                                             self.partial_tp_triggered[sym] = False
+                                            self.position_exit_levels.pop(sym, None)
                                             if sym in self.pnl_history:
                                                 self.pnl_history[sym].clear()
                                     elif "OPEN_SHORT" in side:
                                         if self.portfolio_state.positions[sym].quantity == 0.0:
                                             self.recent_entry_times.append(time.time())
                                             entries_this_cycle += 1
+                                            self.position_exit_levels[sym] = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
                                             self.portfolio_state.positions[sym].entry_time = time.time()
                                             self.position_entry_times[sym] = time.time()
                                             self.portfolio_state.positions[sym].entry_price = order_exec_price
@@ -2693,6 +2960,7 @@ class ProductionTradingBot:
                                             self.position_entry_times[sym] = 0.0
                                             self.peak_pnl_pct[sym] = 0.0
                                             self.partial_tp_triggered[sym] = False
+                                            self.position_exit_levels.pop(sym, None)
                                             if sym in self.pnl_history:
                                                 self.pnl_history[sym].clear()
                                                 
@@ -3091,6 +3359,7 @@ class ProductionTradingBot:
 
         await self._load_entry_guard()
         await self._load_state_history()
+        await self._load_disaster_stops()
 
         tasks = [
             asyncio.create_task(self.listen_macro()),

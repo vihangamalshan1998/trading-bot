@@ -174,6 +174,9 @@ class BinanceFuturesAdapter(ExchangeAdapter):
         }
         if reduce_only:
             params["reduceOnly"] = "true"
+        if order_type.upper() == "MARKET":
+            # Default response (ACK) has no fill: avgPrice 0. RESULT returns the real fill price and quantity.
+            params["newOrderRespType"] = "RESULT"
         if order_type.upper() == "LIMIT":
             if price is None:
                 raise ValueError("Limit orders require a price")
@@ -182,6 +185,31 @@ class BinanceFuturesAdapter(ExchangeAdapter):
             
         logger.info(f"Placing Order: {params}")
         return await self._request("POST", "/fapi/v1/order", signed=True, params=params)
+
+    # Exchange-side stops. Binance moved STOP_MARKET to the Algo Order API (/fapi/v1/order answers -4120).
+    # closePosition stops are GTE_GTC: accepted only while a position exists and cancelled by Binance when it
+    # closes. DELETE /fapi/v1/allOpenOrders does not touch them.
+    async def place_close_stop(self, symbol: str, side: str, trigger_price: str, client_id: str) -> Dict[str, Any]:
+        params = {
+            "algoType": "CONDITIONAL",
+            "symbol": symbol,
+            "side": side.upper(),
+            "type": "STOP_MARKET",
+            "triggerPrice": trigger_price,
+            "closePosition": "true",
+            "workingType": "MARK_PRICE",
+            "clientAlgoId": client_id,
+        }
+        logger.info(f"Placing exchange stop: {params}")
+        return await self._request("POST", "/fapi/v1/algoOrder", signed=True, params=params)
+
+    async def get_open_algo_orders(self, symbol: str = None) -> List[Dict[str, Any]]:
+        params = {"symbol": symbol} if symbol else {}
+        res = await self._request("GET", "/fapi/v1/openAlgoOrders", signed=True, params=params)
+        return res if isinstance(res, list) else (res or {}).get("orders", [])
+
+    async def cancel_algo_order(self, algo_id) -> Dict[str, Any]:
+        return await self._request("DELETE", "/fapi/v1/algoOrder", signed=True, params={"algoId": algo_id})
 
     async def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
         """Cancels an active futures order."""

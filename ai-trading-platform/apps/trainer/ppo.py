@@ -978,16 +978,22 @@ async def run_training_loop():
                     except Exception as e:
                         pass
                         
+                    time.sleep(30) # Check for new trades every 30 seconds
+
+            def heartbeat():
+                # Own thread: a long grading cycle must not let the dashboard's 10-minute keys expire
+                # (the trainer's log used to vanish from the dashboard and come back after each cycle).
+                while True:
                     try:
-                        # Heartbeat + log tail for the VPS dashboard (through the SSH tunnel's Redis)
                         trainer_status.publish(getattr(trainer, "step_count", 0), {
                             "train_rows": len(trainer.buffer.cache), "holdout_rows": len(trainer.buffer.holdout_cache),
                         })
                     except Exception:
                         pass
-                    time.sleep(30) # Check for new trades every 30 seconds
-                    
+                    time.sleep(30)
+
             threading.Thread(target=background_syncer, daemon=True).start()
+            threading.Thread(target=heartbeat, daemon=True).start()
         except Exception as e:
             logger.error(f"Could not start background syncer: {e}")
     

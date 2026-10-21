@@ -278,3 +278,5 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 .banner svg { width: 18px; height: 18px; flex: none; }
 .btn svg { width: 15px; height: 15px; }
+
+.row-gap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }

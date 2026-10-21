@@ -5,6 +5,7 @@ import math
 import os
 import re
 import subprocess
+import threading
 import time
 import uvicorn
 import asyncio
@@ -221,7 +222,8 @@ async def get_trade_history():
             parsed = json.loads(item)
             # The history table does not need the 200-float state vector of every trade
             parsed.pop("state_vector", None)
-            for key in ["confidence", "price", "quantity", "entry_price", "realized_pnl", "roi_pct", "gross_pnl"]:
+            for key in ["confidence", "price", "quantity", "entry_price", "realized_pnl", "roi_pct", "gross_pnl", "fees_paid",
+                        "notional", "mid_price", "confidence_calibrated", "predicted_move_pct", "est_cost_pct", "hold_seconds"]:
                 if isinstance(parsed.get(key), (int, float)):
                     parsed[key] = _finite(parsed[key])
             history.append(parsed)
@@ -280,15 +282,22 @@ async def get_brain():
 # ---------------------------------------------------------------------------
 # Services: every pm2 process (+ the laptop trainer) with status and logs
 # ---------------------------------------------------------------------------
-_pm2_cache = {"ts": 0.0, "procs": []}
+_pm2_cache = {"ts": 0.0, "procs": [], "ok_ts": 0.0}
+_pm2_lock = threading.Lock()
 
 
 def _pm2_processes() -> list:
-    if time.time() - _pm2_cache["ts"] < 5:
-        return _pm2_cache["procs"]
+    # One `pm2 jlist` at a time; concurrent requests wait and reuse its result.
+    with _pm2_lock:
+        if time.time() - _pm2_cache["ts"] < 5:
+            return _pm2_cache["procs"]
+        return _pm2_refresh()
+
+
+def _pm2_refresh() -> list:
     procs = []
     try:
-        res = subprocess.run("pm2 jlist", shell=True, capture_output=True, text=True, timeout=8)
+        res = subprocess.run("pm2 jlist", shell=True, capture_output=True, text=True, timeout=15)
         if res.returncode == 0 and res.stdout.strip():
             for p in json.loads(res.stdout[res.stdout.find("["):]):
                 env = p.get("pm2_env") or {}
@@ -305,7 +314,12 @@ def _pm2_processes() -> list:
                 })
     except Exception:
         procs = []
-    _pm2_cache.update(ts=time.time(), procs=procs)
+    if not procs and _pm2_cache["procs"] and time.time() - _pm2_cache.get("ok_ts", 0) < 300:
+        # pm2 is slow or busy (e.g. during a restart): keep the last good list instead of
+        # briefly "losing" every service, which made the log viewer blank out and come back.
+        _pm2_cache["ts"] = time.time()
+        return _pm2_cache["procs"]
+    _pm2_cache.update(ts=time.time(), procs=procs, ok_ts=time.time())
     return procs
 
 
@@ -371,18 +385,18 @@ async def get_service_logs(service: str, stream: str = "out", lines: int = 500):
     if service.replace("_", "-") == TRAINER_SERVICE:
         tail = await _redis_json(TRAINER_LOG_KEY)
         if tail:
-            return {"logs": tail[-lines:], "source": "redis (laptop trainer)"}
+            return {"logs": tail[-lines:], "source": "redis (laptop trainer)", "ok": True}
         local = os.path.join("logs", "ai_trainer.log")
         if os.path.exists(local):
-            return {"logs": await asyncio.to_thread(_tail, local, lines), "source": local}
-        return {"logs": ["The laptop trainer is not reporting. Start MASTER_TRAINER (its SSH tunnel carries the log here)."], "source": None}
+            return {"logs": await asyncio.to_thread(_tail, local, lines), "source": local, "ok": True}
+        return {"logs": ["The laptop trainer is not reporting. Start MASTER_TRAINER (its SSH tunnel carries the log here)."], "source": None, "ok": False}
     path = await asyncio.to_thread(_resolve_log, service, stream)
     if not path or not os.path.exists(path):
-        return {"logs": [f"No {stream} log found for '{service}'."], "source": None}
+        return {"logs": [f"No {stream} log found for '{service}'."], "source": None, "ok": False}
     try:
-        return {"logs": await asyncio.to_thread(_tail, path, lines), "source": path}
+        return {"logs": await asyncio.to_thread(_tail, path, lines), "source": path, "ok": True}
     except Exception as e:
-        return {"logs": [f"Error reading logs: {e}"], "source": path}
+        return {"logs": [f"Error reading logs: {e}"], "source": path, "ok": False}
 
 
 @app.get("/api/logs/download/{service}")

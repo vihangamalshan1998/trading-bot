@@ -836,7 +836,8 @@ class ProductionTradingBot:
                                 "markPrice": float(p.get("markPrice", 0)),
                                 "leverage": int(p.get("leverage", 1)),
                                 "liquidationPrice": float(p.get("liquidationPrice", 0)),
-                                "marginType": p.get("marginType", "cross")
+                                "marginType": p.get("marginType", "cross"),
+                                "entry_time": float(self.position_entry_times.get(sym) or 0.0),
                             })
 
                             # Auto-reconcile missing OPEN trade in history (ONLY for positions recovered after PM2 restart)
@@ -2244,7 +2245,30 @@ class ProductionTradingBot:
                                         "realized_pnl": 0.0,
                                         "roi_pct": 0.0
                                     }
-                                    
+                                    # Extra detail for the dashboard's trade history
+                                    trade_record.update({
+                                        "leverage": int(pos_leverage or 0),
+                                        "notional": float(qty_str) * order_exec_price,
+                                        "order_type": "MARKET" if is_market_exit else "MAKER LIMIT",
+                                        "mid_price": float(market.mid_price or 0.0),
+                                        "regime": (self.htf_regimes.get(sym) or {}).get("trend"),
+                                    })
+                                    if "OPEN" in side:
+                                        trade_record.update({
+                                            "confidence_calibrated": self._calibrated_confidence(float(confidence)),
+                                            "predicted_move_pct": float(edge_move_pred),
+                                            "est_cost_pct": float(edge_result.estimated_costs_pct),
+                                        })
+                                    else:
+                                        trade_record["exit_reason"] = (
+                                            "HARD STOP" if hard_stop_triggered else "HARD TAKE-PROFIT" if hard_take_profit_triggered
+                                            else "SUDDEN SHOCK" if sudden_shock_triggered else "TRAILING STOP" if trailing_stop_triggered
+                                            else "MAX HOLD / STALE" if stale_trade_triggered else "FREE-ROLL BREAKEVEN" if freeroll_stop_triggered
+                                            else "PARTIAL TP 50%" if partial_tp_triggered else "AI CLOSE")
+                                        entry_t = self.position_entry_times.get(sym) or getattr(self.portfolio_state.positions.get(sym), "entry_time", 0.0)
+                                        if entry_t:
+                                            trade_record["hold_seconds"] = max(0.0, time.time() - entry_t)
+
                                     # Add Analytics for Closures
                                     if "CLOSE" in side and entry_px > 0:
                                         close_px = order_exec_price

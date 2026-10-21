@@ -146,6 +146,13 @@ const positionMath = (pos) => {
 }
 const openPositions = (positions) => (positions || []).filter((p) => p.quantity && p.quantity !== 0)
 
+const fmtDur = (sec) => {
+  if (!sec || sec < 0) return '—'
+  if (sec < 60) return `${Math.round(sec)}s`
+  if (sec < 3600) return `${Math.round(sec / 60)}m`
+  const h = Math.floor(sec / 3600)
+  return h < 48 ? `${h}h ${Math.round((sec % 3600) / 60)}m` : `${Math.round(h / 24)}d`
+}
 const PositionCards = ({ positions }) => {
   const open = openPositions(positions)
   if (!open.length) return <Empty title="No open positions">The bot will open a trade when the AI finds one worth the fees.</Empty>
@@ -153,18 +160,26 @@ const PositionCards = ({ positions }) => {
     <div className="pos-cards">
       {open.map((pos, i) => {
         const m = positionMath(pos)
+        const move = m.entry ? ((m.mark - m.entry) / m.entry) * (pos.side === 'SHORT' ? -1 : 1) : 0
+        const liqDist = m.liq && m.mark ? Math.abs(m.liq - m.mark) / m.mark : 0
         return (
           <div key={i} className="pos-card">
             <div className="pos-card-head">
               <CoinTag sym={pos.symbol} />
-              <span className="small muted">{pos.leverage}x</span>
+              <span className="small muted">{pos.leverage}x · {pos.entry_time ? `open ${fmtDur(now() - pos.entry_time)}` : (pos.marginType || 'cross')}</span>
               <Dir side={pos.side} />
             </div>
             <div className="kv-grid">
               <KV label="Profit after fees" value={`${money(m.net)} (${m.roi >= 0 ? '+' : ''}${m.roi.toFixed(1)}%)`} cls={tone(m.net)} help="Unrealized profit minus estimated entry + exit fees, and as % of the margin used." />
+              <KV label="Price move" value={fmtPct(move, 2)} cls={tone(move)} help="How far the price has moved in the trade's favour (+) or against it (-) since entry." />
+              <KV label="Entry price" value={m.entry ? m.entry.toPrecision(6) : '—'} />
+              <KV label="Current price" value={m.mark ? m.mark.toPrecision(6) : '—'} />
               <KV label="Margin used" value={money(m.margin)} />
-              <KV label="Entry → now" value={`${m.entry.toPrecision(6)} → ${m.mark.toPrecision(6)}`} />
-              <KV label="Liquidation price" value={m.liq ? m.liq.toPrecision(6) : '—'} cls="warn" />
+              <KV label="Position size" value={money(m.notional)} help={`${pos.quantity} ${pos.symbol.replace('USDT', '')} at ${pos.leverage}x leverage.`} />
+              <KV label="Gross P&L" value={money(m.gross)} cls={tone(m.gross)} />
+              <KV label="Est. fees" value={money(m.fees)} help="Estimated entry + exit fees for this position." />
+              <KV label="Liquidation" value={m.liq ? `${m.liq.toPrecision(6)} (${(liqDist * 100).toFixed(1)}% away)` : 'Far away (cross)'} cls={m.liq && liqDist < 0.03 ? 'neg' : 'warn'}
+                help="Price at which the exchange would force-close. On cross margin Binance reports none while the account balance easily covers the position." />
             </div>
           </div>
         )
@@ -311,6 +326,7 @@ const Coins = ({ ctx }) => {
       conf: s.ai_confidence_calibrated ?? s.ai_confidence ?? 0,
       raw: s.ai_confidence || 0,
       move: expectedMove(s),
+      size: s.ai_target_size || 0,
       price: s.mid_price || 0,
       chg: fv(F.RET_24H),
       spread: s.spread && s.mid_price ? (s.spread / s.mid_price) * 10000 : 0,
@@ -357,6 +373,7 @@ const Coins = ({ ctx }) => {
                 {head('side', 'AI view')}
                 {head('conf', confLabel, isV3 ? 'The AI confidence mapped to the win rate it really achieved on unseen data.' : "The old brain's own confidence. It was never checked against real results, so treat it as unproven.")}
                 {head('move', 'Expected move', 'AI forecast of the price move over the next 1–4 hours (blend of its 5m / 1h / 4h forecasts).')}
+                {head('size', 'Bet size', 'How much of the per-trade margin budget the AI wants to use (25-100%, bigger when it is confident and expects a big move). The bot never uses less than 70% of the budget, and the budget itself shrinks after losses on this coin.')}
                 {head('funding', 'Funding', 'Paid every 8h by longs to shorts (positive) or shorts to longs (negative). Extreme = crowded.')}
                 {head('book', 'Order book', 'Buy vs sell orders within 0.1% of price: + more buyers, - more sellers.')}
                 <th>Status</th>
@@ -372,6 +389,7 @@ const Coins = ({ ctx }) => {
                     <td><Dir side={r.side} /></td>
                     <td><Meter value={r.conf} color={r.conf >= 0.55 ? 'green' : r.conf >= 0.45 ? 'amber' : 'red'} /></td>
                     <td className={tone(r.move)}>{fmtPP(r.move)}</td>
+                    <td>{r.side === 'LONG' || r.side === 'SHORT' ? <Meter value={r.size} /> : <span className="faint">—</span>}</td>
                     <td className={Math.abs(r.funding) > 0.0003 ? 'warn' : ''}>{fmtPct(r.funding, 4)}</td>
                     <td><SplitMeter value={r.book} max={1} /></td>
                     <td>
@@ -382,8 +400,10 @@ const Coins = ({ ctx }) => {
                   </tr>
                   {open === r.sym && (
                     <tr className="detail-row">
-                      <td colSpan="9">
+                      <td colSpan="10">
                         <div className="detail-grid">
+                          <KV label="Bet size wanted" value={`${(r.size * 100).toFixed(0)}%`} help="How much of the per-trade margin budget the AI wants to use (25-100%, bigger when it is confident and expects a big move). The bot never uses less than 70% of the budget, and the budget itself shrinks after losses on this coin." />
+                          <KV label="Bet size used" value={`${(Math.max(0.7, r.size) * 100).toFixed(0)}% of budget`} help="What the bot actually sizes with: never below 70%." />
                           <KV label="Forecast 5 min" value={fmtPP(r.s.ai_critic_return || 0)} cls={tone(r.s.ai_critic_return || 0)} />
                           <KV label="Forecast 1 hour" value={fmtPP(r.s.ai_critic_1h || 0)} cls={tone(r.s.ai_critic_1h || 0)} />
                           <KV label="Forecast 4 hours" value={fmtPP(r.s.ai_critic_4h || 0)} cls={tone(r.s.ai_critic_4h || 0)} />
@@ -539,20 +559,68 @@ const Brain = ({ ctx }) => {
 }
 
 // ---------------------------------------------------------------- trades page
+const isClose = (t) => !!t.side && !t.side.includes('OPEN') && !t.side.includes('DUST') && typeof t.realized_pnl === 'number'
+const tradeDir = (t) => ((t.side || '').includes('LONG') ? 'LONG' : (t.side || '').includes('SHORT') ? 'SHORT' : '')
+const priceMove = (t) => {
+  if (!isClose(t) || !t.entry_price || !t.price) return null
+  return ((t.price - t.entry_price) / t.entry_price) * (tradeDir(t) === 'SHORT' ? -1 : 1)
+}
+const groupStats = (rows, keyFn) => {
+  const g = {}
+  rows.forEach((t) => {
+    const k = keyFn(t) || 'Not recorded'
+    g[k] = g[k] || { key: k, n: 0, wins: 0, net: 0 }
+    g[k].n += 1
+    g[k].net += t.realized_pnl
+    if (t.realized_pnl > 0) g[k].wins += 1
+  })
+  return Object.values(g).sort((x, y) => y.net - x.net)
+}
+const GroupTable = ({ title, rows }) => (
+  <table className="tbl">
+    <thead><tr><th>{title}</th><th>Trades</th><th>Win rate</th><th>Net</th><th>Avg</th></tr></thead>
+    <tbody>
+      {rows.map((r) => (
+        <tr key={r.key}>
+          <td>{r.key.endsWith('USDT') ? <CoinTag sym={r.key} /> : r.key}</td>
+          <td>{r.n}</td>
+          <td>{((r.wins / r.n) * 100).toFixed(0)}%</td>
+          <td className={tone(r.net)}>{money(r.net)}</td>
+          <td className={tone(r.net)}>{money(r.net / r.n)}</td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+)
+
 const Trades = ({ ctx }) => {
   const { state } = ctx
   const [historyData] = usePoll('/api/history', 5000)
   const history = historyData?.history || []
   const [open, setOpen] = useState(null)
   const [symbol, setSymbol] = useState('all')
-  const closes = history.filter((t) => t.side && !t.side.includes('OPEN') && typeof t.realized_pnl === 'number')
+  const [kind, setKind] = useState('all')
+  const closes = history.filter(isClose)
   const net = closes.reduce((a, t) => a + t.realized_pnl, 0)
+  const gross = closes.reduce((a, t) => a + (t.gross_pnl || 0), 0)
+  const fees = closes.reduce((a, t) => a + (t.fees_paid || 0), 0)
   const wins = closes.filter((t) => t.realized_pnl > 0)
   const losses = closes.filter((t) => t.realized_pnl <= 0)
-  const avgWin = wins.length ? wins.reduce((a, t) => a + t.realized_pnl, 0) / wins.length : 0
-  const avgLoss = losses.length ? losses.reduce((a, t) => a + t.realized_pnl, 0) / losses.length : 0
+  const sumWin = wins.reduce((a, t) => a + t.realized_pnl, 0)
+  const sumLoss = losses.reduce((a, t) => a + t.realized_pnl, 0)
+  const avgWin = wins.length ? sumWin / wins.length : 0
+  const avgLoss = losses.length ? sumLoss / losses.length : 0
+  const best = closes.reduce((a, t) => (!a || t.realized_pnl > a.realized_pnl ? t : a), null)
+  const worst = closes.reduce((a, t) => (!a || t.realized_pnl < a.realized_pnl ? t : a), null)
+  const held = closes.filter((t) => t.hold_seconds > 0)
+  const avgHold = held.length ? held.reduce((a, t) => a + t.hold_seconds, 0) / held.length : 0
+  const winRate = closes.length ? wins.length / closes.length : 0
+  // Win rate needed to break even with the current average win / loss
+  const breakEven = avgWin - avgLoss > 0 && avgLoss < 0 ? -avgLoss / (avgWin - avgLoss) : 0
   const symbols = [...new Set(history.map((t) => t.symbol))].sort()
-  const shown = symbol === 'all' ? history : history.filter((t) => t.symbol === symbol)
+  const shown = history.filter((t) => (symbol === 'all' || t.symbol === symbol)
+    && (kind === 'all' || (kind === 'closes' && isClose(t)) || (kind === 'opens' && (t.side || '').startsWith('OPEN'))
+      || (kind === 'wins' && isClose(t) && t.realized_pnl > 0) || (kind === 'losses' && isClose(t) && t.realized_pnl <= 0)))
 
   return (
     <>
@@ -561,48 +629,98 @@ const Trades = ({ ctx }) => {
       </Card>
       <Card title="Recent results" desc="Based on the last 100 trade records kept by the bot (a partial close counts as its own record).">
         <div className="kv-grid">
-          <KV label="Closed records" value={closes.length} />
-          <KV label="Win rate" value={closes.length ? `${((wins.length / closes.length) * 100).toFixed(0)}%` : '—'} />
-          <KV label="Net result" value={money(net)} cls={tone(net)} />
+          <KV label="Closed records" value={`${closes.length} (${wins.length}W / ${losses.length}L)`} />
+          <KV label="Win rate" value={closes.length ? `${(winRate * 100).toFixed(0)}%` : '—'} cls={closes.length && breakEven ? (winRate >= breakEven ? 'pos' : 'neg') : ''}
+            help="Share of closed records that made money after fees." />
+          <KV label="Break-even win rate" value={breakEven ? `${(breakEven * 100).toFixed(0)}%` : '—'}
+            help="With the current average win and average loss, the bot needs at least this win rate just to not lose money. A real win rate below it means the bot is losing." />
+          <KV label="Net result" value={money(net)} cls={tone(net)} help="Total profit after fees." />
+          <KV label="Gross (before fees)" value={money(gross)} cls={tone(gross)} />
+          <KV label="Fees paid" value={money(fees)} cls={fees ? 'neg' : ''} help="Exchange fees for these closed records (entry + exit)." />
           <KV label="Average win" value={money(avgWin)} cls="pos" />
           <KV label="Average loss" value={money(avgLoss)} cls="neg" />
           <KV label="Win / loss size" value={avgLoss ? (avgWin / Math.abs(avgLoss)).toFixed(2) : '—'} help="Average win divided by average loss. Above 1 means wins are bigger than losses." />
+          <KV label="Profit factor" value={sumLoss ? (sumWin / Math.abs(sumLoss)).toFixed(2) : '—'} cls={sumLoss ? tone(sumWin / Math.abs(sumLoss) - 1) : ''}
+            help="All winnings divided by all losses. Above 1 = profitable overall; 1.5+ is good." />
+          <KV label="Best trade" value={best ? `${money(best.realized_pnl)} ${best.symbol.replace('USDT', '')}` : '—'} cls="pos" />
+          <KV label="Worst trade" value={worst ? `${money(worst.realized_pnl)} ${worst.symbol.replace('USDT', '')}` : '—'} cls="neg" />
+          <KV label="Average hold" value={held.length ? fmtDur(avgHold) : '—'} help="Only trades recorded after this update carry their hold time." />
         </div>
       </Card>
-      <Card title="Trade history" right={(
-        <select className="select" value={symbol} onChange={(e) => setSymbol(e.target.value)}>
-          <option value="all">All coins</option>
-          {symbols.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
+      {closes.length > 0 && (
+        <div className="grid cols-3">
+          <Card title="By coin"><div className="table-wrap"><GroupTable title="Coin" rows={groupStats(closes, (t) => t.symbol)} /></div></Card>
+          <Card title="Long vs short"><div className="table-wrap"><GroupTable title="Side" rows={groupStats(closes, tradeDir)} /></div></Card>
+          <Card title="By exit reason" help="Why each trade was closed. Only trades recorded after this update carry a reason.">
+            <div className="table-wrap"><GroupTable title="Reason" rows={groupStats(closes, (t) => t.exit_reason)} /></div>
+          </Card>
+        </div>
+      )}
+      <Card title="Trade history" desc="Click a row for full details." right={(
+        <div className="row-gap">
+          <div className="segmented">
+            {[['all', 'All'], ['closes', 'Closes'], ['opens', 'Opens'], ['wins', 'Wins'], ['losses', 'Losses']].map(([k, l]) => (
+              <button key={k} className={kind === k ? 'active' : ''} onClick={() => { setKind(k); setOpen(null) }}>{l}</button>
+            ))}
+          </div>
+          <select className="select" value={symbol} onChange={(e) => { setSymbol(e.target.value); setOpen(null) }}>
+            <option value="all">All coins</option>
+            {symbols.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
       )}>
-        {shown.length === 0 ? <Empty title="No trades yet" /> : (
+        {shown.length === 0 ? <Empty title="No trades match" /> : (
           <div className="table-wrap">
             <table className="tbl">
-              <thead><tr><th>Time</th><th>Coin</th><th>Action</th><th>Size</th><th>Entry</th><th>Exit</th><th>Gross</th><th>Net (ROI)</th></tr></thead>
+              <thead><tr><th>Time</th><th>Coin</th><th>Action</th><th>Size</th><th>Entry</th><th>Exit</th><th>Move</th><th>Held</th><th>Fees</th><th>Net (ROI)</th><th>Reason</th></tr></thead>
               <tbody>
-                {shown.map((t, i) => {
+                {shown.map((t) => {
                   const side = t.side || ''
+                  const closed = isClose(t)
                   const isOpen = side.includes('OPEN')
                   const px = typeof t.price === 'number' ? t.price : 0
+                  const notional = t.notional || (t.quantity || 0) * (t.entry_price || px)
+                  const mv = priceMove(t)
+                  const margin = t.leverage ? notional / t.leverage : null
+                  const buying = side.includes('OPEN_LONG') || side.includes('CLOSE_SHORT')
+                  const slip = t.mid_price && px ? ((px - t.mid_price) / t.mid_price) * (buying ? 1 : -1) : null
+                  const key = `${t.order_id}-${t.timestamp}`
                   return (
-                    <React.Fragment key={i}>
-                      <tr className={`clickable ${open === i ? 'selected' : ''}`} onClick={() => setOpen(open === i ? null : i)}>
+                    <React.Fragment key={key}>
+                      <tr className={`clickable ${open === key ? 'selected' : ''}`} onClick={() => setOpen(open === key ? null : key)}>
                         <td className="muted">{new Date(t.timestamp * 1000).toLocaleString()}</td>
                         <td><CoinTag sym={t.symbol || ''} /></td>
-                        <td><span className={`badge ${isOpen ? 'blue' : side.includes('PARTIAL') ? 'amber' : 'grey'}`}>{side.replaceAll('_', ' ')}</span></td>
-                        <td>{t.quantity}</td>
+                        <td><span className={`badge ${isOpen ? 'blue' : side.includes('PARTIAL') ? 'amber' : closed ? (t.realized_pnl > 0 ? 'green' : 'red') : 'grey'}`}>{side.replaceAll('_', ' ')}</span></td>
+                        <td>{t.quantity}<div className="faint small">{notional ? money(notional) : ''}</div></td>
                         <td>{t.entry_price ? t.entry_price.toPrecision(6) : isOpen ? px.toPrecision(6) : '—'}</td>
-                        <td>{side.includes('CLOSE') ? px.toPrecision(6) : '—'}</td>
-                        <td className={tone(t.gross_pnl || 0)}>{isOpen ? '—' : typeof t.gross_pnl === 'number' ? money(t.gross_pnl) : '—'}</td>
-                        <td className={tone(t.realized_pnl || 0)}>{isOpen ? 'open' : typeof t.realized_pnl === 'number' ? `${money(t.realized_pnl)} (${(t.roi_pct || 0) >= 0 ? '+' : ''}${(t.roi_pct || 0).toFixed(1)}%)` : '—'}</td>
+                        <td>{closed ? px.toPrecision(6) : '—'}</td>
+                        <td className={tone(mv || 0)}>{mv === null ? '—' : fmtPct(mv, 2)}</td>
+                        <td>{t.hold_seconds ? fmtDur(t.hold_seconds) : '—'}</td>
+                        <td className="muted">{closed && t.fees_paid ? money(t.fees_paid) : '—'}</td>
+                        <td className={tone(t.realized_pnl || 0)}>{isOpen ? 'open' : closed ? `${money(t.realized_pnl)} (${(t.roi_pct || 0) >= 0 ? '+' : ''}${(t.roi_pct || 0).toFixed(1)}%)` : '—'}</td>
+                        <td className="small">{t.exit_reason || (isOpen && t.confidence_calibrated != null ? `win chance ${(t.confidence_calibrated * 100).toFixed(0)}%` : '—')}</td>
                       </tr>
-                      {open === i && (
+                      {open === key && (
                         <tr className="detail-row">
-                          <td colSpan="8">
+                          <td colSpan="11">
                             <div className="detail-grid">
                               <KV label="Order ID" value={t.order_id || '—'} />
-                              <KV label="AI confidence" value={`${((t.confidence || 0) * 100).toFixed(1)}%`} />
-                              <KV label="Exit reason" value={t.exit_reason || t.reason || '—'} />
+                              <KV label="Order type" value={t.order_type || '—'} help="MAKER LIMIT pays the low fee (0.02%) but may not fill; MARKET fills at once and pays the taker fee (0.05%)." />
+                              <KV label="Leverage" value={t.leverage ? `${t.leverage}x` : '—'} />
+                              <KV label="Position size" value={notional ? money(notional) : '—'} />
+                              <KV label="Margin" value={margin ? money(margin) : '—'} />
+                              {closed && <KV label="Gross P&L" value={money(t.gross_pnl || 0)} cls={tone(t.gross_pnl || 0)} />}
+                              {closed && <KV label="Fees" value={money(t.fees_paid || 0)} cls="neg" />}
+                              {closed && <KV label="Net P&L" value={money(t.realized_pnl)} cls={tone(t.realized_pnl)} />}
+                              {closed && <KV label="Return on margin" value={fmtPP(t.roi_pct || 0, 1)} cls={tone(t.roi_pct || 0)} />}
+                              {closed && <KV label="Exit reason" value={t.exit_reason || t.reason || '—'} />}
+                              {closed && <KV label="Held for" value={fmtDur(t.hold_seconds)} />}
+                              {isOpen && <KV label="AI confidence (raw)" value={`${((t.confidence || 0) * 100).toFixed(0)}%`} />}
+                              {isOpen && <KV label="Honest win chance" value={t.confidence_calibrated != null ? `${(t.confidence_calibrated * 100).toFixed(0)}%` : '—'} help="Raw confidence mapped to the win rate the brain really achieved in its unseen-data test. Equals raw confidence for an untested brain." />}
+                              {isOpen && <KV label="Forecast move" value={t.predicted_move_pct != null ? fmtPP(t.predicted_move_pct) : '—'} cls={tone(t.predicted_move_pct || 0)} help="The AI's expected price move for this trade (1-4h)." />}
+                              {isOpen && <KV label="Estimated costs" value={t.est_cost_pct != null ? `${t.est_cost_pct.toFixed(3)}%` : '—'} help="Fees + spread + slippage the bot expected, as % of position size. The forecast must beat this by a margin." />}
+                              <KV label="Slippage vs mid" value={slip === null ? '—' : fmtPct(slip, 3)} cls={slip > 0.001 ? 'neg' : ''} help="How much worse (+) or better (-) the fill was than the mid price when the order was sent." />
+                              <KV label="Market trend" value={t.regime || '—'} help="The higher-timeframe trend label at the time of the order." />
                             </div>
                           </td>
                         </tr>
@@ -636,6 +754,7 @@ const highlight = (text, q) => {
   return <>{text.slice(0, i)}<mark>{text.slice(i, i + q.length)}</mark>{text.slice(i + q.length)}</>
 }
 
+const EMPTY_LOG = { logs: [], source: null, stale: false }
 const LogViewer = ({ service }) => {
   const [stream, setStream] = useState('out')
   const [lines, setLines] = useState(500)
@@ -643,19 +762,28 @@ const LogViewer = ({ service }) => {
   const [level, setLevel] = useState('all')
   const [paused, setPaused] = useState(false)
   const [follow, setFollow] = useState(true)
-  const [data, setData] = useState({ logs: [], source: null })
+  const [data, setData] = useState(EMPTY_LOG)
   const body = useRef(null)
   const isTrainer = service === TRAINER
 
   useEffect(() => {
     if (paused) return
     let alive = true
+    let hadGood = false
+    // A failed or empty read (pm2 busy, log file being rotated, trainer between heartbeats) keeps the
+    // last good lines on screen instead of blanking the viewer until the next good read.
+    const keepLast = () => setData((d) => ({ ...d, stale: true }))
     const load = async () => {
       try {
         const res = await fetch(`/api/logs/${encodeURIComponent(service)}?stream=${isTrainer ? 'out' : stream}&lines=${lines}`)
+        if (!res.ok) throw new Error(res.status)
         const json = await res.json()
-        if (alive) setData({ logs: json.logs || [], source: json.source || null })
-      } catch { /* keep last */ }
+        if (!alive) return
+        const logs = json.logs || []
+        if (hadGood && (json.ok === false || logs.length === 0)) return keepLast()
+        if (json.ok !== false && logs.length) hadGood = true
+        setData({ logs, source: json.source || null, stale: false })
+      } catch { if (alive && hadGood) keepLast() }
     }
     load()
     const t = setInterval(load, 3000)
@@ -677,15 +805,15 @@ const LogViewer = ({ service }) => {
         <div className="right">
           {!isTrainer && (
             <div className="segmented">
-              <button className={stream === 'out' ? 'active' : ''} onClick={() => setStream('out')}>Output</button>
-              <button className={stream === 'err' ? 'active' : ''} onClick={() => setStream('err')}>Error log</button>
+              <button className={stream === 'out' ? 'active' : ''} onClick={() => { setStream('out'); setData(EMPTY_LOG) }}>Output</button>
+              <button className={stream === 'err' ? 'active' : ''} onClick={() => { setStream('err'); setData(EMPTY_LOG) }}>Error log</button>
             </div>
           )}
           <div className="segmented">
             {[['all', 'All'], ['warn', 'Warnings+'], ['errors', 'Errors']].map(([k, l]) => <button key={k} className={level === k ? 'active' : ''} onClick={() => setLevel(k)}>{l}</button>)}
           </div>
           <input className="input" style={{ width: 190 }} placeholder="Search…" value={query} onChange={(e) => setQuery(e.target.value)} />
-          <select className="select" value={lines} onChange={(e) => setLines(Number(e.target.value))}>
+          <select className="select" value={lines} onChange={(e) => { setLines(Number(e.target.value)); setData(EMPTY_LOG) }}>
             {[200, 500, 1000, 3000].map((n) => <option key={n} value={n}>Last {n}</option>)}
           </select>
           <button className="btn sm" onClick={() => setPaused(!paused)}>{paused ? '▶ Resume' : '⏸ Pause'}</button>
@@ -701,7 +829,7 @@ const LogViewer = ({ service }) => {
           </div>
         ))}
       </div>
-      <div className="terminal-foot">{data.source ? `source: ${data.source}` : ' '}{paused ? ' · paused' : ' · refreshing every 3s'}</div>
+      <div className="terminal-foot">{data.source ? `source: ${data.source}` : ' '}{paused ? ' · paused' : ' · refreshing every 3s'}{data.stale && !paused ? ' · last read failed, showing previous lines' : ''}</div>
     </div>
   )
 }

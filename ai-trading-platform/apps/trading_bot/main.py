@@ -32,6 +32,9 @@ from core.risk.beta_hedger import beta_hedger
 from core.telemetry.telegram_service import telegram_notifier
 
 ENTRY_GUARD_KEY = "bot:entry_guard"  # hourly entry cap + per-coin cooldowns, kept across restarts
+STATE_HISTORY_KEY = "bot:state_history"  # the brain's input history (last 300 frames per coin), kept across restarts
+STATE_HISTORY_SAVE_SECONDS = 60.0
+STATE_HISTORY_MAX_AGE_SECONDS = 300.0  # older saved history is not restored: the gap would distort the brain's view
 
 class ProductionTradingBot:
     """
@@ -126,6 +129,8 @@ class ProductionTradingBot:
         self.recent_entry_times = collections.deque()  # new-position timestamps for the hourly entry cap
         self._saved_entry_guard = None  # last entry-guard state written to Redis (survives restarts)
         self._entry_guard_loaded = False
+        self._last_history_save = 0.0
+        self._warmup_logged = set()
         self.position_entry_times = {sym: 0.0 for sym in self.symbols} # Minimum holding tracking per symbol
         self.peak_pnl_pct = {sym: 0.0 for sym in self.symbols} # Peak leveraged PnL tracking for trailing profit locks
         self.pnl_history = {sym: collections.deque(maxlen=30) for sym in self.symbols} # (timestamp, pnl_pct_leveraged) for velocity shock detection
@@ -204,6 +209,61 @@ class ProductionTradingBot:
             self._saved_entry_guard = state
         except Exception as e:
             logger.warning(f"Could not save entry guard: {e}")
+
+    def _history_warm(self, sym: str) -> bool:
+        """
+        True once the brain has a full window of real history for this coin. After a restart without a fresh
+        saved history, the window is padded with copies of the current frame (the market looks frozen for
+        25 minutes), so the AI must not open or close trades, or write training records, until it refills.
+        """
+        hist = getattr(self, "state_history", None)
+        if hist is None:
+            return True
+        return len(hist[sym]) >= self.sequence_length
+
+    def _log_warmup(self, sym: str, what: str):
+        if sym not in self._warmup_logged:
+            self._warmup_logged.add(sym)
+            n = len(self.state_history[sym])
+            logger.info(f"[{sym}] WARM-UP: brain history {n}/{self.sequence_length} frames after restart. "
+                        f"No AI {what} until it is full (~{(self.sequence_length - n) * 5 / 60:.0f} min); stops and take-profits stay active.")
+
+    async def _save_state_history(self):
+        if time.time() - self._last_history_save < STATE_HISTORY_SAVE_SECONDS:
+            return
+        self._last_history_save = time.time()
+        try:
+            rb = self.redis.binary_redis
+            if rb is None:
+                return
+            hist = {sym: np.asarray(list(h), dtype=np.float32).tobytes() for sym, h in self.state_history.items() if len(h)}
+            payload = {"ts": time.time(), "dim": 200, "hist": hist}
+            await rb.set(STATE_HISTORY_KEY, msgpack.packb(payload, use_bin_type=True), ex=3600)
+        except Exception as e:
+            logger.warning(f"Could not save brain history: {e}")
+
+    async def _load_state_history(self):
+        try:
+            rb = self.redis.binary_redis
+            raw = await rb.get(STATE_HISTORY_KEY) if rb is not None else None
+            if not raw:
+                logger.info("No saved brain history: AI decisions wait for a full window (~25 min warm-up).")
+                return
+            data = msgpack.unpackb(raw, raw=False)
+            age = time.time() - float(data.get("ts", 0.0))
+            if age > STATE_HISTORY_MAX_AGE_SECONDS:
+                logger.info(f"Saved brain history is {age / 60:.0f} min old (max {STATE_HISTORY_MAX_AGE_SECONDS / 60:.0f}): "
+                            f"not restored, AI decisions wait for a full window (~25 min warm-up).")
+                return
+            dim = int(data.get("dim", 200))
+            restored = 0
+            for sym, buf in (data.get("hist") or {}).items():
+                frames = np.frombuffer(buf, dtype=np.float32).reshape(-1, dim)
+                self.state_history[sym].extend(frames.astype(np.float64).tolist())
+                restored += 1
+            logger.info(f"Restored brain history for {restored} coins (saved {age:.0f}s ago).")
+        except Exception as e:
+            logger.warning(f"Could not restore brain history: {e}")
 
     async def _record_airbag_trim(self, sym: str, pos, qty: float, order_res, mid_price: float):
         """Adds an Airbag 4 margin trim to the dashboard trade history, so its profit/loss is not missing from the stats."""
@@ -313,6 +373,8 @@ class ProductionTradingBot:
         Values are rounded to 6 significant digits: the JSON state column is the VPS disk cost (~0.77 MB raw).
         Shares the throttle with the older HOLD emitters, so a coin never gets two records in one window.
         """
+        if not self._history_warm(sym):
+            return
         now_t = time.time()
         if now_t - self.last_hold_emission_time.get(sym, 0.0) < settings.experience_snapshot_seconds:
             return
@@ -1712,6 +1774,9 @@ class ProductionTradingBot:
                         is_closing = (action_val > 0.35) or exit_override
                     else:
                         is_closing = False
+                    if is_closing and not exit_override and not self._history_warm(sym):
+                        self._log_warmup(sym, "close")
+                        is_closing = False
 
                     # Predicted side tracking for telemetry
                     if action_val < -0.2: predicted_side = "SHORT"
@@ -1856,7 +1921,7 @@ class ProductionTradingBot:
                         # Emit authentic live HOLD experience into DB when flat (throttled to once per 5 mins per coin to protect VPS disk)
                         # Populates LINK, ADA, AVAX, NEAR, LTC with genuine 200-dim market state sequences
                         now_hold_t = time.time()
-                        if pos.quantity == 0 and (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= settings.experience_snapshot_seconds:
+                        if pos.quantity == 0 and self._history_warm(sym) and (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= settings.experience_snapshot_seconds:
                             self.last_hold_emission_time[sym] = now_hold_t
                             active_version = self.registry.get_current_version()
                             hold_exp_data = {
@@ -2102,6 +2167,9 @@ class ProductionTradingBot:
                             # Still HOLD (not skip) so the coin keeps producing training records.
                             side = "HOLD"
                             logger.info(f"[{sym}] SKIPPING OPEN: coin blocked by model per-coin filter (lost money on holdout).")
+                        elif abs(action_val) > 0.20 and not self._history_warm(sym):
+                            self._log_warmup(sym, "entry")
+                            side = "HOLD"
                         elif action_val < -0.20:
                             side = "OPEN_SHORT"
                         elif action_val > 0.20:
@@ -2112,7 +2180,7 @@ class ProductionTradingBot:
                         
                         # High-Quality HOLD Experiences (throttled to once per 5 mins per coin to protect VPS disk)
                         now_hold_t = time.time()
-                        if (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= settings.experience_snapshot_seconds:
+                        if self._history_warm(sym) and (now_hold_t - self.last_hold_emission_time.get(sym, 0.0)) >= settings.experience_snapshot_seconds:
                             self.last_hold_emission_time[sym] = now_hold_t
                             hold_dur = 0
                             if pos.entry_price > 0 and getattr(pos, 'entry_time', 0.0) > 0:
@@ -2788,6 +2856,7 @@ class ProductionTradingBot:
                 raise RuntimeError(f"FAIL CLOSED: Inference loop error: {e}")
 
             await self._save_entry_guard()
+            await self._save_state_history()
             await asyncio.sleep(5.0)
             
     async def monitor_kill_switch(self):
@@ -3012,6 +3081,7 @@ class ProductionTradingBot:
             logger.error(f"Failed to check initial kill switch: {ks_err}")
 
         await self._load_entry_guard()
+        await self._load_state_history()
 
         tasks = [
             asyncio.create_task(self.listen_macro()),

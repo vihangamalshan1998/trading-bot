@@ -1378,13 +1378,20 @@ class ProductionTradingBot:
                         # Eliminates high-frequency neural jitter and noisy 1-tick oscillations
                         self.smoothed_action_history[sym].append(raw_action)
                         self.smoothed_confidence_history[sym].append(raw_conf)
-                        action_val = float(np.mean(self.smoothed_action_history[sym]))
+                        raw_action_val = float(np.mean(self.smoothed_action_history[sym]))
                         confidence = float(np.mean(self.smoothed_confidence_history[sym]))
                         
                         critic_vals = precomputed_critics.get(sym)
                         pred_ret_5m = float(critic_vals[0]) if critic_vals is not None and len(critic_vals) > 0 else 0.0
                         pred_ret_1h = float(critic_vals[1]) if critic_vals is not None and len(critic_vals) > 1 else pred_ret_5m
                         pred_ret_4h = float(critic_vals[2]) if critic_vals is not None and len(critic_vals) > 2 else pred_ret_1h
+
+                        # Actor-Critic Directional Fusion & Zero-Point Calibration:
+                        # 1. The Actor head has a historical zero-state bias of ~+0.30.
+                        # 2. Integrate the Critic's objective multi-horizon return forecast to drive symmetric directional conviction.
+                        # When Critic is heavily negative (e.g. -1.5%), it pulls action_val cleanly into SHORT territory (< -0.20).
+                        critic_impulse = float(np.clip(pred_ret_5m / 2.0, -0.40, 0.40))
+                        action_val = float(np.clip((raw_action_val - 0.30) + critic_impulse, -1.0, 1.0))
 
                         # Dynamic Conviction-Scaled Position Sizing (Unlocks dynamic sizes beyond 25% floor):
                         # 1. Base model requested preference [0.0 to 1.0]

@@ -18,7 +18,7 @@ from core.ai.registry import ModelRegistry
 from core.ai import trainer_status
 from core.config.settings import settings
 from core.risk import exit_policy
-from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT, ADDED_2026_10_SLOTS
+from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT, ADDED_2026_10_SLOTS, BRAIN_EXCLUDED_SLOTS
 
 # --- Trading economics used to score actions (all in % of price / notional) ---
 # Live entry rule: |action| > 0.20 opens a position (see trading_bot.main side determination)
@@ -522,8 +522,9 @@ class PPOTrainer:
         mask = torch.zeros(STATE_DIM)
         mask[list(ACTIVE_SLOTS)] = 1.0
         mask = mask * (std > 1e-6).float()
+        mask[list(BRAIN_EXCLUDED_SLOTS)] = 0.0  # account / position state: risk rules only, never the brain
         self.model.set_feature_stats(mean, std, mask)
-        dead = [i for i in ACTIVE_SLOTS if std[i] <= 1e-6]
+        dead = [i for i in ACTIVE_SLOTS if std[i] <= 1e-6 and i not in BRAIN_EXCLUDED_SLOTS]
         logger.info(
             f"Feature stats fitted on {frames.shape[0]} frames: {int(mask.sum().item())} slots enabled, "
             f"{len(dead)} ACTIVE slots carry no data yet (masked until refit): {dead}"
@@ -924,6 +925,11 @@ async def run_training_loop():
     if not bool(model.feat_fitted) or "--refit-feature-stats" in _sys.argv:
         trainer_status.set_phase("fitting input scaling")
         trainer.fit_feature_stats()
+    elif bool(model.feat_mask[list(BRAIN_EXCLUDED_SLOTS)].any()):
+        # Fitted before the account / position slots were excluded: switch them off, keep the rest
+        with torch.no_grad():
+            model.feat_mask[list(BRAIN_EXCLUDED_SLOTS)] = 0.0
+        logger.info("Feature mask: account / position slots 0-19 switched off for the brain.")
     logger.info("Starting continuous PPO training on historical/live data...")
     trainer_status.set_phase(
         "training",

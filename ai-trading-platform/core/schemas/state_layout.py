@@ -138,6 +138,12 @@ GLOBAL_KEYS = tuple(s.name for s in _GLOBAL if s.status == ACTIVE)
 # (legacy champions) never saw them, so the live bot zeroes them for those models at inference time.
 ADDED_2026_10_SLOTS = tuple(range(45, 49)) + tuple(range(106, 110)) + tuple(range(150, 168))
 
+# Account (0-9) and open-position (10-19) slots are kept in the state for the risk / exit rules but are
+# never fed to the brain (feat_mask = 0). They say nothing about where the price goes next, yet the old
+# brain learned the shortcut "free margin -> LONG" from them: on the flat-account October 2026 holdout
+# both champion and candidates went LONG on every row, while swapping all 90 market slots changed nothing.
+BRAIN_EXCLUDED_SLOTS = tuple(range(0, 20))
+
 # FeatureEngine-relative indices (0..89) for the live bot's per-feature transforms
 MARKET_LOG_VOLUME_FEATURES = tuple(i - MARKET_OFFSET for i in LOG_VOLUME_SLOTS if MARKET_OFFSET <= i < MARKET_OFFSET + MARKET_DIM)
 MARKET_SPREAD_FEATURE = SPREAD_SLOT - MARKET_OFFSET

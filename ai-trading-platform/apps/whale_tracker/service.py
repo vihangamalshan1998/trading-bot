@@ -7,6 +7,7 @@ from collections import deque
 from core.db.redis import redis_manager
 from core.config.settings import settings
 from core.logging.logger import logger, set_log_file
+from core.exchange.binance_streams import combined_stream_urls
 
 # Tiered Institutional Whale Thresholds (dynamically scaled to 24h market liquidity)
 # Tier 1: Mega-Caps (BTC, ETH) - Deepest order books ($5B - $25B daily volume)
@@ -86,12 +87,25 @@ class WhaleTracker:
             streams.append(f"{s_low}@aggTrade")
             streams.append(f"{s_low}@depth20@100ms")
             
-        stream_url = f"wss://fstream.binance.com/stream?streams={'/'.join(streams)}"
-        logger.info(f"Connecting to LIVE Mainnet Whale Streams: {stream_url}")
-        
+        # Mainnet serves aggTrade on /market and depth on /public: one connection per endpoint.
+        # (On the legacy single URL the aggTrade half stayed silent, so whale flow was always 0.)
+        stream_urls = combined_stream_urls(streams, mainnet=True)
+
         # Store latest orderbook state
         latest_walls = {sym: {'buy': 0.0, 'sell': 0.0} for sym in self.symbols}
-        
+
+        tasks = [asyncio.create_task(self._listen(url, latest_walls)) for url in stream_urls]
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in tasks:
+                t.cancel()
+        for t in done:
+            if not t.cancelled() and t.exception():
+                raise t.exception()
+
+    async def _listen(self, stream_url: str, latest_walls: dict):
+        logger.info(f"Connecting to LIVE Mainnet Whale Streams: {stream_url[:120]}...")
         async with websockets.connect(stream_url, ping_interval=20, ping_timeout=10) as ws:
             logger.info("Whale Tracker Connected to Binance!")
             while self.running:

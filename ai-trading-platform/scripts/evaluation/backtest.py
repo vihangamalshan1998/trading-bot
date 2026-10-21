@@ -62,8 +62,16 @@ def _download(symbol: str, start_ms: int, end_ms: int) -> np.ndarray:
     rows, cursor = [], start_ms
     while cursor < end_ms:
         q = urllib.parse.urlencode({"symbol": symbol, "interval": "1m", "startTime": cursor, "endTime": end_ms - 1, "limit": 1500})
-        with urllib.request.urlopen(f"{BASE_URL}/fapi/v1/klines?{q}", timeout=30) as r:
-            batch = json.load(r)
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(f"{BASE_URL}/fapi/v1/klines?{q}", timeout=30) as r:
+                    batch = json.load(r)
+                break
+            except Exception as e:
+                if attempt == 4:
+                    raise
+                print(f"{symbol}: download retry {attempt + 1} after {e!r}")
+                time.sleep(2 ** attempt)
         if not batch:
             break
         rows.extend([[float(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5]), float(k[9])] for k in batch])

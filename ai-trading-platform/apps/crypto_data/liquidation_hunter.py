@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 import websockets
+from core.exchange.binance_streams import single_stream_url
 import collections
 from typing import Dict, Any, List
 from core.db.redis import redis_manager
@@ -194,7 +195,8 @@ class MultiExchangeLiquidationCollector:
     # Exchange 1: Binance Futures All-Market Liquidation Stream
     # =========================================================================
     async def listen_binance(self):
-        url = "wss://fstream.binance.com/ws/!forceOrder@arr"
+        # Mainnet liquidations are only delivered on the /market endpoint (legacy URL connects but stays silent)
+        url = single_stream_url("!forceOrder@arr", mainnet=True)
         while self.running:
             try:
                 logger.info(f"Connecting to Binance All-Market Liquidation Stream: {url}")

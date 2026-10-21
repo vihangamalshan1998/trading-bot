@@ -9,7 +9,8 @@ from core.db.redis import redis_manager
 from core.config.settings import settings
 from apps.feature_engine.engine import FeatureEngine
 from core.data_quality.validator import DataQualityValidator
-from apps.market_collector.context_poller import market_data_ws_url, poll_context, seed_engines
+from apps.market_collector.context_poller import market_data_is_mainnet, poll_context, seed_engines
+from core.exchange.binance_streams import combined_stream_urls
 
 class BinanceWebSocketCollector:
     """
@@ -18,7 +19,7 @@ class BinanceWebSocketCollector:
     """
     def __init__(self, symbols: List[str]):
         self.symbols = [s.lower() for s in symbols]
-        self.base_url = f"{market_data_ws_url()}/stream?streams="
+        self.mainnet = market_data_is_mainnet()
         self._running = False
         
         # Initialize a Feature Engine for each symbol
@@ -217,9 +218,8 @@ class BinanceWebSocketCollector:
         # Pre-load ~16h of 1m bars so indicators / volatility are valid immediately
         await seed_engines(self.feature_engines)
         
-        async def _listen_chunk(chunk):
-            streams_path = "/".join(chunk)
-            url = f"{self.base_url}{streams_path}"
+        async def _listen_chunk(url):
+            chunk = url.split("streams=", 1)[1].split("/")
             while self._running:
                 try:
                     # Binance does not accept unsolicited PING frames from the client.
@@ -269,11 +269,11 @@ class BinanceWebSocketCollector:
                     logger.error(f"WebSocket Chunk Error: {e}. Reconnecting...")
                     await asyncio.sleep(5)
 
-        chunk_size = 800 # Binance limit is 1024 streams per connection
+        # Mainnet routes trades / mark price / ticker / liquidations and depth / bookTicker to different
+        # endpoints (core/exchange/binance_streams.py); one connection per endpoint and chunk.
         tasks = []
-        for i in range(0, len(streams), chunk_size):
-            chunk = streams[i:i + chunk_size]
-            tasks.append(asyncio.create_task(_listen_chunk(chunk)))
+        for url in combined_stream_urls(streams, self.mainnet):
+            tasks.append(asyncio.create_task(_listen_chunk(url)))
             
         await asyncio.gather(*tasks)
                 

@@ -17,7 +17,7 @@ from apps.research.model import SingleSymbolActorCritic
 from core.ai.registry import ModelRegistry
 from core.config.settings import settings
 from core.risk import exit_policy
-from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM
+from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT
 
 # --- Trading economics used to score actions (all in % of price / notional) ---
 # Live entry rule: |action| > 0.20 opens a position (see trading_bot.main side determination)
@@ -75,6 +75,12 @@ def normalize_state_tensor(states: torch.Tensor) -> torch.Tensor:
     for vol_idx in LOG_VOLUME_SLOTS:
         v = s[..., vol_idx]
         s[..., vol_idx] = torch.where(torch.abs(v) > 5.0, torch.sign(v) * torch.log1p(torch.abs(v)) / 10.0, v)
+
+    # Whale flow: legacy records stored RAW dollar pressure (e.g. 109,359) where the bot now writes a
+    # normalized imbalance [-1, 1] and log volume [0, 1]. Map legacy values onto the live definitions.
+    wi, wv = s[..., WHALE_IMBALANCE_SLOT], s[..., WHALE_VOLUME_SLOT]
+    s[..., WHALE_IMBALANCE_SLOT] = torch.where(torch.abs(wi) > 1.0, torch.zeros_like(wi), wi)
+    s[..., WHALE_VOLUME_SLOT] = torch.where(wv > 1.0, torch.clamp(torch.log1p(wv) / 16.0, 0.0, 1.0), wv)
 
     # spread_bps (scale so 100 bps = 1.0) — only raw legacy values
     s[..., SPREAD_SLOT] = torch.where(s[..., SPREAD_SLOT] > 5.0, torch.clamp(s[..., SPREAD_SLOT] / 100.0, 0.0, 5.0), s[..., SPREAD_SLOT])

@@ -97,7 +97,8 @@ _WHALE = _block(130, "whale", [
     ("buy_wall_distance", A, N), ("sell_wall_distance", A, N), ("whale_imbalance", A, N), ("whale_volume_norm", A, N),
 ] + [(f"pad_{134 + i}", R, N) for i in range(6)])
 _STATARB = _block(140, "statarb", [
-    ("okx_premium", A, N), ("bybit_premium", A, N), ("okx_momentum_lead", A, N),
+    # okx_momentum_lead is hard-coded to 0 by the statarb collector (never implemented) -> RESERVED until it is
+    ("okx_premium", A, N), ("bybit_premium", A, N), ("okx_momentum_lead", R, N),
 ] + [(f"pad_{143 + i}", R, N) for i in range(7)])
 _FUTURE = [Slot(i, f"reserved_{i}", "future", RESERVED) for i in range(150, STATE_DIM)]
 
@@ -109,6 +110,8 @@ ACTIVE_SLOTS = tuple(s.index for s in SLOTS if s.status == ACTIVE)
 LOG_VOLUME_SLOTS = tuple(s.index for s in SLOTS if s.transform == LOG)
 SPREAD_SLOT = next(s.index for s in SLOTS if s.transform == BPS)
 SLOT_BY_NAME = {s.name: s.index for s in SLOTS}
+WHALE_IMBALANCE_SLOT = SLOT_BY_NAME["whale_imbalance"]
+WHALE_VOLUME_SLOT = SLOT_BY_NAME["whale_volume_norm"]
 
 # FeatureEngine-relative indices (0..89) for the live bot's per-feature transforms
 MARKET_LOG_VOLUME_FEATURES = tuple(i - MARKET_OFFSET for i in LOG_VOLUME_SLOTS if MARKET_OFFSET <= i < MARKET_OFFSET + MARKET_DIM)

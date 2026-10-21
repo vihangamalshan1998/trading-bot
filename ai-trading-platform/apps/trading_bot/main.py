@@ -760,12 +760,15 @@ class ProductionTradingBot:
                                     # Never auto-reconcile if a close just happened, order is in-flight, or it's sub-$10 micro-dust
                                     if not recent_close and not inflight_order and entry_px > 0 and notional >= 10.0:
                                         raw_history = await self.redis.redis.lrange("dashboard:trade_history", 0, 49)
+                                        # The CURRENT position has an OPEN row only if this symbol's newest row is an OPEN
+                                        # (or a partial close of it). An OPEN from an older, already-closed trade does not count.
                                         has_open_record = False
                                         for item in raw_history:
                                             try:
                                                 th = json.loads(item)
-                                                if th.get("symbol") == sym and "OPEN" in th.get("side", ""):
-                                                    has_open_record = True
+                                                if th.get("symbol") == sym:
+                                                    th_side = th.get("side", "")
+                                                    has_open_record = th_side.startswith("OPEN") or th_side.startswith("PARTIAL_")
                                                     break
                                             except Exception:
                                                 pass
@@ -1181,6 +1184,15 @@ class ProductionTradingBot:
                                             self.portfolio_state.positions[sym].quantity = actual_qty if "LONG" in side else -actual_qty
                                             self.portfolio_state.positions[sym].entry_price = entry_px_val
                                             self.position_entry_times[sym] = time.time()
+                                            # The position is real: record the OPEN (dashboard + training experience).
+                                            # Previously only the CLOSE was ever recorded for partially filled entries.
+                                            if self.redis.redis and 'trade_record' in self.active_orders[sym]:
+                                                pf_rec = dict(self.active_orders[sym]['trade_record'])
+                                                pf_rec.update({"timestamp": time.time(), "quantity": actual_qty, "price": entry_px_val, "entry_price": entry_px_val})
+                                                await self.redis.redis.lpush("dashboard:trade_history", json.dumps(pf_rec))
+                                                await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
+                                            if 'experience_payload' in self.active_orders[sym]:
+                                                await redis_manager.publish_binary("experience:completed", self.active_orders[sym]['experience_payload'])
                                         else:
                                             logger.warning(f"[{sym}] 🧹 MICRO-STUB DETECTED: Tiny fill (${notional_filled:.2f} < $25.00 min notional). Market-closing dust stub immediately to eliminate asymmetric risk!")
                                             close_side = "SELL" if "LONG" in side else "BUY"

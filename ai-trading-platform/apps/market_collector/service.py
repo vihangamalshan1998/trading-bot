@@ -8,7 +8,12 @@ from core.exchange.binance_client import BinanceFuturesAdapter
 from apps.orderbook.builder import OrderBookBuilder
 from apps.feature_engine.calculators import FeatureEngine
 from apps.feature_engine.engine import FeatureEngine as AIEngine
-from apps.market_collector.context_poller import market_data_rest_url, market_data_ws_url, poll_context, seed_engines
+import json
+
+import aiohttp
+
+from apps.market_collector.context_poller import market_data_is_mainnet, market_data_rest_url, poll_context, seed_engines
+from core.exchange.binance_streams import combined_stream_urls
 from core.db.redis import redis_manager
 from core.db.repository import MarketFeatureRepository
 from core.exchange.symbol_registry import registry, SymbolConfig
@@ -29,7 +34,6 @@ class MarketCollectorService:
         self.adapter = BinanceFuturesAdapter()
         # Public market data from the configured market-data venue (see context_poller)
         self.adapter.base_url = market_data_rest_url()
-        self.adapter.ws_base_url = market_data_ws_url()
 
         # Initialize registry with target universe
         for sym in settings.symbol_universe:
@@ -173,15 +177,34 @@ class MarketCollectorService:
             except Exception as e:
                 logger.error(f"Failed to fetch order book snapshot for {sym}", exc_info=True)
 
+    async def _consume(self, session: aiohttp.ClientSession, url: str):
+        async with session.ws_connect(url, heartbeat=30) as ws:
+            logger.info(f"Connected to market data stream: {url[:100]}...")
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await self._handle_market_data(json.loads(msg.data))
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    break
+
     async def _stream_forever(self):
-        """The adapter's subscription returns when the socket drops: reconnect with fresh book snapshots."""
+        """
+        One connection per endpoint: on mainnet, depth is served on /public and trades / mark price /
+        liquidations on /market (core/exchange/binance_streams.py). If any connection drops, all are
+        reconnected with fresh order-book snapshots.
+        """
+        names = [f"{sym.lower()}@{st}" for sym in self.active_symbols for st in self.streams]
+        urls = combined_stream_urls(names, market_data_is_mainnet())
         while self.running:
             await self._snapshot_books()
-            await self.adapter.subscribe_market_data(
-                symbols=self.active_symbols,
-                streams=self.streams,
-                callback=self._handle_market_data
-            )
+            async with aiohttp.ClientSession() as session:
+                tasks = [asyncio.create_task(self._consume(session, u)) for u in urls]
+                try:
+                    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                except Exception as e:
+                    logger.error(f"Market data stream error: {e}")
+                finally:
+                    for t in tasks:
+                        t.cancel()
             if self.running:
                 logger.warning("Market data stream ended. Reconnecting in 5s...")
                 await asyncio.sleep(5)

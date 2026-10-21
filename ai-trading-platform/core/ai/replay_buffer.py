@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Tuple
 from core.database.models.ai import Experience, GRADED_FLAG
 from core.config.settings import settings
 from core.ai.sumtree import SumTree
-from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT
+from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT
 
 # Longest reward horizon (4h) + grading tolerance: gap kept between training rows and the holdout
 HOLDOUT_EMBARGO_SEC = 14400 + 1800
@@ -281,6 +281,12 @@ class ReplayBuffer:
                 f[vol_idx] = float(np.sign(val) * np.log1p(abs(val)) / 10.0)
 
         # Slot 40: spread_bps (live bot already stores bps / 100; only rescale raw legacy values)
+        # Whale flow: legacy records stored raw dollar pressure; map onto the live normalized definitions
+        if abs(float(f[WHALE_IMBALANCE_SLOT])) > 1.0:
+            f[WHALE_IMBALANCE_SLOT] = 0.0
+        if float(f[WHALE_VOLUME_SLOT]) > 1.0:
+            f[WHALE_VOLUME_SLOT] = float(min(1.0, max(0.0, np.log1p(float(f[WHALE_VOLUME_SLOT])) / 16.0)))
+
         if float(f[SPREAD_SLOT]) > 5.0:
             f[SPREAD_SLOT] = float(max(0.0, min(5.0, float(f[SPREAD_SLOT]) / 100.0)))
         

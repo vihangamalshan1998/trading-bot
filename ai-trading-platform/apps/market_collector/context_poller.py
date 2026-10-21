@@ -20,17 +20,13 @@ FAST_POLL_SECONDS = 60
 SLOW_POLL_EVERY = 5  # slow endpoints every 5 fast cycles
 
 
-def market_data_rest_url() -> str:
+def market_data_is_mainnet() -> bool:
     """Market data comes from the venue the bot trades on (consistent PnL / stops) unless overridden."""
-    if settings.market_data_mainnet or not settings.binance_testnet:
-        return "https://fapi.binance.com"
-    return "https://testnet.binancefuture.com"
+    return bool(settings.market_data_mainnet or not settings.binance_testnet)
 
 
-def market_data_ws_url() -> str:
-    if settings.market_data_mainnet or not settings.binance_testnet:
-        return "wss://fstream.binance.com"
-    return "wss://stream.binancefuture.com"
+def market_data_rest_url() -> str:
+    return "https://fapi.binance.com" if market_data_is_mainnet() else "https://testnet.binancefuture.com"
 
 
 # Long/short ratio and 24h stats are only published by the mainnet data API

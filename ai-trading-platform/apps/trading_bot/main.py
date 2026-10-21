@@ -205,6 +205,35 @@ class ProductionTradingBot:
         except Exception as e:
             logger.warning(f"Could not save entry guard: {e}")
 
+    async def _top_up_partial_entry(self, sym: str, side: str, intended_qty: float, filled_qty: float,
+                                    limit_price: float, pred_move_pct: float) -> bool:
+        """
+        After a maker entry timed out, sends the unfilled rest as a MARKET order (taker fee, +0.03%) when the
+        signal is strong enough to pay for it and the price has not already run away. Returns True if sent.
+        """
+        if intended_qty <= 0 or filled_qty >= intended_qty * settings.entry_topup_below_fill_frac:
+            return False
+        if abs(pred_move_pct) < settings.entry_topup_min_move_pct:
+            return False
+        market = self.market_states.get(sym)
+        mid = float(getattr(market, "mid_price", 0.0) or 0.0)
+        if mid <= 0 or limit_price <= 0:
+            return False
+        is_long = "LONG" in side
+        adverse_pct = ((mid - limit_price) if is_long else (limit_price - mid)) / limit_price * 100.0
+        if adverse_pct > settings.entry_topup_max_adverse_pct:
+            logger.info(f"[{sym}] No entry top-up: price moved {adverse_pct:.3f}% past the limit (max {settings.entry_topup_max_adverse_pct}%).")
+            return False
+        sym_config = registry.get_symbol(sym)
+        rest = float(sym_config.format_quantity(intended_qty - filled_qty)) if sym_config else 0.0
+        if rest <= 0 or rest * mid < 25.0:
+            return False
+        logger.info(f"[{sym}] ENTRY TOP-UP: {filled_qty} of {intended_qty} filled as maker; sending the rest ({rest}) at market "
+                    f"(predicted move {pred_move_pct:+.2f}% >= {settings.entry_topup_min_move_pct}%).")
+        await self.binance.create_order(sym, "BUY" if is_long else "SELL", rest,
+                                        f"ai_topup_{uuid.uuid4().hex[:10]}", order_type="MARKET")
+        return True
+
     def _refresh_actor_signal_offset(self):
         """
         Legacy champions (trained on summed shaped rewards) learned a strong long bias, which was
@@ -1373,7 +1402,20 @@ class ProductionTradingBot:
                                     matching = [p for p in active_positions if p.get('symbol') == sym]
                                     actual_pos = matching[0] if matching else None
                                     actual_qty = abs(float(actual_pos.get('positionAmt', 0.0))) if actual_pos else 0.0
-                                    
+                                    topped_up = False
+                                    try:
+                                        tr_open = self.active_orders[sym].get('trade_record', {})
+                                        topped_up = await self._top_up_partial_entry(
+                                            sym, side, qty, actual_qty, price, float(tr_open.get('predicted_move_pct') or 0.0))
+                                    except Exception as tu_err:
+                                        logger.warning(f"[{sym}] Entry top-up failed: {tu_err}")
+                                    if topped_up:
+                                        active_positions = await self.binance.get_positions()
+                                        matching = [p for p in active_positions if p.get('symbol') == sym]
+                                        actual_pos = matching[0] if matching else None
+                                        actual_qty = abs(float(actual_pos.get('positionAmt', 0.0))) if actual_pos else 0.0
+                                        self.active_orders[sym].get('trade_record', {})['order_type'] = "MAKER + MARKET TOP-UP"
+
                                     if actual_qty > 0:
                                         mkt_fb = self.market_states.get(sym)
                                         entry_px_val = float(actual_pos.get('entryPrice', 0.0)) or (mkt_fb.mid_price if mkt_fb else 0.0)

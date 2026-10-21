@@ -221,8 +221,23 @@ class ModelRegistry:
             "champion_critic_mse": m.get("champion_critic_mse"),
             "challenger_sim_pnl": m.get("challenger_sim_pnl"),
             "champion_sim_pnl": m.get("champion_sim_pnl"),
-            "entropy": m.get("entropy")
+            "entropy": m.get("entropy"),
+            # v3 evaluator detail (absent on legacy entries): used by scripts/visualize_learning.py
+            "evaluator_version": m.get("evaluator_version"),
+            "label_type": m.get("label_type"),
+            "sample_size": m.get("sample_size"),
+            "challenger_trades": m.get("challenger_trades"),
+            "champion_trades": m.get("champion_trades"),
+            "challenger_win_rate": m.get("challenger_win_rate"),
+            "champion_win_rate": m.get("champion_win_rate"),
+            "challenger_critic_skill": m.get("challenger_critic_skill"),
+            "champion_critic_skill": m.get("champion_critic_skill"),
         }
+        policy = m.get("trade_policy") if isinstance(m.get("trade_policy"), dict) else None
+        if policy:
+            entry["min_confidence"] = policy.get("min_confidence")
+            entry["blocked_symbols"] = policy.get("blocked_symbols")
+            entry["filtered_pnl_per_trade"] = policy.get("filtered_pnl_per_trade")
         history.append(entry)
 
         try:

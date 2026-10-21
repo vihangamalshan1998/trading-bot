@@ -38,6 +38,13 @@ TRAINER_STATE_PATH = "models/candidates/trainer_state.pt"
 # noise had shrunk to 0.20, and on 82-100% of states all K samples then landed on the same side
 # (zero advantage, no direction learning).
 DIR_LOG_STD_MIN = -1.4
+# Tournament = how the LIVE bot trades (apps/trading_bot/main.py GUARD 3 / GUARD 4): it opens only when the
+# blended 1-4h critic forecast clears this hurdle (the forecast then sets the side), the 1h / 4h forecasts
+# do not oppose it, and the confidence head clears the model's threshold.
+LIVE_ENTRY_HURDLE_PCT = max(settings.min_open_expected_return_pct,
+                            settings.min_edge_cost_multiple * exit_policy.ROUND_TRIP_COST * 100.0)
+MIN_GATED_TRADES = 30          # trades the live rules take in Part B before a verdict counts
+CANDIDATE_LATEST_PATH = "models/candidates/candidate_latest.pt"
 DIR_LOG_STD_MAX = -1.2
 
 def normalize_state_tensor(states: torch.Tensor) -> torch.Tensor:
@@ -584,6 +591,52 @@ class PPOTrainer:
         except Exception:
             pass
 
+    @staticmethod
+    def live_entry_positions(vals: torch.Tensor) -> torch.Tensor:
+        """
+        (B, 1) position the live bot would open from the critic forecasts [5m, 1h, 4h] (% of price), BEFORE
+        the confidence gate: +1 LONG / -1 SHORT / 0 none. Mirrors GUARD 4 in the trading bot: the blended
+        expected move must clear LIVE_ENTRY_HURDLE_PCT (it then decides the side, the actor only sizes),
+        and the 1h / 4h forecasts must not oppose the trade.
+        """
+        w = torch.tensor(exit_policy.HORIZON_WEIGHTS, dtype=vals.dtype)
+        exp_move = (vals[:, :3] * w).sum(dim=-1)
+        v1h, v4h = vals[:, 1], vals[:, 2]
+        long_ok = (exp_move >= LIVE_ENTRY_HURDLE_PCT) & ~(v1h < -0.20) & ~((v4h < -0.30) & (v1h <= 0.0))
+        short_ok = (exp_move <= -LIVE_ENTRY_HURDLE_PCT) & ~(v1h > 0.20) & ~((v4h > 0.30) & (v1h >= 0.0))
+        return (long_ok.float() - short_ok.float()).unsqueeze(1)
+
+    def _live_split_score(self, res: dict, symbols: List[str], n_a: int) -> dict:
+        """
+        Honest live-like score. Part A (older half of the holdout) picks the confidence threshold and the
+        blocked coins from the trades the live rules would take; Part B (newer half, never used to choose)
+        is graded with them. Returns the policy to ship and the Part B result.
+        """
+        pos, pnl, acts, conf = res["live_pos"], res["live_pnl"], res["acts"], res["conf"]
+        policy = self.derive_trade_policy(acts[:n_a], pnl[:n_a], pos[:n_a], symbols[:n_a])
+        policy["selection_pnl_per_trade"] = policy.get("filtered_pnl_per_trade")  # Part A: in-sample, optimistic
+        blocked = set(policy.get("blocked_symbols") or [])
+        min_conf = policy.get("min_confidence")
+        pos_b, pnl_b, conf_b, sym_b = pos[n_a:, 0], pnl[n_a:, 0], conf[n_a:], symbols[n_a:]
+        keep = pos_b != 0
+        if min_conf is not None:
+            keep = keep & (conf_b >= float(min_conf))
+        keep = keep & torch.tensor([s not in blocked for s in sym_b], dtype=torch.bool)
+        n_b, n_trades = int(len(pos_b)), int(keep.sum().item())
+        kept_pnl = pnl_b[keep]
+        out = {
+            "policy": policy,
+            "n_rows": n_b,
+            "n_trades": n_trades,
+            "pnl_per_decision": float(kept_pnl.sum().item()) / max(1, n_b),
+            "pnl_per_trade": float(kept_pnl.mean().item()) if n_trades else 0.0,
+            "win_rate": float((kept_pnl > 0).float().mean().item()) if n_trades else 0.0,
+            "long_share": float((pos_b[keep] > 0).float().mean().item()) if n_trades else 0.0,
+        }
+        policy["filtered_trades"] = n_trades
+        policy["filtered_pnl_per_trade"] = round(out["pnl_per_trade"], 5)  # honest: Part B only
+        return out
+
     def _score_policy(self, model: nn.Module, states: torch.Tensor, rewards: torch.Tensor) -> dict:
         """Deterministic (live-like) holdout scoring of one model."""
         model.eval()
@@ -600,12 +653,18 @@ class PPOTrainer:
         pnl = self.action_pnl(dir_, long_ret, short_ret)
         n_trades = int((pos != 0).sum().item())
         wins = int(((pnl > 0) & (pos != 0)).sum().item())
+        # What the live bot would actually open (critic hurdle + 1h / 4h alignment), before the confidence gate
+        live_pos = self.live_entry_positions(vals)
+        live_gross = torch.where(live_pos > 0, long_ret, torch.where(live_pos < 0, short_ret, torch.zeros_like(live_pos)))
+        live_pnl = live_gross - ROUND_TRIP_COST_PCT * live_pos.abs()
+        conf = torch.clamp((acts[:, 1] + 1.0) / 2.0, 0.05, 0.99)   # same mapping as the live bot
         # Critic skill per horizon vs the naive "price won't move" forecast (1.0 = perfect, 0 = no skill, < 0 = harmful)
         mse = ((vals - market_ret) ** 2).mean(dim=0)
         naive = (market_ret ** 2).mean(dim=0).clamp_min(1e-8)
         skill = 1.0 - mse / naive
         return {
             "acts": acts, "vals": vals, "pnl": pnl, "pos": pos,
+            "live_pos": live_pos, "live_pnl": live_pnl, "conf": conf,
             "sim_pnl": float(pnl.mean().item()),               # mean net % per decision (0 = staying flat)
             "total_pnl": float(pnl.sum().item()),
             "n_trades": n_trades,
@@ -702,11 +761,14 @@ class PPOTrainer:
         """
         Champion vs Challenger tournament on the CHRONOLOGICAL HOLDOUT (newest data, never trained on).
 
-        Both models act deterministically (as live), with the live entry rule (|a| > 0.2), scored by the
-        realized market move minus round-trip costs. A challenger is approved only if it:
-          1. does not lose money vs staying flat (strictly positive, unless the champion itself is losing),
-          2. beats the champion's holdout PnL and composite score by a margin,
-          3. has a critic that is not worse than the champion's (the bot gates trades on it).
+        Both models trade the holdout exactly as the live bot would (critic hurdle + 1h / 4h alignment +
+        confidence threshold + blocked coins), scored by the realized path-aware trade outcome minus
+        round-trip costs. The holdout is split by time: Part A chooses the confidence threshold and the
+        blocked coins, Part B (never used to choose) grades. A challenger is approved only if, in Part B, it:
+          1. takes at least MIN_GATED_TRADES trades and makes money per trade after costs,
+          2. is not one-sided (all LONG or all SHORT),
+          3. beats the champion's Part B PnL per decision and composite score by a margin,
+          4. has a critic that is not worse than the champion's (the live bot trades on it).
         """
         # 1. Weights sanity check
         if any(torch.isnan(p).any() for p in self.model.parameters()):
@@ -715,6 +777,7 @@ class PPOTrainer:
 
         min_eval_samples = 30
         batch = self.buffer.sample_holdout(sample_size)
+        batch.sort(key=lambda e: getattr(e, "timestamp", 0) or 0)  # chronological: Part A = older half, Part B = newer half
         if len(batch) < min_eval_samples:
             logger.warning(f"Candidate evaluation REJECTED: Holdout has insufficient samples ({len(batch)} < {min_eval_samples}).")
             return {"approved": False, "reason": "INSUFFICIENT_SAMPLE_SIZE", "critic_loss": 0.0, "entropy": 0.0}
@@ -782,19 +845,24 @@ class PPOTrainer:
             eval_sample_count = len(states)
             del states, rewards
 
-            # Per-coin filter + honest confidence, derived on the same unseen holdout (restrict-only)
-            trade_policy = self.derive_trade_policy(chall["acts"], chall["pnl"], chall["pos"], row_symbols)
+            # Live-like, honest scoring: Part A (older half) chooses the filters, Part B (newer half) grades
+            n_a = eval_sample_count // 2
+            chall_live = self._live_split_score(chall, row_symbols, n_a)
+            champ_live = self._live_split_score(champ, row_symbols, n_a)
+            trade_policy = chall_live["policy"]
 
-            # Composite score: holdout trading PnL dominates; critic skill (1h horizon) is a tie-breaker.
-            challenger_score = chall["sim_pnl"] + 0.01 * chall["critic_skill"][1]
-            champion_score = champ["sim_pnl"] + 0.01 * champ["critic_skill"][1]
+            # Composite score: Part B live PnL per decision dominates; critic skill (1h horizon) is a tie-breaker.
+            challenger_score = chall_live["pnl_per_decision"] + 0.01 * chall["critic_skill"][1]
+            champion_score = champ_live["pnl_per_decision"] + 0.01 * champ["critic_skill"][1]
 
             SUPERIORITY_MARGIN = 0.0005  # % per decision
+            enough_trades = chall_live["n_trades"] >= MIN_GATED_TRADES
+            one_sided = enough_trades and (chall_live["long_share"] > 0.95 or chall_live["long_share"] < 0.05)
             score_beaten = challenger_score >= (champion_score + SUPERIORITY_MARGIN)
-            pnl_preserved = chall["sim_pnl"] >= champ["sim_pnl"]
-            beats_flat = chall["sim_pnl"] > 0.0 or (chall["sim_pnl"] >= 0.0 and champ["sim_pnl"] < 0.0)
+            pnl_preserved = chall_live["pnl_per_decision"] >= champ_live["pnl_per_decision"]
+            beats_flat = enough_trades and chall_live["pnl_per_trade"] > 0.0
             critic_not_degraded = chall["critic_skill"][1] >= min(champ["critic_skill"][1], 0.0) - 0.01
-            is_superior = score_beaten and pnl_preserved and beats_flat and critic_not_degraded
+            is_superior = beats_flat and not one_sided and score_beaten and pnl_preserved and critic_not_degraded
 
             eval_timestamp = time.time()
 
@@ -822,14 +890,23 @@ class PPOTrainer:
                 "champion_score": champion_score,
                 "challenger_critic_mse": chall["critic_mse"],
                 "champion_critic_mse": champ["critic_mse"],
-                "challenger_sim_pnl": chall["sim_pnl"],
-                "champion_sim_pnl": champ["sim_pnl"],
-                "challenger_total_pnl": chall["total_pnl"],
-                "champion_total_pnl": champ["total_pnl"],
-                "challenger_trades": chall["n_trades"],
-                "champion_trades": champ["n_trades"],
-                "challenger_win_rate": chall["win_rate"],
-                "champion_win_rate": champ["win_rate"],
+                # Part B, traded as live (what decides the tournament)
+                "challenger_sim_pnl": chall_live["pnl_per_decision"],
+                "champion_sim_pnl": champ_live["pnl_per_decision"],
+                "challenger_pnl_per_trade": chall_live["pnl_per_trade"],
+                "champion_pnl_per_trade": champ_live["pnl_per_trade"],
+                "challenger_trades": chall_live["n_trades"],
+                "champion_trades": champ_live["n_trades"],
+                "challenger_win_rate": chall_live["win_rate"],
+                "champion_win_rate": champ_live["win_rate"],
+                "challenger_long_share": chall_live["long_share"],
+                "part_b_rows": chall_live["n_rows"],
+                "champion_min_confidence": champ_live["policy"].get("min_confidence"),
+                # Raw actor direction on every holdout row (old v3 measure, kept for comparison)
+                "challenger_raw_sim_pnl": chall["sim_pnl"],
+                "champion_raw_sim_pnl": champ["sim_pnl"],
+                "challenger_raw_trades": chall["n_trades"],
+                "challenger_raw_win_rate": chall["win_rate"],
                 "challenger_critic_skill": chall["critic_skill"],
                 "champion_critic_skill": champ["critic_skill"],
                 "critic_loss": chall["critic_mse"],
@@ -843,25 +920,32 @@ class PPOTrainer:
                 "slippage_hurdle": slippage_hurdle,
                 "champion_checkpoint_hash": champ_hash,
                 "champion_version": champ_version,
-                "evaluator_version": "v3_holdout_counterfactual",
+                "evaluator_version": "v3_live_gated_split",
                 "label_type": "path_aware_trade_outcome",
                 "trade_policy": trade_policy,
             }
 
             summary = (
-                f"Holdout PnL/decision: {chall['sim_pnl']:+.4f}% vs Champ {champ['sim_pnl']:+.4f}% | "
-                f"Trades: {chall['n_trades']} (win {chall['win_rate']:.0%}) vs {champ['n_trades']} (win {champ['win_rate']:.0%}) | "
+                f"Part B as live ({chall_live['n_rows']} rows): trades {chall_live['n_trades']} (win {chall_live['win_rate']:.0%}, "
+                f"{chall_live['pnl_per_trade']:+.4f}%/trade, long {chall_live['long_share']:.0%}) vs Champ {champ_live['n_trades']} "
+                f"(win {champ_live['win_rate']:.0%}, {champ_live['pnl_per_trade']:+.4f}%/trade) | "
+                f"PnL/decision {chall_live['pnl_per_decision']:+.4f}% vs {champ_live['pnl_per_decision']:+.4f}% | "
+                f"Raw actor every row: {chall['sim_pnl']:+.4f}% ({chall['n_trades']} trades) | "
                 f"Critic skill 5m/1h/4h: {[round(x, 3) for x in chall['critic_skill']]} vs {[round(x, 3) for x in champ['critic_skill']]} | "
                 f"n={eval_sample_count} | Policy: min conf {trade_policy.get('min_confidence')}, "
-                f"blocked {trade_policy.get('blocked_symbols')}, filtered PnL/trade {trade_policy.get('filtered_pnl_per_trade')}"
+                f"blocked {trade_policy.get('blocked_symbols')} (chosen on Part A)"
             )
             if is_superior:
                 logger.info(f"🏆 TOURNAMENT WINNER: Challenger is SUPERIOR on holdout! {summary}")
                 return {"approved": True, "reason": "SUPERIOR_TO_CHAMPION", "metrics": metrics, **metrics}
-            if not (score_beaten and pnl_preserved):
-                reason = "INFERIOR_TO_CHAMPION"
+            if not enough_trades:
+                reason = "TOO_FEW_LIVE_TRADES"
             elif not beats_flat:
                 reason = "NO_EDGE_AFTER_COSTS"
+            elif one_sided:
+                reason = "ACTION_MONOCULTURE"
+            elif not (score_beaten and pnl_preserved):
+                reason = "INFERIOR_TO_CHAMPION"
             else:
                 reason = "CRITIC_DEGRADED"
             logger.warning(f"⛔ TOURNAMENT DEFEAT ({reason}): {summary}. REJECTING PUSH.")
@@ -892,6 +976,24 @@ async def run_training_loop():
         logger.info("Successfully loaded existing model weights.")
     except Exception as e:
         logger.warning(f"Could not load existing model, starting fresh: {e}")
+
+    # Continue from the latest candidate (saved every 100 steps) so a restart does not throw away the
+    # training since the last push. Only a candidate of the current kind (fitted, account slots off) is
+    # resumed; delete models/candidates/candidate_latest.pt or pass --from-champion to restart from live.
+    import sys
+    from datetime import datetime
+    if os.path.exists(CANDIDATE_LATEST_PATH) and "--from-champion" not in sys.argv:
+        try:
+            cand = SingleSymbolActorCritic(input_dim=200)
+            cand.load_state_dict(torch.load(CANDIDATE_LATEST_PATH, map_location="cpu"))
+            if bool(cand.feat_fitted) and not bool(cand.feat_mask[list(BRAIN_EXCLUDED_SLOTS)].any()):
+                model = cand
+                saved = datetime.fromtimestamp(os.path.getmtime(CANDIDATE_LATEST_PATH)).strftime("%Y-%m-%d %H:%M")
+                logger.info(f"Resuming training from the latest candidate (saved {saved}), not the live brain.")
+            else:
+                logger.info("Latest candidate predates the account-slot fix; starting from the live brain.")
+        except Exception as e:
+            logger.warning(f"Could not resume from the latest candidate ({e}); starting from the live brain.")
     
     # Thermal Management & CPU Core Restrictions
     local_mode = os.getenv("LOCAL_MODE") == "True"

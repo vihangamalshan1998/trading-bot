@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # ============================================================
     # Phase 1 RISK LIMITS
     # ============================================================
-    max_position_size: float = Field(default=50000.0, gt=0)
+    max_position_size: float = Field(default=50000.0, gt=0)   # USD notional per coin (40% margin @20x is ~8x equity)
     # Portfolio & Symbol Exposure Limits (Leverage multiples of equity: 8.0 = 800% notional exposure / 8x leverage)
     max_symbol_exposure_pct: float = Field(default=8.0, gt=0)     # Max 8x equity notional per symbol (40% margin @ 20x)
     max_portfolio_exposure_pct: float = Field(default=10.0, gt=0) # Max 10x aggregate portfolio leverage
@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     taker_fee_pct: float = Field(default=0.0005, ge=0)                  # 0.05% taker fee
     maker_fee_pct: float = Field(default=0.0002, ge=0)                  # 0.02% maker fee
 
-    max_order_size: float = Field(default=25000.0, gt=0)
+    max_order_size: float = Field(default=50000.0, gt=0)      # USD notional per order
     max_open_positions: int = Field(default=10, gt=0)
     # Institutional Drawdown & Circuit Breaker Gates (0.05 = 5.0% daily loss limit, 0.08 = 8.0% max peak drawdown)
     max_daily_loss_pct: float = Field(default=0.05, gt=0, le=1.0)

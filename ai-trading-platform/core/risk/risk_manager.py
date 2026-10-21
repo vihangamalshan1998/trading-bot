@@ -272,10 +272,10 @@ class RiskManager:
                 return self._reject("MACRO_BULLISH_OVERRIDE")
 
         # ========================================================
-        # 7. Maximum single-order quantity
+        # 7. Maximum single-order size (USD notional; comparing coin counts blocked cheap coins such as DOGE)
         # ========================================================
 
-        if qty > self.max_order_size:
+        if qty * price > self.max_order_size:
             return self._reject("MAX_ORDER_SIZE_EXCEEDED")
 
         # ========================================================
@@ -321,7 +321,7 @@ class RiskManager:
         else:
             resulting_quantity = current_quantity - qty
 
-        if abs(resulting_quantity) > self.max_position_size:
+        if abs(resulting_quantity) * price > self.max_position_size:
             return self._reject("MAX_POSITION_SIZE_EXCEEDED")
 
         # ========================================================

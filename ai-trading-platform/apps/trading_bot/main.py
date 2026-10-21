@@ -205,6 +205,46 @@ class ProductionTradingBot:
         except Exception as e:
             logger.warning(f"Could not save entry guard: {e}")
 
+    async def _record_airbag_trim(self, sym: str, pos, qty: float, order_res, mid_price: float):
+        """Adds an Airbag 4 margin trim to the dashboard trade history, so its profit/loss is not missing from the stats."""
+        try:
+            if not self.redis.redis or qty <= 0:
+                return
+            res = order_res if isinstance(order_res, dict) else {}
+            exit_px = float(res.get("avgPrice") or 0.0) or float(mid_price or 0.0)
+            entry_px = float(getattr(pos, "entry_price", 0.0) or 0.0) or exit_px
+            is_long = pos.quantity > 0
+            lev = settings.max_leverage
+            gross = (exit_px - entry_px) * qty * (1 if is_long else -1)
+            fees = entry_px * qty * settings.maker_fee_pct + exit_px * qty * settings.taker_fee_pct
+            margin = entry_px * qty / lev if lev else 0.0
+            record = {
+                "timestamp": time.time(),
+                "symbol": sym,
+                "side": "PARTIAL_CLOSE_LONG" if is_long else "PARTIAL_CLOSE_SHORT",
+                "quantity": qty,
+                "price": exit_px,
+                "confidence": 0.0,
+                "order_id": res.get("orderId", "airbag4"),
+                "entry_price": entry_px,
+                "gross_pnl": gross,
+                "fees_paid": fees,
+                "realized_pnl": gross - fees,
+                "roi_pct": (gross - fees) / margin * 100.0 if margin > 0 else 0.0,
+                "leverage": int(lev),
+                "notional": exit_px * qty,
+                "order_type": "MARKET",
+                "mid_price": float(mid_price or 0.0),
+                "exit_reason": "AIRBAG MARGIN TRIM",
+            }
+            entry_t = self.position_entry_times.get(sym) or float(getattr(pos, "entry_time", 0.0) or 0.0)
+            if entry_t:
+                record["hold_seconds"] = max(0.0, time.time() - entry_t)
+            await self.redis.redis.lpush("dashboard:trade_history", json.dumps(record))
+            await self.redis.redis.ltrim("dashboard:trade_history", 0, 99)
+        except Exception as e:
+            logger.warning(f"[{sym}] Could not record airbag trim: {e}")
+
     async def _top_up_partial_entry(self, sym: str, side: str, intended_qty: float, filled_qty: float,
                                     limit_price: float, pred_move_pct: float) -> bool:
         """
@@ -889,7 +929,7 @@ class ProductionTradingBot:
                                         f"Executing auto-deleveraging trim: {trim_side} {trim_qty_str} {worst_sym} to restore margin cushion before Binance liquidation."
                                     )
                                     try:
-                                        await self.binance.create_order(
+                                        trim_res = await self.binance.create_order(
                                             symbol=worst_sym,
                                             side=trim_side,
                                             quantity=float(trim_qty_str),
@@ -899,6 +939,7 @@ class ProductionTradingBot:
                                         )
                                         self.last_margin_trim_time = now_t
                                         signed_trim = float(trim_qty_str) if trim_side == "BUY" else -float(trim_qty_str)
+                                        await self._record_airbag_trim(worst_sym, worst_pos, float(trim_qty_str), trim_res, m_st.mid_price)
                                         worst_pos.quantity += signed_trim
                                         asyncio.create_task(
                                             telegram_notifier.broadcast_alert(

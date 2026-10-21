@@ -121,8 +121,8 @@ def test_G_maximum_leverage(base_state):
     market, portfolio = base_state
     import core.risk.risk_manager as rm_module
     rm_module.settings.max_leverage = 2
-    rm_module.settings.max_order_size = 500.0 # Bypass order size limit
-    rm_module.settings.max_position_size = 500.0 # Bypass position size limit
+    rm_module.settings.max_order_size = 1e9 # Bypass order size limit
+    rm_module.settings.max_position_size = 1e9 # Bypass position size limit
     
     # Portfolio equity is 10,000. Notional size for max_leverage 2 is 20,000.
     portfolio.free_margin = 999999.0 # Bypass free margin limit to test effective leverage
@@ -134,6 +134,19 @@ def test_G_maximum_leverage(base_state):
     assert not decision.approved
     assert decision.reason in ["MAX_POSITION_MARGIN_EXCEEDED", "EXCESSIVE_PORTFOLIO_EXPOSURE", "INSUFFICIENT_FREE_MARGIN"]
     assert decision.adjusted_quantity == 0.0
+
+def test_cheap_coin_order_is_judged_in_dollars(base_state):
+    market, portfolio = base_state
+    import core.risk.risk_manager as rm_module
+    rm_module.settings.max_order_size = 50000.0
+    rm_module.settings.max_position_size = 50000.0
+    rm_module.settings.max_leverage = 20
+    market.mid_price = 0.08                      # DOGE-like price
+    rm = RiskManager()
+    # 120,000 coins = $9,600: far below the $50k cap (previously rejected as 120,000 > 25,000 "units")
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=120000.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert decision.reason not in ("MAX_ORDER_SIZE_EXCEEDED", "MAX_POSITION_SIZE_EXCEEDED")
 
 def test_P_max_position_size_clamping(base_state):
     market, portfolio = base_state
@@ -169,8 +182,8 @@ def test_H_maximum_portfolio_exposure(base_state):
     market, portfolio = base_state
     import core.risk.risk_manager as rm_module
     rm_module.settings.max_portfolio_exposure_pct = 0.50
-    rm_module.settings.max_order_size = 500.0 # Bypass order size limit
-    rm_module.settings.max_position_size = 500.0 # Bypass position size limit
+    rm_module.settings.max_order_size = 1e9 # Bypass order size limit
+    rm_module.settings.max_position_size = 1e9 # Bypass position size limit
     
     rm = RiskManager()
     # Portfolio exposure already near limit (e.g. 4000 out of 5000 max)

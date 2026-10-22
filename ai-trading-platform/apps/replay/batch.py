@@ -12,11 +12,9 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import create_engine
-
 from core.config.settings import settings
 from apps.replay import archive
-from apps.replay.run import finished_days, run_range
+from apps.replay.run import finished_days, replay_engine, run_range
 
 # The archive publishes a day after it ends (sometimes a day later): stop two days back
 NEWEST_DAY_LAG = 2
@@ -54,7 +52,7 @@ def main():
         end = start - timedelta(days=1)
 
     symbols = list(settings.symbol_universe)
-    engine = create_engine(settings.database_url)
+    engine = replay_engine()
     t_all = time.time()
     print(f"History replay: {oldest} .. {newest} ({a.days} days) in {len(weeks)} weekly batches, newest first.", flush=True)
     for i, days in enumerate(weeks, 1):

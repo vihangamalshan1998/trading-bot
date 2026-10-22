@@ -33,6 +33,26 @@ REPLAY_TABLE = "replay_experiences"
 INSERT_BATCH = 50
 
 
+def replay_engine():
+    """
+    Database engine for the replay writer. Its connections skip the MySQL binary log: that log only serves
+    replication, which the training laptop does not use, and it doubled every ~0.7 MB record write (and kept
+    a second copy on disk). Other clients of the database are not affected.
+    """
+    from sqlalchemy import event
+    engine = create_engine(settings.database_url)
+
+    @event.listens_for(engine, "connect")
+    def _no_binlog(dbapi_conn, _record):
+        try:
+            with dbapi_conn.cursor() as cur:
+                cur.execute("SET SESSION sql_log_bin = 0")
+        except Exception:
+            pass  # no privilege: keep the default
+
+    return engine
+
+
 def replay_table(engine) -> Table:
     with engine.begin() as c:
         c.execute(text(f"CREATE TABLE IF NOT EXISTS {REPLAY_TABLE} LIKE experiences"))
@@ -152,7 +172,7 @@ def run_range(symbols: List[str], days: List[date], workers: int, grading: bool 
     archive.download_all(symbols, [days[0] - timedelta(days=1)] + days)
     run_pass1(symbols, days, workers)
 
-    engine = create_engine(settings.database_url)
+    engine = replay_engine()
     table = replay_table(engine)
     excluded = set(getattr(settings, "excluded_trading_symbols", []))
     record_symbols = [s for s in symbols if s not in excluded]

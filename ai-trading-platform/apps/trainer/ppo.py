@@ -1172,9 +1172,13 @@ async def run_training_loop():
                                 count_str = result.stdout.split("New Golden Trades Extracted: ")[1].split("\n")[0].strip()
                                 if count_str != "0":
                                     logger.info(f"⛏️ GOLDEN EXTRACTOR: Successfully secured {count_str} highly profitable trades into permanent memory!")
+                            else:
+                                # It failed silently for days (a % sign in its SQL): always surface why
+                                tail = (result.stdout.strip().splitlines() or [""])[-1] + " " + (result.stderr or "").strip()[-300:]
+                                logger.warning(f"GOLDEN EXTRACTOR did not finish (exit {result.returncode}): {tail.strip()}")
                     except Exception as e:
-                        pass
-                        
+                        logger.warning(f"GOLDEN EXTRACTOR could not run: {e}")
+
                     time.sleep(30) # Check for new trades every 30 seconds
 
             threading.Thread(target=background_syncer, daemon=True).start()

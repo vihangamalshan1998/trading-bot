@@ -63,7 +63,9 @@ def extract_golden_batch():
                     (realized_pnl >= 150 OR realized_pnl <= -150)
                     OR
                     /* The Snipers: High percentage ROI with a minimum $50 floor.
-                       (reward_5m is a % price move, not dollars, so it is not divided by margin.) */
+                       (reward_5m is a percent price move, not dollars, so it is not divided by margin.)
+                       NOTE: never write a percent sign in this query, even in a comment: pymysql reads it as a
+                       parameter placeholder and the whole extraction fails. */
                     (
                         (realized_pnl >= 50 OR realized_pnl <= -50)
                         AND (

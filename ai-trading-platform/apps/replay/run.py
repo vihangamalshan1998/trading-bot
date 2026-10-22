@@ -144,6 +144,29 @@ def grade(engine, table: Table, symbols: List[str], days: List[date]):
     print(f"trade outcomes for {n} replay records", flush=True)
 
 
+def run_range(symbols: List[str], days: List[date], workers: int, grading: bool = True):
+    """The whole pipeline for consecutive days (each step resumes after a stop)."""
+    print(f"replay {len(symbols)} coins x {len(days)} days ({days[0]} .. {days[-1]})", flush=True)
+    # archive downloads (pass 1 also downloads on demand; doing it first keeps the workers busy computing)
+    archive.download_all(symbols, [days[0] - timedelta(days=i) for i in range(4, 0, -1)] + days, kinds=("klines",))
+    archive.download_all(symbols, [days[0] - timedelta(days=1)] + days)
+    run_pass1(symbols, days, workers)
+
+    engine = create_engine(settings.database_url)
+    table = replay_table(engine)
+    excluded = set(getattr(settings, "excluded_trading_symbols", []))
+    record_symbols = [s for s in symbols if s not in excluded]
+    write_records(engine, table, symbols, days, record_symbols)
+    if grading:
+        grade(engine, table, record_symbols, days)
+
+
+def finished_days(engine) -> set:
+    _days_table(engine)
+    with engine.connect() as c:
+        return {d for (d,) in c.execute(text(f"SELECT day FROM {DAYS_TABLE}"))}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", required=True, help="first UTC day (YYYY-MM-DD)")
@@ -154,20 +177,7 @@ def main():
     a = ap.parse_args()
     symbols = [s.strip().upper() for s in a.symbols.split(",") if s.strip()]
     days = archive.day_range(date.fromisoformat(a.start), date.fromisoformat(a.end))
-    print(f"replay {len(symbols)} coins x {len(days)} days ({days[0]} .. {days[-1]})", flush=True)
-
-    # archive downloads (pass 1 also downloads on demand; doing it first keeps the workers busy computing)
-    archive.download_all(symbols, [days[0] - timedelta(days=i) for i in range(4, 0, -1)] + days, kinds=("klines",))
-    archive.download_all(symbols, [days[0] - timedelta(days=1)] + days)
-    run_pass1(symbols, days, a.workers)
-
-    engine = create_engine(settings.database_url)
-    table = replay_table(engine)
-    excluded = set(getattr(settings, "excluded_trading_symbols", []))
-    record_symbols = [s for s in symbols if s not in excluded]
-    write_records(engine, table, symbols, days, record_symbols)
-    if not a.skip_grading:
-        grade(engine, table, record_symbols, days)
+    run_range(symbols, days, a.workers, grading=not a.skip_grading)
 
 
 if __name__ == "__main__":

@@ -24,14 +24,15 @@ OUTCOME_BARS = exit_policy.MAX_HOLD_SECONDS // 60
 class KlinePriceSource:
     """
     Price oracle backed by Binance 1m klines (public endpoint, no API key).
-    Uses the same testnet/mainnet base URL as the execution adapter so graded
-    returns describe the exact market the bot trades.
+    Uses the market-data venue (mainnet by default, settings.market_data_mainnet) so graded
+    returns describe the same market the brain's inputs come from.
 
     price_at(t) = open of the first 1m candle whose open time is >= t (at most 60s late,
     identical rule for the start and every horizon, so the bias cancels out).
     """
     def __init__(self):
-        self.base_url = "https://testnet.binancefuture.com" if settings.binance_testnet else "https://fapi.binance.com"
+        from apps.market_collector.context_poller import market_data_rest_url
+        self.base_url = market_data_rest_url()
         # {symbol: {minute_open_ms: (open, high, low, close)}}
         self.cache: Dict[str, Dict[int, Tuple[float, float, float, float]]] = defaultdict(dict)
         self.fetched_ranges: Dict[str, List[Tuple[int, int]]] = defaultdict(list)

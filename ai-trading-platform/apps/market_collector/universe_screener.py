@@ -29,7 +29,9 @@ class UniverseScreener:
         excluded = getattr(settings, "excluded_trading_symbols", [])
         active_curated = [s for s in curated if s not in excluded]
         try:
-            tickers = await self.client.get_24hr_ticker()
+            # Rank by the market-data venue's volume (testnet volume is mostly synthetic)
+            from apps.market_collector.context_poller import fetch_24hr_tickers
+            tickers = await fetch_24hr_tickers()
             valid_tickers = [t for t in tickers if t.get('symbol') in active_curated and float(t.get('quoteVolume', 0)) > 0]
             sorted_tickers = sorted(valid_tickers, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
             top_symbols = [t['symbol'] for t in sorted_tickers]

@@ -16,6 +16,7 @@ from core.ai.registry import ModelRegistry
 from core.risk import exit_policy
 from core.schemas.state_layout import MARKET_LOG_VOLUME_FEATURES, MARKET_SPREAD_FEATURE, MARKET_DEPRECATED_FEATURES, CROSS_SECTION_DIM, GLOBAL_KEYS, ADDED_2026_10_SLOTS
 from apps.market_collector.global_context import GLOBAL_CONTEXT_KEY
+from apps.market_collector.context_poller import fetch_klines
 from apps.research.model import SingleSymbolActorCritic
 from core.risk.risk_manager import RiskManager
 from core.exchange.binance_client import BinanceFuturesAdapter
@@ -890,7 +891,7 @@ class ProductionTradingBot:
             try:
                 for sym in self.symbols:
                     try:
-                        klines = await self.binance.get_klines(sym, interval="1h", limit=50)
+                        klines = await fetch_klines(sym, "1h", 50)  # market-data venue (mainnet), same as the brain inputs
                         if klines and len(klines) >= 20:
                             closes = np.array([float(k[4]) for k in klines])
                             highs = np.array([float(k[2]) for k in klines])

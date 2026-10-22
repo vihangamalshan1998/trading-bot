@@ -27,10 +27,12 @@ class Settings(BaseSettings):
     binance_api_key: str = Field(default="")
     binance_api_secret: str = Field(default="")
     binance_testnet: bool = Field(default=True)
-    # Market data (features, prices for stops) comes from the venue the bot trades on by default so
-    # position PnL and exits use the same prices as the fills. Set True to read mainnet data while
-    # trading testnet (more realistic order book, but prices can differ slightly from testnet fills).
-    market_data_mainnet: bool = Field(default=False)
+    # Market data (brain inputs, prices for stops, reward grading, screener volume) comes from the REAL
+    # Binance market even while orders go to testnet. Testnet is a thin, partly synthetic market
+    # (measured 2026-10-22: BTC 1m returns only 0.26 correlated with mainnet, 24h volume 7x inflated), so a
+    # brain trained on it would not transfer to real money, and the public history archive used for
+    # replayed training data is mainnet only. Testnet fills sit ~0.03% from mainnet prices.
+    market_data_mainnet: bool = Field(default=True)
 
     # ============================================================
     # Phase 1 SAFETY GATES

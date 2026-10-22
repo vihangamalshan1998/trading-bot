@@ -118,15 +118,25 @@ async def _get_json(session: aiohttp.ClientSession, url: str, params: Dict = Non
         return await resp.json()
 
 
-async def fetch_1m_klines(symbol: str, limit: int = 1000) -> List[list]:
+async def fetch_klines(symbol: str, interval: str, limit: int) -> List[list]:
+    """Klines from the market-data venue (no API key: the testnet trading key is not valid on mainnet)."""
     try:
         async with aiohttp.ClientSession() as session:
             data = await _get_json(session, f"{market_data_rest_url()}/fapi/v1/klines",
-                                   {"symbol": symbol, "interval": "1m", "limit": limit})
+                                   {"symbol": symbol, "interval": interval, "limit": limit})
             return data or []
     except Exception as e:
-        logger.warning(f"[{symbol}] Could not pre-load 1m klines: {e}")
+        logger.warning(f"[{symbol}] Could not fetch {interval} klines: {e}")
         return []
+
+
+async def fetch_1m_klines(symbol: str, limit: int = 1000) -> List[list]:
+    return await fetch_klines(symbol, "1m", limit)
+
+
+async def fetch_24hr_tickers() -> List[dict]:
+    async with aiohttp.ClientSession() as session:
+        return await _get_json(session, f"{market_data_rest_url()}/fapi/v1/ticker/24hr") or []
 
 
 async def seed_engines(engines: Dict[str, object]):

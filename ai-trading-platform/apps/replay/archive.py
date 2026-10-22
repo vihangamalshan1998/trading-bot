@@ -156,22 +156,32 @@ def _day_ms(day: date) -> Tuple[int, int]:
     return start, min(start + 86400_000, int(time.time() * 1000))
 
 
+PARTIAL_CACHE_SECONDS = 1800
+
+
 def _rest_cached(name: str, day: date, fetch):
-    """Caches REST results of COMPLETE days only (a partial day is fetched again next time)."""
-    path = os.path.join(REST_CACHE_DIR, f"{name}-{day.isoformat()}.npz")
-    if os.path.exists(path):
+    """
+    Caches REST results. A complete day is kept for good; a partial (still running) day is reused for
+    PARTIAL_CACHE_SECONDS, so one validation run fetches it once and later runs see the newer data.
+    """
+    complete = time.time() * 1000 > _day_ms(day)[0] + 86400_000 + 600_000
+    path = os.path.join(REST_CACHE_DIR, f"{name}-{day.isoformat()}{'' if complete else '-partial'}.npz")
+    if os.path.exists(path) and (complete or time.time() - os.path.getmtime(path) < PARTIAL_CACHE_SECONDS):
         with np.load(path) as z:
             return {k: z[k] for k in z.files}
     out = fetch()
-    complete = _day_ms(day)[1] - _day_ms(day)[0] == 86400_000 and time.time() * 1000 > _day_ms(day)[0] + 86400_000 + 600_000
-    if out is not None and complete:
+    if out is not None:
         os.makedirs(REST_CACHE_DIR, exist_ok=True)
-        np.savez_compressed(path, **out)
+        tmp = path + ".tmp.npz"
+        np.savez_compressed(tmp, **out)
+        os.replace(tmp, path)
     return out
 
 
-def _rest_agg_trades(symbol: str, day: date) -> Optional[Dict[str, np.ndarray]]:
+def _rest_agg_trades(symbol: str, day: date, since_ms: Optional[int] = None) -> Optional[Dict[str, np.ndarray]]:
     start, end = _day_ms(day)
+    if since_ms is not None:
+        start = max(start, int(since_ms))
     rows: List[dict] = []
     window_start = start
     while window_start < end:
@@ -242,12 +252,16 @@ def _rest_metrics(symbol: str, day: date) -> Optional[Dict[str, np.ndarray]]:
     return {k: v[order] for k, v in out.items()}
 
 
-def load_agg_trades(symbol: str, day: date) -> Optional[Dict[str, np.ndarray]]:
-    """{'t': epoch ms, 'p': price, 'q': qty, 'buyer_maker': bool} sorted by time."""
+def load_agg_trades(symbol: str, day: date, since_ms: Optional[int] = None) -> Optional[Dict[str, np.ndarray]]:
+    """
+    {'t': epoch ms, 'p': price, 'q': qty, 'buyer_maker': bool} sorted by time. `since_ms` only limits the
+    REST fallback (the replay needs just the last minutes of the previous day); archive files are read whole.
+    """
     path = download("aggTrades", symbol, day)
     if not path:
         if _rest_fallback_allowed(day):
-            return _rest_cached(f"aggTrades-{symbol}", day, lambda: _rest_agg_trades(symbol, day))
+            name = f"aggTrades-{symbol}" + (f"-from{int(since_ms)}" if since_ms is not None else "")
+            return _rest_cached(name, day, lambda: _rest_agg_trades(symbol, day, since_ms))
         return None
     df = _read_csv(path, ["id", "p", "q", "first", "last", "t", "m"])
     m = df["m"]

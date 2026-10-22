@@ -98,7 +98,8 @@ class SymbolDayReplay:
     def load(self) -> bool:
         sym, d = self.symbol, self.day
         prev = d - timedelta(days=1)
-        trades = _concat([archive.load_agg_trades(sym, prev), archive.load_agg_trades(sym, d)])
+        trades = _concat([archive.load_agg_trades(sym, prev, since_ms=(self.tick_start - 60) * 1000),
+                          archive.load_agg_trades(sym, d)])
         if trades is None or len(trades["t"]) == 0:
             return False
         lo = (self.tick_start - 1) * 1000

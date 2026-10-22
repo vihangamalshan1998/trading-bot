@@ -57,7 +57,16 @@ def compare(live_path: str, workers: int):
     print(f"{len(live)} live records, {len(symbols)} coins, days {days}")
 
     from concurrent.futures import ProcessPoolExecutor
+    from apps.replay import archive
+    from apps.replay.symbol_replay import SymbolDayReplay
+    from core.config.settings import settings
+    # every coin the bot ranks against (excluded coins too), not only the coins with records
+    symbols = sorted(set(symbols) | set(settings.symbol_universe))
     jobs = [(s, d) for d in days for s in symbols]
+    # Fetch once, one request at a time (Binance REST weight limit), before the parallel replay
+    for s, d in jobs:
+        SymbolDayReplay(s, d).load()
+        print(f"  data ready {s} {d}", flush=True)
     with ProcessPoolExecutor(max_workers=workers) as pool:
         for (s, d), path in zip(jobs, pool.map(_build, jobs)):
             print(f"  pass 1 {s} {d}: {'ok' if path else 'NO DATA'}")

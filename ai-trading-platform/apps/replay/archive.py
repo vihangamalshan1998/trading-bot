@@ -156,7 +156,7 @@ def _day_ms(day: date) -> Tuple[int, int]:
     return start, min(start + 86400_000, int(time.time() * 1000))
 
 
-PARTIAL_CACHE_SECONDS = 1800
+PARTIAL_CACHE_SECONDS = 3 * 3600
 
 
 def _rest_cached(name: str, day: date, fetch):

@@ -17,6 +17,7 @@ Those slots are listed in REPLAY_APPROX_SLOTS / REPLAY_MISSING_SLOTS (apps/repla
 import collections
 import os
 import time
+import zlib
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional
 
@@ -34,7 +35,15 @@ FAST_POLL, SLOW_POLL = 60, 300
 WHALE_WINDOW = 60
 WHALE_TRADE_CAP = 2_000_000.0
 FRAMES_DIR = os.path.join(archive.CACHE_DIR, "frames")
-FRAME_FILE_VERSION = 1
+FRAME_FILE_VERSION = 2  # 2: live tick rhythm + mid-price ticks
+
+# Mean seconds between the collector's publishes per coin (VPS, 2026-10-22, 5-minute sample)
+DEFAULT_TICK_GAP = 1.07
+LIVE_TICK_GAP: Dict[str, float] = {
+    "BTCUSDT": 1.015, "ETHUSDT": 1.012, "SOLUSDT": 1.019, "BNBUSDT": 1.057, "XRPUSDT": 1.021, "LINKUSDT": 1.053,
+    "ADAUSDT": 1.033, "AVAXUSDT": 1.06, "NEARUSDT": 1.033, "LTCUSDT": 1.065, "SUIUSDT": 1.03, "DOGEUSDT": 1.024,
+    "RENDERUSDT": 1.106, "1000PEPEUSDT": 1.035, "APTUSDT": 1.099, "TAOUSDT": 1.048, "WIFUSDT": 1.106, "INJUSDT": 1.038,
+}
 
 # Binance funding: interest 0.03% per day, premium clamp +-0.05% (per funding interval)
 DAILY_INTEREST = 0.0003
@@ -223,10 +232,12 @@ class SymbolDayReplay:
         engine.seed_bars([[r[0], r[1], r[2], r[3], r[4], r[5]] for r in seed if np.isfinite(r[1])], now=self.tick_start)
 
         tr = self.trades
-        seconds = np.arange(self.tick_start, self.day_end + 1, dtype=np.int64)
-        idx = np.searchsorted(tr["t"], seconds * 1000, side="right")  # trades with t <= s*1000
+        data_end = float(tr["t"][-1]) / 1000.0  # a partial (today's) day ends here: no frames past the data
+        ticks = tick_times(sym, self.day, float(self.tick_start), min(float(self.day_end), data_end))
+        idx = np.searchsorted(tr["t"], np.floor(ticks * 1000.0), side="right")  # trades up to each tick
         cum_q = np.concatenate([[0.0], np.cumsum(tr["q"])])
         cum_buy = np.concatenate([[0.0], np.cumsum(np.where(tr["buyer_maker"], 0.0, tr["q"]))])
+        tick_px = tick_prices(tr)
 
         # whale trades (USD >= threshold, capped) for the 60s flow window
         thresh = WHALE_THRESHOLDS.get(sym, DEFAULT_WHALE_THRESHOLD)["trade"]
@@ -240,7 +251,6 @@ class SymbolDayReplay:
         frames = np.zeros((len(grid), 90), dtype=np.float32)
         whale = np.zeros((len(grid), 2), dtype=np.float64)
         price_out = np.zeros(len(grid), dtype=np.float64)
-        frame_sec = np.floor(grid).astype(np.int64)
         fi = 0
 
         raw = {"mid_price": 0.0, "volume": 0.0, "buy_volume": 0.0, "trade_count": 0.0, "best_bid": 0.0,
@@ -249,15 +259,14 @@ class SymbolDayReplay:
                "price_change_24h": 0.0, "volume_24h": 0.0, "mark_price_premium": 0.0}
         oi_history = collections.deque()
         last_price = 0.0
-        data_end = int(tr["t"][-1] // 1000)  # a partial (today's) day ends here: no frames past the data
-        for n, s in enumerate(seconds):
-            s = int(s)
-            if s > data_end:
-                break
-            hi = idx[n]
-            lo = idx[n - 1] if n > 0 else int(np.searchsorted(tr["t"], (s - 1) * 1000, side="right"))
+        next_fast = next_slow = float(self.tick_start)
+        for n in range(len(ticks)):
+            t = float(ticks[n])
+            s = int(t)
+            hi = int(idx[n])
+            lo = int(idx[n - 1]) if n > 0 else int(np.searchsorted(tr["t"], (t - 1.0) * 1000.0, side="right"))
             if hi > 0:
-                last_price = float(tr["p"][hi - 1])
+                last_price = float(tick_px[hi - 1])
             if last_price <= 0:
                 continue
             raw["mid_price"] = last_price
@@ -273,27 +282,63 @@ class SymbolDayReplay:
             raw["funding_rate"] = self._estimated_funding(s)
             raw["next_funding_ms"] = float(self._funding_period(s)[1] * 1000)
 
-            since = s - self.tick_start
-            if since % FAST_POLL == 0:
+            if t >= next_fast:
+                next_fast += FAST_POLL
                 raw["open_interest"] = self._open_interest(s)
                 raw.update(self._depth(s))
                 oi_now = {"binance": raw["open_interest"] * mark} if raw["open_interest"] > 0 and np.isfinite(mark) else {}
-                raw.update(cross_exchange_features(raw["funding_rate"], [None, None], oi_history, oi_now, float(s)))
-            if since % SLOW_POLL == 0:
+                raw.update(cross_exchange_features(raw["funding_rate"], [None, None], oi_history, oi_now, t))
+            if t >= next_slow:
+                next_slow += SLOW_POLL
                 raw.update(self._slow_context(s, last_price))
 
-            engine.add_tick(raw, ts=float(s))
+            engine.add_tick(raw, ts=t)
 
-            while fi < len(grid) and frame_sec[fi] == s:
-                frames[fi] = engine.compute_features()
-                a = int(np.searchsorted(w_t, (s - WHALE_WINDOW) * 1000, side="right"))
-                b = int(np.searchsorted(w_t, s * 1000, side="right"))
-                whale[fi] = (min(1e7, w_buy[b] - w_buy[a]), min(1e7, w_sell[b] - w_sell[a]))
-                price_out[fi] = last_price
+            # frames between this tick and the next one see this tick's state
+            t_next = float(ticks[n + 1]) if n + 1 < len(ticks) else t + 1.0
+            while fi < len(grid) and grid[fi] < t_next:
+                if grid[fi] >= t:
+                    frames[fi] = engine.compute_features()
+                    a = int(np.searchsorted(w_t, (t - WHALE_WINDOW) * 1000, side="right"))
+                    b = int(np.searchsorted(w_t, t * 1000, side="right"))
+                    whale[fi] = (min(1e7, w_buy[b] - w_buy[a]), min(1e7, w_sell[b] - w_sell[a]))
+                    price_out[fi] = last_price
                 fi += 1
-        valid = np.zeros(len(grid), dtype=bool)
-        valid[:fi] = price_out[:fi] > 0
+        valid = price_out > 0
         return {"t": grid, "features": frames, "whale": whale, "price": price_out, "valid": valid}
+
+
+def tick_times(symbol: str, day: date, start: float, end: float) -> np.ndarray:
+    """
+    The collector publishes a coin when an event arrives at least 1.0 s after its previous publish, so
+    live ticks come every 1.0 s plus a wait (measured per coin on the VPS, LIVE_TICK_GAP). Reproduced with
+    an exponential wait around that mean, seeded per coin-day so a rerun gives the same ticks.
+    """
+    gap = LIVE_TICK_GAP.get(symbol, DEFAULT_TICK_GAP)
+    extra = max(1e-3, gap - 1.0)
+    rng = np.random.default_rng(zlib.crc32(f"{symbol}-{day.isoformat()}".encode()))
+    n = int((end - start) / 1.0) + 10
+    steps = 1.0 + rng.exponential(extra, n)
+    t = start + np.cumsum(steps)
+    return t[t <= end]
+
+
+def tick_prices(tr: Dict[str, np.ndarray]) -> np.ndarray:
+    """
+    Price the collector would hold after each trade. Live, most updates are order-book mids (bookTicker)
+    and some are trade prices; a taker BUY prints at the ask and a taker SELL at the bid. Without a book
+    archive, each trade is moved half the coin's typical spread toward the mid. The typical spread is the
+    median gap between consecutive buy and sell prints less than a second apart.
+    """
+    p = tr["p"]
+    is_buy = ~tr["buyer_maker"]
+    if len(p) < 3:
+        return p.copy()
+    switch = (is_buy[1:] != is_buy[:-1]) & (np.diff(tr["t"]) < 1000)
+    gaps = np.abs(np.diff(p))[switch]
+    gaps = gaps[gaps > 0]
+    half = float(np.median(gaps)) / 2.0 if len(gaps) else 0.0
+    return np.where(is_buy, p - half, p + half)
 
 
 def frame_path(symbol: str, day: date) -> str:

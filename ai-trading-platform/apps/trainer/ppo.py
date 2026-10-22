@@ -1057,6 +1057,21 @@ async def run_training_loop():
         except Exception as aff_e:
             logger.warning(f"Could not apply thermal settings: {aff_e}")
 
+        # Ask Windows to run this process in power-throttling (EcoQoS) mode: the scheduler keeps it at
+        # efficient clocks instead of turbo. Per-process only; the power plan is left untouched.
+        try:
+            import ctypes
+            class _PowerThrottlingState(ctypes.Structure):
+                _fields_ = [("Version", ctypes.c_ulong), ("ControlMask", ctypes.c_ulong), ("StateMask", ctypes.c_ulong)]
+            EXECUTION_SPEED = 0x1
+            state = _PowerThrottlingState(1, EXECUTION_SPEED, EXECUTION_SPEED)
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetProcessInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong]
+            if kernel32.SetProcessInformation(kernel32.GetCurrentProcess(), 4, ctypes.byref(state), ctypes.sizeof(state)):
+                logger.info("❄️ EcoQoS power throttling enabled for the trainer process.")
+        except Exception as eco_e:
+            logger.warning(f"Could not enable EcoQoS power throttling: {eco_e}")
+
         # PyTorch thread cap: strictly 1 worker thread (Zero thread-lock overhead, ~12.5% single-core load)
         safe_threads = 1
         torch.set_num_threads(safe_threads)
@@ -1067,14 +1082,22 @@ async def run_training_loop():
 
         limit = 5000
         epochs = 2  # Balanced PPO passes per batch (cuts continuous computation time)
-        sleep_time = 0.5 # 4.0s cooling breather after every step for complete heat dissipation
-        logger.info(f"❄️ MAXIMUM THERMAL PROTECTION: PyTorch capped at {safe_threads} thread, {epochs} epochs, with {sleep_time}s heatpipe breathers.")
+        sleep_time = 0.5 # Minimum cooling breather after every step
+        # Duty cycle: fraction of wall time spent computing. 0.4 = rest 1.5s for every 1s of training,
+        # which cuts average CPU power (and heat) regardless of how high the core boosts while working.
+        try:
+            duty_cycle = min(1.0, max(0.05, float(os.getenv("TRAINER_DUTY_CYCLE", "0.4"))))
+        except ValueError:
+            duty_cycle = 0.4
+        logger.info(f"❄️ MAXIMUM THERMAL PROTECTION: PyTorch capped at {safe_threads} thread, {epochs} epochs, "
+                    f"{duty_cycle:.0%} duty cycle (min {sleep_time}s breather).")
     else:
         logger.info("🐢 VPS MODE DETECTED: Running in STARVATION MODE (1 CPU Core, 300 RAM limit)")
         torch.set_num_threads(1)
         limit = 500
         epochs = 2
         sleep_time = 30.0
+        duty_cycle = 1.0
     
     # 1. AUTO-BACKUP: Save the current good brain before we risk overwriting it
     if local_mode:
@@ -1208,8 +1231,10 @@ async def run_training_loop():
     try:
         while True:
             # CPU FIX: Cut epochs to 2 to halve the math computation time.
+            work_start = time.perf_counter()
             success = trainer.train_step(batch_size=64, epochs=epochs)
-            
+            work_time = time.perf_counter() - work_start
+
             if not success:
                 # CRITICAL FIX: If train_step fails (usually because cache is empty),
                 # we MUST try to reload the cache from the DB. Otherwise, we hit an infinite sleep loop.
@@ -1218,9 +1243,10 @@ async def run_training_loop():
                 await asyncio.sleep(2.0)
                 continue
                 
-            # SAFETY BREATHER: 5 second rest to prevent host from suspending the server
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
+            # SAFETY BREATHER: rest proportional to the work just done (duty cycle), never less than sleep_time
+            rest = max(sleep_time, work_time * (1.0 - duty_cycle) / duty_cycle)
+            if rest > 0:
+                await asyncio.sleep(rest)
 
             step += 1
             trainer.step_count = step

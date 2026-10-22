@@ -2,6 +2,7 @@ import random
 import torch
 import numpy as np
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy import create_engine
 from typing import List, Dict, Any, Tuple
 from core.database.models.ai import Experience, TradeOutcome, GRADED_FLAG
@@ -12,6 +13,10 @@ from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, WHALE_IMBAL
 
 # Longest reward horizon (4h) + grading tolerance: gap kept between training rows and the holdout
 HOLDOUT_EMBARGO_SEC = 14400 + 1800
+
+# Rows fetched per query while loading the cache. Each row's market_state JSON is parsed into Python
+# floats (~32 bytes each) and compacted to float32 before the next chunk, so peak RAM stays small.
+LOAD_CHUNK_ROWS = 200
 
 class ReplayBuffer:
     """
@@ -108,11 +113,16 @@ class ReplayBuffer:
 
                 all_normal_ids = list(set(recent_ids + historical_ids))
 
-                if all_normal_ids:
-                    # INDEXED LOOKUP: Order by primary key id.desc() to avoid multi-gigabyte disk filesort!
-                    recent = session.query(Experience).filter(Experience.id.in_(all_normal_ids)).order_by(Experience.id.desc()).all()
-                else:
-                    recent = []
+                # INDEXED LOOKUP: Order by primary key id.desc() to avoid multi-gigabyte disk filesort!
+                # Fetched in chunks (newest ids first) and compacted to float32 as they arrive.
+                recent = []
+                ids_desc = sorted(all_normal_ids, reverse=True)
+                for i in range(0, len(ids_desc), LOAD_CHUNK_ROWS):
+                    rows = session.query(Experience).filter(
+                        Experience.id.in_(ids_desc[i:i + LOAD_CHUNK_ROWS])).order_by(Experience.id.desc()).all()
+                    for exp in rows:
+                        self._compact(exp)
+                    recent.extend(rows)
 
                 # Chronological train / holdout split: the newest slice of graded data is NEVER trained on.
                 # Candidate models are judged on it, so promotion reflects out-of-sample performance.
@@ -135,13 +145,17 @@ class ReplayBuffer:
                     )).fetchall()
                     golden_ids = [r[0] for r in golden_ids_query]
                     
-                    if golden_ids:
-                        format_strings = ','.join([':id_' + str(i) for i in range(len(golden_ids))])
+                    golden = []
+                    for c in range(0, len(golden_ids), LOAD_CHUNK_ROWS):
+                        chunk = golden_ids[c:c + LOAD_CHUNK_ROWS]
+                        format_strings = ','.join([':id_' + str(i) for i in range(len(chunk))])
                         query = text(f"SELECT * FROM golden_experiences WHERE id IN ({format_strings})")
-                        params = {f"id_{i}": golden_ids[i] for i in range(len(golden_ids))}
-                        self.golden_cache = session.query(Experience).from_statement(query).params(**params).all()
-                    else:
-                        self.golden_cache = []
+                        params = {f"id_{i}": chunk[i] for i in range(len(chunk))}
+                        rows = session.query(Experience).from_statement(query).params(**params).all()
+                        for exp in rows:
+                            self._compact(exp)
+                        golden.extend(rows)
+                    self.golden_cache = golden
                 except Exception:
                     self.golden_cache = []
                     
@@ -348,7 +362,31 @@ class ReplayBuffer:
             
         return f
 
+    def _compact(self, exp: Experience) -> None:
+        """
+        Replaces a cached row's market_state (list of 200-dim frames as Python floats, ~32 bytes per value)
+        with its normalized frames as one float32 array (4 bytes per value) in exp._frames. Normalization
+        runs in float64 exactly as before and the float32 cast is the same one build_tensors applied, so
+        the tensors fed to the model are unchanged. Rows in any other layout keep the original path.
+        """
+        ms = exp.market_state
+        if not (isinstance(ms, list) and ms and all(isinstance(f, list) and len(f) == 200 for f in ms)):
+            return
+        try:
+            exp._frames = np.array([self._normalize_frame(f) for f in ms], dtype=np.float32)
+        except (TypeError, ValueError):
+            return  # malformed values: leave the row to the original path
+        # Drop the Python lists without marking the row dirty (it is never written back).
+        set_committed_value(exp, "market_state", None)
+
     def _extract_sequence(self, exp: Experience, seq_len: int) -> List[List[float]]:
+        # Compacted row (see _compact): same padding rule as below, on the float32 array
+        frames = getattr(exp, "_frames", None)
+        if frames is not None:
+            if len(frames) < seq_len:
+                frames = np.concatenate([np.repeat(frames[:1], seq_len - len(frames), axis=0), frames])
+            return frames[-seq_len:]
+
         # If the market_state is already a 2D movie (list of lists)
         if exp.market_state and isinstance(exp.market_state, list) and len(exp.market_state) > 0 and isinstance(exp.market_state[0], list):
             seq = []
@@ -452,7 +490,8 @@ class ReplayBuffer:
         if not states:
             return torch.empty(0), torch.empty(0), torch.empty(0), torch.empty(0), torch.empty(0)
         try:
-            s = torch.tensor(states, dtype=torch.float32)
+            # Rows are float32 arrays (compacted) or lists of floats (legacy); both cast the same way.
+            s = torch.from_numpy(np.stack([np.asarray(x, dtype=np.float32) for x in states]))
             a = torch.tensor(actions, dtype=torch.float32)
             r = torch.tensor(rewards, dtype=torch.float32)
             d = torch.tensor(dones, dtype=torch.float32)

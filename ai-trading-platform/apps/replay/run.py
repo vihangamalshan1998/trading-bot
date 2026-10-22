@@ -18,7 +18,7 @@ record's 300 frames out of the coin-day files.
 """
 import argparse
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from datetime import date, timedelta
 from typing import List
 
@@ -31,6 +31,7 @@ from apps.replay import archive
 from apps.replay.assemble import record_index
 from apps.replay.states import REPLAY_OUTCOME_SRC, REPLAY_TABLE
 from apps.replay.symbol_replay import build_day
+from apps.replay.thermal import ThermalGuard
 
 DAYS_TABLE = "replay_record_days"
 INSERT_BATCH = 2000
@@ -86,13 +87,26 @@ def _build(job):
 
 
 def run_pass1(symbols: List[str], days: List[date], workers: int):
-    jobs = [(s, d) for d in days for s in symbols]
-    done = 0
+    """Coin-days in parallel; fewer at a time while the laptop runs hot (apps/replay/thermal.py)."""
+    jobs = iter([(s, d) for d in days for s in symbols])
+    total = len(symbols) * len(days)
+    guard = ThermalGuard(workers)
+    done, running = 0, set()
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        for s, d, path, secs, err in pool.map(_build, jobs):
-            done += 1
-            status = "ok" if path else ("FAILED " + err if err else "no data")
-            print(f"pass 1 [{done}/{len(jobs)}] {s} {d}: {status} ({secs:.0f}s)", flush=True)
+        while True:
+            while len(running) < guard.limit():
+                job = next(jobs, None)
+                if job is None:
+                    break
+                running.add(pool.submit(_build, job))
+            if not running:
+                break
+            finished, running = wait(running, timeout=5, return_when=FIRST_COMPLETED)
+            for f in finished:
+                s, d, path, secs, err = f.result()
+                done += 1
+                status = "ok" if path else ("FAILED " + err if err else "no data")
+                print(f"pass 1 [{done}/{total}] {s} {d}: {status} ({secs:.0f}s)", flush=True)
 
 
 def _days_table(engine):

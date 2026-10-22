@@ -60,3 +60,32 @@ def test_finalize_matches_the_bot_torch_safety_net():
     obs[3], obs[7], obs[11] = float("nan"), float("inf"), float("-inf")
     ref = torch.nan_to_num(torch.tensor(obs, dtype=torch.float32), nan=0.0, posinf=5.0, neginf=-5.0).clamp_(-5.0, 5.0)
     assert np.array_equal(sb.finalize(obs), ref.numpy())
+
+
+def test_batch_builders_match_the_per_frame_builders():
+    """The history replay builds whole days with the batch versions; they must equal the live per-frame code."""
+    rng = np.random.default_rng(3)
+    coins, n = 6, 40
+    feats = (rng.normal(0, 1, (coins, n, 90)) * rng.choice([1e-4, 1e-2, 1.0, 1e5], (coins, n, 90))).astype(np.float32)
+    feats[:, :5, 3] = 0.001  # ties in the ranks
+    valid = rng.random((coins, n)) > 0.25
+    valid[:, :3] = False     # frames with fewer than 4 fresh coins
+    times = 1792454400 + np.arange(n) * 5.3 + 3600 * 13.7
+    macro = types.SimpleNamespace(sentiment_score=0.1, volatility_expectation=0.5, regime=1.0, sp500_momentum=0.01,
+                                  dxy_momentum=-0.01, fear_greed_index=0.4, vix_momentum=0.02, gold_momentum=0.0,
+                                  treasury_yield_momentum=0.0, ndx_momentum=0.03, defi_tvl_momentum=0.0)
+    buy, sell = rng.random((coins, n)) * 1e6, rng.random((coins, n)) * 1e6
+    buy[0, :10] = sell[0, :10] = 0.0
+    cross = sb.cross_section_block_batch(feats, valid)
+    btc = np.where(valid[0][:, None], feats[0], 0.0)
+    for c in range(coins):
+        batch = np.concatenate([sb.market_block_batch(feats[c]), sb.macro_block_batch(times, feats[c], btc, macro),
+                                sb.whale_statarb_block_batch(buy[c], sell[c]), cross[c]], axis=1)
+        for k in range(n):
+            if not valid[c, k]:
+                continue
+            fresh = {i: feats[i, k] for i in range(coins) if valid[i, k]}
+            ref = (sb.market_block(feats[c, k]) + sb.macro_block(time.gmtime(times[k]), feats[c, k], fresh.get(0), macro)
+                   + sb.whale_statarb_block({"whale_buy_pressure": buy[c, k], "whale_sell_pressure": sell[c, k]}, {})
+                   + sb.cross_section_block(c, fresh))
+            assert np.allclose(np.asarray(ref, dtype=np.float32), batch[k].astype(np.float32), rtol=1e-6, atol=1e-7), (c, k)

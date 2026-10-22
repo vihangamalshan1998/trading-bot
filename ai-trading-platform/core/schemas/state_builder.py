@@ -150,3 +150,91 @@ def finalize(obs: Sequence[float]) -> np.ndarray:
 def round_frame(frame: Sequence[float]) -> List[float]:
     """Storage rounding of experience records (6 significant digits, see the bot's _emit_market_snapshot)."""
     return [float(f"{float(v):.6g}") for v in frame]
+
+
+# ----------------------------------------------------------------------------------------------------
+# Batch versions for the history replay (a whole day of frames at once). They must give the same values
+# as the per-frame builders above (tests/test_state_builder.py compares them on random data).
+# ----------------------------------------------------------------------------------------------------
+_LOG_IDX = np.array(MARKET_LOG_VOLUME_FEATURES, dtype=np.int64)
+_DEP_IDX = np.array(MARKET_DEPRECATED_FEATURES, dtype=np.int64)
+
+
+def market_block_batch(features: np.ndarray) -> np.ndarray:
+    """(n, 90) FeatureEngine outputs -> (n, 90) transformed slots (same as market_block per row)."""
+    f = features.astype(np.float64)
+    out = np.clip(f, -5.0, 5.0)
+    v = f[:, _LOG_IDX]
+    out[:, _LOG_IDX] = np.clip(np.sign(v) * (np.log1p(np.abs(v)) / 10.0), -5.0, 5.0)
+    out[:, MARKET_SPREAD_FEATURE] = np.clip(f[:, MARKET_SPREAD_FEATURE] / 100.0, 0.0, 5.0)
+    out[:, _DEP_IDX] = 0.0
+    return out
+
+
+def macro_block_batch(times_utc: np.ndarray, sym_features: np.ndarray, btc_features: Optional[np.ndarray],
+                      macro) -> np.ndarray:
+    """(n,) epoch seconds (the VPS clock is UTC) -> (n, 20), same as macro_block per row."""
+    t = np.floor(times_utc).astype(np.int64)
+    minute_of_day = (t // 60) % 1440
+    day_w = (t // 86400 + 3) % 7  # 1970-01-01 was a Thursday; tm_wday counts Monday = 0
+    n = len(t)
+    out = np.zeros((n, 20), dtype=np.float64)
+    out[:, 0] = np.sin(2 * np.pi * minute_of_day / 1440.0)
+    out[:, 1] = np.cos(2 * np.pi * minute_of_day / 1440.0)
+    out[:, 2] = np.sin(2 * np.pi * day_w / 7.0)
+    out[:, 3] = np.cos(2 * np.pi * day_w / 7.0)
+    if btc_features is not None:
+        btc1, btc15 = btc_features[:, 2].astype(np.float64), btc_features[:, 4].astype(np.float64)
+    else:
+        btc1 = btc15 = np.zeros(n)
+    sym1 = sym_features[:, 2].astype(np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        beta = np.where(np.abs(btc1) > 1e-6, sym1 / btc1, 0.0)
+    out[:, 4] = np.clip(beta, -5.0, 5.0)
+    out[:, 6:9] = [macro.sentiment_score, macro.volatility_expectation, macro.regime]
+    out[:, 9], out[:, 10] = btc1, btc15
+    out[:, 11:19] = [macro.sp500_momentum, macro.dxy_momentum, macro.fear_greed_index, macro.vix_momentum,
+                     macro.gold_momentum, macro.treasury_yield_momentum, macro.ndx_momentum, macro.defi_tvl_momentum]
+    return out
+
+
+def whale_statarb_block_batch(whale_buy: np.ndarray, whale_sell: np.ndarray) -> np.ndarray:
+    """(n,) 60s whale buy / sell USD -> (n, 20), same as whale_statarb_block with no statarb data."""
+    buy, sell = whale_buy.astype(np.float64), whale_sell.astype(np.float64)
+    total = buy + sell
+    out = np.zeros((len(buy), 20), dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out[:, 2] = np.where(total > 0, (buy - sell) / (total + 1e-5), 0.0)
+    out[:, 3] = np.clip(np.log1p(total) / 16.0, 0.0, 1.0)
+    return out
+
+
+def cross_section_block_batch(features: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """
+    (coins, n, 90) features and (coins, n) fresh-data flags -> (coins, n, 10), same as cross_section_block
+    for every coin and frame (zeros where the coin is not fresh or fewer than 4 coins are).
+    """
+    cols = features[:, :, [3, 4, 5, 6, 80]].astype(np.float64)        # (c, n, 5): r5, r15, r30, r24, funding
+    v = valid.astype(np.float64)                                       # (c, n)
+    cnt = v.sum(axis=0)                                                # (n,)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean = (cols * v[:, :, None]).sum(axis=0) / cnt[:, None]       # (n, 5)
+    out = np.zeros(features.shape[:2] + (10,), dtype=np.float64)
+    out[:, :, 0:4] = cols[:, :, 0:4] - mean[None, :, 0:4]
+    # percentile rank among fresh coins: (below + (equal - 1) / 2) / (count - 1) mapped to [-1, 1]
+    for j, c in ((4, 1), (5, 2), (6, 3), (7, 4)):
+        x = cols[:, :, c]                                              # (c, n)
+        below = ((x[None, :, :] < x[:, None, :]) * v[None, :, :]).sum(axis=1)
+        equal = ((x[None, :, :] == x[:, None, :]) * v[None, :, :]).sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out[:, :, j] = 2.0 * (below + (equal - 1) / 2.0) / (cnt[None, :] - 1) - 1.0
+    out[:, :, 8] = mean[None, :, 1]
+    out[:, :, 9] = mean[None, :, 2]
+    ok = (valid & (cnt[None, :] >= 4))[:, :, None]
+    return np.where(ok, out, 0.0)
+
+
+def finalize_batch(obs: np.ndarray) -> np.ndarray:
+    """(n, 200) -> float32 with the same safety net as finalize()."""
+    arr = obs.astype(np.float32)
+    return np.clip(np.nan_to_num(arr, nan=0.0, posinf=5.0, neginf=-5.0), -5.0, 5.0).astype(np.float32)

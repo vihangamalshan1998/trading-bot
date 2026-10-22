@@ -64,21 +64,29 @@ def day_frames(symbols: List[str], day: date, fear_greed: Dict[str, float]) -> D
         return {}
     grid = next(iter(p1.values()))["t"]
     macro = macro_at(day, fear_greed)
-    out = {s: {"t": grid, "state": np.zeros((len(grid), 200), dtype=np.float32), "valid": d["valid"].copy()}
-           for s, d in p1.items()}
-    for k in range(len(grid)):
-        fresh = {s: d["features"][k] for s, d in p1.items() if d["valid"][k]}
-        btc = fresh.get("BTCUSDT")
-        now = time.gmtime(float(grid[k]))  # the VPS runs on UTC: the bot's time.localtime()
-        for s, feats in fresh.items():
-            whale = {"whale_buy_pressure": float(p1[s]["whale"][k, 0]), "whale_sell_pressure": float(p1[s]["whale"][k, 1])}
-            obs = (FLAT_ACCOUNT + state_builder.market_block(feats)
-                   + state_builder.macro_block(now, feats, btc, macro)
-                   + state_builder.whale_statarb_block(whale, {})
-                   + state_builder.cross_section_block(s, fresh)
-                   + state_builder.global_block({})
-                   + [0.0] * 30)
-            out[s]["state"][k] = state_builder.finalize(obs)
+    coins = list(p1)
+    feats = np.stack([p1[s]["features"] for s in coins])            # (c, n, 90)
+    valid = np.stack([p1[s]["valid"] for s in coins])               # (c, n)
+    cross = state_builder.cross_section_block_batch(feats, valid)   # (c, n, 10)
+    btc = p1["BTCUSDT"]["features"] if "BTCUSDT" in p1 else None
+    if btc is not None:
+        # BTC momentum (and the beta to BTC) is 0 in frames where BTC has no data, as in the per-frame build
+        btc = np.where(p1["BTCUSDT"]["valid"][:, None], btc, 0.0)
+    n = len(grid)
+    flat = np.tile(np.asarray(FLAT_ACCOUNT, dtype=np.float64), (n, 1))
+    glob = np.tile(np.asarray(state_builder.global_block({}), dtype=np.float64), (n, 1))
+    out = {}
+    for ci, s in enumerate(coins):
+        obs = np.concatenate([
+            flat,
+            state_builder.market_block_batch(feats[ci]),
+            state_builder.macro_block_batch(grid, feats[ci], btc, macro),
+            state_builder.whale_statarb_block_batch(p1[s]["whale"][:, 0], p1[s]["whale"][:, 1]),
+            cross[ci],
+            glob,
+            np.zeros((n, 30)),
+        ], axis=1)
+        out[s] = {"t": grid, "state": state_builder.finalize_batch(obs), "valid": valid[ci].copy()}
     return out
 
 

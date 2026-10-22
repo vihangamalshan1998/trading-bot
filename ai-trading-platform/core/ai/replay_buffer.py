@@ -12,14 +12,17 @@ from core.config.settings import settings
 from core.ai.sumtree import SumTree
 from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT
 from apps.replay.layout import REPLAY_MISSING_SLOTS
+from apps.replay.states import REPLAY_OUTCOME_SRC, REPLAY_TABLE
 
 # Longest reward horizon (4h) + grading tolerance: gap kept between training rows and the holdout
 HOLDOUT_EMBARGO_SEC = 14400 + 1800
 
 # Records rebuilt from Binance's history archive (apps/replay) live in this table, graded like live ones.
 # They join the TRAINING pool only (never the holdout, which stays live data) and only in complete-inputs mode.
-REPLAY_TABLE = "replay_experiences"
+# Each row of REPLAY_TABLE indexes one record; its 300 frames are cut from coin-day files (apps/replay/states.py).
 DEFAULT_REPLAY_ROWS = 3000
+# Days of history drawn per reload: a different random set each time, so the files read per reload stay few
+REPLAY_DAYS_PER_LOAD = 20
 
 # Rows fetched per query while loading the cache. Each row's market_state JSON is parsed into Python
 # floats (~32 bytes each) and compacted to float32 before the next chunk, so peak RAM stays small.
@@ -194,30 +197,41 @@ class ReplayBuffer:
             logger.error(f"CRITICAL ERROR loading cache from DB: {e}\n{traceback.format_exc()}")
 
     def _load_replay_rows(self, session) -> List[Experience]:
-        """A fresh random sample of graded replayed rows (every reload sees a different part of the history)."""
+        """
+        A fresh random sample of graded replayed records from REPLAY_DAYS_PER_LOAD random days (each reload
+        sees a different part of the history). Rows are transient Experience objects (never written back).
+        """
         from core.logging.logger import logger
         from sqlalchemy.sql import text
+        from apps.replay.states import SequenceReader
         if self.replay_limit <= 0:
             return []
         try:
-            ids = [r[0] for r in session.execute(text(
-                f"SELECT id FROM {REPLAY_TABLE} WHERE data_quality_flags = '{GRADED_FLAG}' "
-                f"ORDER BY RAND() LIMIT {int(self.replay_limit)}")).fetchall()]
+            days = [r[0] for r in session.execute(text(
+                f"SELECT DISTINCT day FROM {REPLAY_TABLE} WHERE data_quality_flags = '{GRADED_FLAG}'")).fetchall()]
         except Exception:
             return []  # table not created yet (no replay run on this machine)
+        if not days:
+            return []
+        days = random.sample(days, min(REPLAY_DAYS_PER_LOAD, len(days)))
+        params = {f"d_{i}": d for i, d in enumerate(days)}
+        index = session.execute(text(
+            f"SELECT id, symbol, timestamp, day, frame_idx, reward_5m, reward_1h, reward_4h FROM {REPLAY_TABLE} "
+            f"WHERE data_quality_flags = '{GRADED_FLAG}' AND day IN ({','.join(':' + k for k in params)}) "
+            f"ORDER BY RAND() LIMIT {int(self.replay_limit)}"), params).fetchall()
+        reader = SequenceReader()
         rows = []
-        for c in range(0, len(ids), LOAD_CHUNK_ROWS):
-            chunk = ids[c:c + LOAD_CHUNK_ROWS]
-            params = {f"id_{i}": chunk[i] for i in range(len(chunk))}
-            query = text(f"SELECT * FROM {REPLAY_TABLE} WHERE id IN ({','.join(':' + k for k in params)})")
-            for exp in session.query(Experience).from_statement(query).params(**params).all():
-                exp._src = "replay"
-                self._compact(exp)
-                rows.append(exp)
-        # Rows of the replay table must never be written back into experiences
-        for exp in rows:
-            session.expunge(exp)
-        logger.info(f"Loaded {len(rows)} replayed history rows from {REPLAY_TABLE}.")
+        for r in sorted(index, key=lambda r: (r.symbol, r.day)):  # keeps each coin-day file loaded once
+            frames = reader.sequence(r.symbol, r.day, int(r.frame_idx))
+            if frames is None:
+                continue
+            exp = Experience(id=r.id, symbol=r.symbol, timestamp=r.timestamp, action="HOLD",
+                             reward_5m=r.reward_5m, reward_1h=r.reward_1h, reward_4h=r.reward_4h,
+                             data_quality_flags=GRADED_FLAG)
+            exp._src = "replay"
+            exp._frames = frames
+            rows.append(exp)
+        logger.info(f"Loaded {len(rows)} replayed history records from {len(days)} random days ({REPLAY_TABLE}).")
         return rows
 
     def _attach_outcomes(self, session) -> int:
@@ -228,7 +242,7 @@ class ReplayBuffer:
         """
         replayed = {id(e) for e in self.replay_cache}
         groups = {"exp": [e for e in self.cache if id(e) not in replayed] + self.holdout_cache,
-                  "gold": list(self.golden_cache), "replay": list(self.replay_cache)}
+                  "gold": list(self.golden_cache), REPLAY_OUTCOME_SRC: list(self.replay_cache)}
         labelled = 0
         for src, exps in groups.items():
             ids = [e.id for e in exps]

@@ -1,17 +1,16 @@
 """
 Pass 2 of the history replay: all coins' pass-1 frames -> full 200-slot frames (built by the live bot's
-own builders, core/schemas/state_builder.py) -> training records exactly like the bot's market snapshots.
+own builders, core/schemas/state_builder.py) -> coin-day frame files + one index row per training record
+(the same frames a live market snapshot stores).
 
 The cross-section block ranks each coin against all coins at the same frame, so every coin of a day is
 assembled together on the shared frame grid.
 """
-import collections
 import json
 import os
 import time
 import types
 import urllib.request
-import uuid
 import zlib
 from datetime import date, datetime, timezone
 from typing import Dict, Iterator, List, Optional
@@ -19,12 +18,12 @@ from typing import Dict, Iterator, List, Optional
 import numpy as np
 
 from core.schemas import state_builder
-from apps.replay import archive
+from apps.replay import archive, states
 from apps.replay.symbol_replay import load_day
 
-SEQ_LEN = 300
-RECORD_EVERY_SECONDS = 1800   # one record per coin every 30 min (records overlap 26 min of frames anyway)
-MODEL_VERSION = "replay_v1"
+SEQ_LEN = states.SEQ_LEN
+RECORD_EVERY_SECONDS = 600   # one record per coin every 10 min, like live (index rows are tiny)
+MODEL_VERSION = "replay_v2"
 FEAR_GREED_URL = "https://api.alternative.me/fng/?limit=0&format=json"
 
 # Flat account (slots 0-19 are never fed to the brain; kept like a live flat-account frame)
@@ -95,17 +94,18 @@ def _record_offset(symbol: str) -> int:
     return zlib.crc32(symbol.encode()) % RECORD_EVERY_SECONDS
 
 
-def records(symbols: List[str], days: List[date], log=print,
-            record_symbols: Optional[List[str]] = None) -> Iterator[dict]:
+def record_index(symbols: List[str], days: List[date], log=print,
+                 record_symbols: Optional[List[str]] = None, write_states: bool = True) -> Iterator[dict]:
     """
-    Yields experience rows (dicts for the experiences schema), oldest first, across consecutive days.
-    `symbols` are all coins the live bot holds market states for (they all count in the cross-section
-    ranks); records are written only for `record_symbols` (default: all), like the live bot skips
-    excluded_trading_symbols but still ranks against them.
+    Builds each day's 200-slot frames for all coins, saves them per coin-day (apps/replay/states.py) and
+    yields one index row per training record (replay_records), oldest first, across consecutive days.
+    A record is due every RECORD_EVERY_SECONDS per coin once it has SEQ_LEN unbroken frames behind it.
+    `symbols` are all coins the live bot ranks against; records only for `record_symbols` (default: all),
+    like the live bot skips excluded_trading_symbols but still ranks against them.
     """
     record_set = set(record_symbols or symbols)
     fear_greed = fear_greed_by_day()
-    history: Dict[str, collections.deque] = {s: collections.deque(maxlen=SEQ_LEN) for s in symbols}
+    run_len: Dict[str, int] = {}       # unbroken valid frames up to now, per coin
     last_t: Dict[str, float] = {}
     next_due: Dict[str, float] = {}
     for day in days:
@@ -115,20 +115,21 @@ def records(symbols: List[str], days: List[date], log=print,
         for s, d in frames.items():
             if s not in record_set:
                 continue
-            hist = history[s]
+            if write_states:
+                states.save_states(s, day, d["t"], d["state"], d["valid"])
             for k in range(len(d["t"])):
                 t = float(d["t"][k])
-                if not d["valid"][k] or (s in last_t and t - last_t[s] > 60):
-                    hist.clear()  # a gap in the data breaks the sequence
                 if not d["valid"][k]:
+                    run_len[s] = 0
                     continue
+                if s in last_t and t - last_t[s] > states.MAX_FRAME_GAP_SECONDS:
+                    run_len[s] = 0  # a gap in the data breaks the sequence
                 last_t[s] = t
-                hist.append(d["state"][k])
-                if len(hist) < SEQ_LEN:
+                run_len[s] = run_len.get(s, 0) + 1
+                if run_len[s] < SEQ_LEN:
                     continue
                 if s not in next_due:
-                    off = _record_offset(s)
-                    next_due[s] = (t // RECORD_EVERY_SECONDS) * RECORD_EVERY_SECONDS + off
+                    next_due[s] = (t // RECORD_EVERY_SECONDS) * RECORD_EVERY_SECONDS + _record_offset(s)
                     if next_due[s] < t:
                         next_due[s] += RECORD_EVERY_SECONDS
                 if t < next_due[s]:
@@ -136,19 +137,7 @@ def records(symbols: List[str], days: List[date], log=print,
                 while next_due[s] <= t:
                     next_due[s] += RECORD_EVERY_SECONDS
                 n += 1
-                yield {
-                    "experience_id": f"replay-{s}-{int(t)}-{uuid.uuid4().hex[:8]}",
-                    "timestamp": int(t),
-                    "symbol": s,
-                    "market_state": [state_builder.round_frame(f) for f in hist],
-                    "macro_state": None,
-                    "portfolio_state": {"source": "history_replay"},
-                    "derivatives_state": None,
-                    "position_before": 0.0, "position_after": 0.0, "entry_price": 0.0, "exit_price": None,
-                    "leverage": 0, "margin": 0.0, "fees": 0.0, "holding_duration": 0,
-                    "action": "HOLD", "action_probability": 0.5, "confidence": 0.5,
-                    "model_version": MODEL_VERSION,
-                    "reward": 0.0, "realized_pnl": 0.0, "unrealized_pnl": 0.0,
-                }
+                yield {"experience_id": f"replay-{s}-{int(t)}", "timestamp": int(t), "symbol": s,
+                       "day": day, "frame_idx": k, "action": "HOLD", "model_version": MODEL_VERSION}
         if log:
             log(f"assemble: {day} -> {n} records from {len(frames)} coins ({time.time() - t0:.0f}s)")

@@ -89,3 +89,38 @@ def test_open_interest_never_looks_ahead():
 def test_frame_grid_matches_the_live_cycle():
     g = frame_grid(date(2026, 10, 20))
     assert abs(g[1] - g[0] - FRAME_SECONDS) < 1e-6 and len(g) == int(86400 / FRAME_SECONDS) + 1
+
+
+def test_round_sig_matches_the_bot_storage_rounding():
+    from apps.replay.states import round_sig
+    from core.schemas.state_builder import round_frame
+    rng = np.random.default_rng(5)
+    vals = rng.normal(0, 1, 2000) * rng.choice([1e-7, 1e-3, 1.0, 37.0, 4.9], 2000)
+    vals[:5] = [0.0, 5.0, -5.0, 1e-12, 123456.789]
+    ours = round_sig(vals).astype(np.float32)
+    ref = np.asarray(round_frame(vals), dtype=np.float32)
+    assert np.allclose(ours, ref, rtol=2e-6, atol=0)
+
+
+def test_sequences_are_cut_across_midnight_and_refuse_gaps(tmp_path, monkeypatch):
+    from apps.replay import states
+    monkeypatch.setattr(states, "STATES_DIR", str(tmp_path))
+    d1, d2 = date(2026, 10, 19), date(2026, 10, 20)
+    n = 400
+    t1 = 1792368000 + np.arange(n) * 5.3
+    t2 = 1792454400 + np.arange(n) * 5.3
+    s1 = np.tile(np.arange(n, dtype=np.float32)[:, None], (1, 200))
+    s2 = s1 + 1000
+    states.save_states("BTCUSDT", d1, t1, s1, np.ones(n, bool))
+    # day 2 starts right after day 1 in this toy (consecutive frames)
+    t2 = t1[-1] + 5.3 * (1 + np.arange(n))
+    states.save_states("BTCUSDT", d2, t2, s2, np.ones(n, bool))
+    rd = states.SequenceReader()
+    seq = rd.sequence("BTCUSDT", d2, 49)                        # 50 frames of day 2 + 250 of day 1
+    assert seq.shape == (300, 200) and seq[0, 0] == 150 and seq[-1, 0] == 1049
+    assert rd.sequence("BTCUSDT", d2, 399)[0, 0] == 1100
+    bad = np.ones(n, bool); bad[10] = False
+    states.save_states("ETHUSDT", d2, t2, s2, bad)
+    assert states.SequenceReader().sequence("ETHUSDT", d2, 305) is None   # invalid frame inside the window
+    assert states.SequenceReader().sequence("ETHUSDT", d2, 399) is not None
+    assert states.SequenceReader().sequence("SOLUSDT", d2, 399) is None   # no file

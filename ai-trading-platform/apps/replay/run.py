@@ -8,29 +8,32 @@ downloaded files, replayed coin-days and finished days are kept; a day cut short
 
 1. downloads the archive files (cached),
 2. pass 1: per coin-day market features (parallel, cached),
-3. pass 2: assembles 200-slot frames for all coins and writes records to the `replay_experiences` table
-   (same schema as experiences; days already written are skipped),
+3. pass 2: assembles 200-slot frames for all coins, saves them per coin-day (apps/replay/states.py) and
+   writes one small index row per training record to the `replay_records` table,
 4. grades them with the live reward calculator (true market returns + path-aware trade outcomes,
-   src 'replay'), using the archive's own 1m klines as the price source.
+   src REPLAY_OUTCOME_SRC), using the archive's own 1m klines as the price source.
 
-Live records stay in `experiences`; the trainer reads replayed rows as a separate pool.
+Live records stay in `experiences`; the trainer reads replayed records as a separate pool, cutting each
+record's 300 frames out of the coin-day files.
 """
 import argparse
 import time
 from concurrent.futures import ProcessPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from typing import List
 
 import numpy as np
-from sqlalchemy import MetaData, Table, create_engine, insert, text
+from sqlalchemy import (BigInteger, Column, Date, Float, Integer, MetaData, String, Table, create_engine,
+                        insert, text)
 
 from core.config.settings import settings
 from apps.replay import archive
-from apps.replay.assemble import records
+from apps.replay.assemble import record_index
+from apps.replay.states import REPLAY_OUTCOME_SRC, REPLAY_TABLE
 from apps.replay.symbol_replay import build_day
 
-REPLAY_TABLE = "replay_experiences"
-INSERT_BATCH = 50
+DAYS_TABLE = "replay_record_days"
+INSERT_BATCH = 2000
 
 
 def replay_engine():
@@ -54,9 +57,23 @@ def replay_engine():
 
 
 def replay_table(engine) -> Table:
-    with engine.begin() as c:
-        c.execute(text(f"CREATE TABLE IF NOT EXISTS {REPLAY_TABLE} LIKE experiences"))
-    return Table(REPLAY_TABLE, MetaData(), autoload_with=engine)
+    """One row per replayed training record: where its frames are, and the grades (columns named as in
+    experiences, so the live reward calculator grades it unchanged)."""
+    table = Table(
+        REPLAY_TABLE, MetaData(),
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("experience_id", String(64), unique=True),
+        Column("timestamp", BigInteger, index=True),
+        Column("symbol", String(20), index=True),
+        Column("day", Date, index=True),
+        Column("frame_idx", Integer),
+        Column("action", String(20)),
+        Column("model_version", String(50)),
+        Column("reward_5m", Float), Column("reward_1h", Float), Column("reward_4h", Float),
+        Column("data_quality_flags", String(200), index=True),
+    )
+    table.create(engine, checkfirst=True)
+    return table
 
 
 def _build(job):
@@ -78,9 +95,6 @@ def run_pass1(symbols: List[str], days: List[date], workers: int):
             print(f"pass 1 [{done}/{len(jobs)}] {s} {d}: {status} ({secs:.0f}s)", flush=True)
 
 
-DAYS_TABLE = "replay_days"
-
-
 def _days_table(engine):
     with engine.begin() as c:
         c.execute(text(f"CREATE TABLE IF NOT EXISTS {DAYS_TABLE} (day DATE PRIMARY KEY, records INT NOT NULL, "
@@ -89,9 +103,9 @@ def _days_table(engine):
 
 def write_records(engine, table: Table, symbols: List[str], days: List[date], record_symbols: List[str]):
     """
-    Assembles and inserts records day by day. A day counts as written only once ALL its records are in
-    (replay_days). A day cut short by a crash or power cut is cleared and written again on the next run;
-    finished days are skipped (their frames are still assembled so sequences continue across midnight).
+    Assembles each day, saves its frames and inserts its index rows. A day counts as written only once ALL
+    its rows are in (DAYS_TABLE). A day cut short by a crash or power cut is cleared and written again on the
+    next run; finished days are skipped (their frames are still assembled so sequences continue across midnight).
     """
     _days_table(engine)
     with engine.connect() as c:
@@ -99,9 +113,8 @@ def write_records(engine, table: Table, symbols: List[str], days: List[date], re
     for d in days:
         if d in done:
             continue
-        lo = int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
         with engine.begin() as c:
-            n = c.execute(table.delete().where(table.c.timestamp >= lo, table.c.timestamp < lo + 86400)).rowcount
+            n = c.execute(table.delete().where(table.c.day == d)).rowcount
         if n:
             print(f"{d}: removed {n} records of an unfinished earlier run", flush=True)
 
@@ -124,8 +137,8 @@ def write_records(engine, table: Table, symbols: List[str], days: List[date], re
                       {"d": d, "n": count, "t": int(time.time())})
         print(f"{d}: {count} records saved (day complete)", flush=True)
 
-    for rec in records(symbols, days, log=lambda m: print(m, flush=True), record_symbols=record_symbols):
-        d = datetime.fromtimestamp(rec["timestamp"], timezone.utc).date()
+    for rec in record_index(symbols, days, log=lambda m: print(m, flush=True), record_symbols=record_symbols):
+        d = rec["day"]
         if d != current:
             if current is not None and current not in done:
                 finish(current, day_count)
@@ -160,7 +173,7 @@ def grade(engine, table: Table, symbols: List[str], days: List[date]):
     calc.prices.prune = lambda keep_after_ms: None  # keep the preloaded history
     n = calc.grade_all(table=table)
     print(f"graded {n} replay records", flush=True)
-    n = calc.outcomes_all(table=table, src="replay")
+    n = calc.outcomes_all(table=table, src=REPLAY_OUTCOME_SRC)
     print(f"trade outcomes for {n} replay records", flush=True)
 
 

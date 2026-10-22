@@ -123,11 +123,14 @@ class FeatureEngine:
         bar[4] = price
         bar[5] += vol
 
-    def seed_bars(self, klines: List[list]):
-        """Pre-loads closed 1m bars from exchange klines ([openTime ms, open, high, low, close, volume, ...])."""
+    def seed_bars(self, klines: List[list], now: Optional[float] = None):
+        """
+        Pre-loads closed 1m bars from exchange klines ([openTime ms, open, high, low, close, volume, ...]).
+        `now` (epoch s) is the current time; the history replay passes the replayed clock.
+        """
         if self.bars:
             return
-        current_minute = int(time.time() // 60)
+        current_minute = int((time.time() if now is None else now) // 60)
         for k in klines:
             minute = int(k[0]) // 60000
             if minute >= current_minute:

@@ -1,3 +1,4 @@
+import os
 import random
 import torch
 import numpy as np
@@ -10,9 +11,15 @@ from core.risk import exit_policy
 from core.config.settings import settings
 from core.ai.sumtree import SumTree
 from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT
+from apps.replay.layout import REPLAY_MISSING_SLOTS
 
 # Longest reward horizon (4h) + grading tolerance: gap kept between training rows and the holdout
 HOLDOUT_EMBARGO_SEC = 14400 + 1800
+
+# Records rebuilt from Binance's history archive (apps/replay) live in this table, graded like live ones.
+# They join the TRAINING pool only (never the holdout, which stays live data) and only in complete-inputs mode.
+REPLAY_TABLE = "replay_experiences"
+DEFAULT_REPLAY_ROWS = 3000
 
 # Rows fetched per query while loading the cache. Each row's market_state JSON is parsed into Python
 # floats (~32 bytes each) and compacted to float32 before the next chunk, so peak RAM stays small.
@@ -32,6 +39,15 @@ class ReplayBuffer:
         # Only load records saved from this time on (epoch s); set once the brain uses the inputs that
         # older records store as 0 (state_layout.FULL_INPUTS_SINCE). 0 = all records.
         self.min_timestamp = 0.0
+        # Replayed rows held in RAM next to the live ones (env REPLAY_ROWS; 0 = off)
+        try:
+            self.replay_limit = max(0, int(os.getenv("REPLAY_ROWS", str(DEFAULT_REPLAY_ROWS))))
+        except ValueError:
+            self.replay_limit = DEFAULT_REPLAY_ROWS
+        self.replay_cache: List[Experience] = []
+        # Values written into the slots a replayed row cannot know (REPLAY_MISSING_SLOTS): the model's fitted
+        # per-slot mean, so they standardize to 0 (neutral). None = NaN (feature-stat fitting skips them).
+        self.impute_values = None
         self.engine = create_engine(settings.database_url)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         
@@ -158,19 +174,51 @@ class ReplayBuffer:
                     self.golden_cache = golden
                 except Exception:
                     self.golden_cache = []
-                    
+
+                self.replay_cache = self._load_replay_rows(session) if self.min_timestamp > 0 else []
+                if self.replay_cache:
+                    # Replayed history is older than every live row: in front, so "recent" sampling stays live
+                    self.cache = sorted(self.replay_cache, key=lambda e: e.timestamp or 0) + self.cache
+
                 n_labelled = self._attach_outcomes(session)
 
             # Rebuild SumTree from new cache so priorities are fresh
             if self.capacity > 0 and len(self.cache) > 0:
                 self.sumtree.rebuild_from_list(self.cache, alpha=0.6)
                 
-            logger.info(f"✅ Replay buffer cache loaded successfully ({len(self.cache)} train, {len(self.holdout_cache)} holdout, {len(self.golden_cache)} golden in RAM, {n_labelled} with real trade outcomes)!")
+            logger.info(f"✅ Replay buffer cache loaded successfully ({len(self.cache)} train incl. {len(self.replay_cache)} replayed history, {len(self.holdout_cache)} holdout, {len(self.golden_cache)} golden in RAM, {n_labelled} with real trade outcomes)!")
                 
         except Exception as e:
             from core.logging.logger import logger
             import traceback
             logger.error(f"CRITICAL ERROR loading cache from DB: {e}\n{traceback.format_exc()}")
+
+    def _load_replay_rows(self, session) -> List[Experience]:
+        """A fresh random sample of graded replayed rows (every reload sees a different part of the history)."""
+        from core.logging.logger import logger
+        from sqlalchemy.sql import text
+        if self.replay_limit <= 0:
+            return []
+        try:
+            ids = [r[0] for r in session.execute(text(
+                f"SELECT id FROM {REPLAY_TABLE} WHERE data_quality_flags = '{GRADED_FLAG}' "
+                f"ORDER BY RAND() LIMIT {int(self.replay_limit)}")).fetchall()]
+        except Exception:
+            return []  # table not created yet (no replay run on this machine)
+        rows = []
+        for c in range(0, len(ids), LOAD_CHUNK_ROWS):
+            chunk = ids[c:c + LOAD_CHUNK_ROWS]
+            params = {f"id_{i}": chunk[i] for i in range(len(chunk))}
+            query = text(f"SELECT * FROM {REPLAY_TABLE} WHERE id IN ({','.join(':' + k for k in params)})")
+            for exp in session.query(Experience).from_statement(query).params(**params).all():
+                exp._src = "replay"
+                self._compact(exp)
+                rows.append(exp)
+        # Rows of the replay table must never be written back into experiences
+        for exp in rows:
+            session.expunge(exp)
+        logger.info(f"Loaded {len(rows)} replayed history rows from {REPLAY_TABLE}.")
+        return rows
 
     def _attach_outcomes(self, session) -> int:
         """
@@ -178,7 +226,9 @@ class ReplayBuffer:
         cached experiences as `exp._trade_outcome = (long_pct, short_pct)`. Rows without one fall back
         to the blended market return in build_tensors().
         """
-        groups = {"exp": self.cache + self.holdout_cache, "gold": list(self.golden_cache)}
+        replayed = {id(e) for e in self.replay_cache}
+        groups = {"exp": [e for e in self.cache if id(e) not in replayed] + self.holdout_cache,
+                  "gold": list(self.golden_cache), "replay": list(self.replay_cache)}
         labelled = 0
         for src, exps in groups.items():
             ids = [e.id for e in exps]
@@ -268,23 +318,28 @@ class ReplayBuffer:
         
         # 6. Deduplication (Safety Net)
         # Ensure no overlapping experiences are accidentally fed
+        # Keyed by source table too: live, golden and replayed rows have overlapping ids
         unique_batch = []
         seen_ids = set()
         for exp in batch:
-            if exp.id not in seen_ids:
-                seen_ids.add(exp.id)
+            if self._row_key(exp) not in seen_ids:
+                seen_ids.add(self._row_key(exp))
                 unique_batch.append(exp)
                 
         # 7. Fill missing slots (if deduplication removed anything)
         missing = batch_size - len(unique_batch)
         if missing > 0 and len(self.cache) > 0:
-            fallback_pool = [e for e in self.cache if e.id not in seen_ids]
+            fallback_pool = [e for e in self.cache if self._row_key(e) not in seen_ids]
             if len(fallback_pool) >= missing:
                 unique_batch.extend(random.sample(fallback_pool, missing))
             else:
                 unique_batch.extend(fallback_pool) # Add whatever is left
             
         return unique_batch
+
+    @staticmethod
+    def _row_key(exp) -> tuple:
+        return (getattr(exp, "_src", "exp"), exp.id)
 
     def count_graded_since(self, ts: float) -> int:
         """Number of trainable (graded) records saved at or after `ts` (epoch seconds)."""
@@ -457,6 +512,11 @@ class ReplayBuffer:
                 continue
 
             seq_states = self._extract_sequence(exp, seq_len)
+            if getattr(exp, "_src", None) == "replay":
+                # Inputs the history archive cannot provide: the model's mean (neutral), or NaN while fitting stats
+                seq_states = np.array(seq_states, dtype=np.float32, copy=True)
+                seq_states[:, list(REPLAY_MISSING_SLOTS)] = (np.nan if self.impute_values is None
+                                                             else np.asarray(self.impute_values, dtype=np.float32)[list(REPLAY_MISSING_SLOTS)])
 
             act = [0.0, 0.0, 0.0, 0.0]
             if exp.action in ("OPEN_LONG", "CLOSE_SHORT"): act[0] = 0.5

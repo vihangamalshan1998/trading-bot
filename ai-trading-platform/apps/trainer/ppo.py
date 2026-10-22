@@ -121,6 +121,9 @@ class PPOTrainer:
         self.actions_per_state = 4  # K fresh policy samples per replay state (leave-one-out baseline)
         self.buffer = ReplayBuffer()
         self.buffer.min_timestamp = float(min_timestamp)  # complete records only, once the brain uses them
+        if bool(getattr(self.model, "feat_fitted", False)):
+            # replayed rows get the model's mean in the inputs the history archive cannot provide
+            self.buffer.impute_values = self.model.feat_mean.detach().clone().numpy()
         self.rollout_buffer = RolloutBuffer()
         self.limit = limit
         
@@ -549,13 +552,16 @@ class PPOTrainer:
             return False
         import random as _random
         sample = _random.sample(pool, min(n_experiences, len(pool)))
+        # Replayed rows carry NaN in the inputs the history archive cannot provide: those slots are fitted on
+        # live rows only (NaN-aware statistics), every other slot on all rows.
+        self.buffer.impute_values = None
         states, _, _, _, _ = self.buffer.build_tensors(sample, seq_len=300)
         if len(states) == 0:
             return False
         frames = normalize_state_tensor(states).reshape(-1, STATE_DIM)
-        frames = frames[torch.isfinite(frames).all(dim=1)]
-        mean = frames.mean(dim=0)
-        std = frames.std(dim=0, unbiased=False)
+        frames = frames[~torch.isinf(frames).any(dim=1)]
+        mean = torch.nan_to_num(torch.nanmean(frames, dim=0), nan=0.0)
+        std = torch.nan_to_num(torch.sqrt(torch.nanmean((frames - mean) ** 2, dim=0)), nan=0.0)
         mask = torch.zeros(STATE_DIM)
         mask[list(ACTIVE_SLOTS)] = 1.0
         mask = mask * (std > 1e-6).float()
@@ -563,6 +569,7 @@ class PPOTrainer:
         if not full_inputs:
             mask[list(PENDING_INPUT_SLOTS)] = 0.0
         self.model.set_feature_stats(mean, std, mask)
+        self.buffer.impute_values = self.model.feat_mean.detach().clone().numpy()
         dead = [i for i in ACTIVE_SLOTS if std[i] <= 1e-6 and i not in BRAIN_EXCLUDED_SLOTS
                 and (full_inputs or i not in PENDING_INPUT_SLOTS)]
         logger.info(

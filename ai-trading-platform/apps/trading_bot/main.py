@@ -14,7 +14,8 @@ from typing import Dict, Any
 from core.db.redis import redis_manager
 from core.ai.registry import ModelRegistry
 from core.risk import exit_policy
-from core.schemas.state_layout import MARKET_LOG_VOLUME_FEATURES, MARKET_SPREAD_FEATURE, MARKET_DEPRECATED_FEATURES, CROSS_SECTION_DIM, GLOBAL_KEYS, ADDED_2026_10_SLOTS
+from core.schemas.state_layout import ADDED_2026_10_SLOTS
+from core.schemas import state_builder
 from apps.market_collector.global_context import GLOBAL_CONTEXT_KEY
 from apps.market_collector.context_poller import fetch_klines
 from apps.research.model import SingleSymbolActorCritic
@@ -949,34 +950,15 @@ class ProductionTradingBot:
         "will this coin beat the others", which survives market-wide crashes better than direction alone.
         """
         now = time.time()
-        fresh = {s: m for s, m in self.market_states.items()
+        fresh = {s: m.features for s, m in self.market_states.items()
                  if m is not None and len(m.features) == 90 and now - float(getattr(m, "timestamp", 0.0) or 0.0) < 120.0}
-        if symbol not in fresh or len(fresh) < 4:
-            return [0.0] * CROSS_SECTION_DIM
-
-        def col(i):
-            return {s: float(m.features[i]) for s, m in fresh.items()}
-
-        def rel(d):
-            return d[symbol] - sum(d.values()) / len(d)
-
-        def rank(d):
-            v = d[symbol]
-            below = sum(1 for x in d.values() if x < v)
-            equal = sum(1 for x in d.values() if x == v)
-            return 2.0 * (below + (equal - 1) / 2.0) / (len(d) - 1) - 1.0
-
-        r5, r15, r30, r24, fund = col(3), col(4), col(5), col(6), col(80)
-        return [rel(r5), rel(r15), rel(r30), rel(r24),
-                rank(r15), rank(r30), rank(r24), rank(fund),
-                sum(r15.values()) / len(r15), sum(r30.values()) / len(r30)]
+        return state_builder.cross_section_block(symbol, fresh)
 
     def _global_features(self) -> list:
         g = self.global_context or {}
         if time.time() - float(g.get("timestamp", 0.0) or 0.0) > 600.0:
             g = {}
-        vals = [float(g.get(k, 0.0) or 0.0) for k in GLOBAL_KEYS]
-        return vals + [0.0] * (10 - len(vals))
+        return state_builder.global_block(g)
 
     def _build_state_vector(self, symbol: str) -> tuple[torch.Tensor, list]:
         obs = []
@@ -1077,91 +1059,15 @@ class ProductionTradingBot:
             float(np.clip(pos.accumulated_funding, -1.0, 1.0))
         ])
         
-        # 3. Market Features (90 dims) from engine.py
-        if market and len(market.features) == 90:
-            cleaned_features = []
-            for idx, val in enumerate(market.features):
-                # Per-slot transforms come from core/schemas/state_layout.py (single source of truth)
-                if idx in MARKET_DEPRECATED_FEATURES:
-                    cleaned_features.append(0.0)
-                elif idx in MARKET_LOG_VOLUME_FEATURES:
-                    v_abs = abs(float(val))
-                    scaled_v = np.sign(float(val)) * (np.log1p(v_abs) / 10.0)
-                    cleaned_features.append(float(np.clip(scaled_v, -5.0, 5.0)))
-                elif idx == MARKET_SPREAD_FEATURE: # spread_bps (scale so 100 bps = 1.0)
-                    cleaned_features.append(float(np.clip(float(val) / 100.0, 0.0, 5.0)))
-                else:
-                    cleaned_features.append(float(np.clip(float(val), -5.0, 5.0)))
-            obs.extend(cleaned_features)
-        else:
-            obs.extend([0.0] * 90)
-            
-        # 4. Macro & Cross-Asset (20 dims)
-        current_hour = time.localtime().tm_hour
-        current_min = time.localtime().tm_min
-        minute_of_day = current_hour * 60 + current_min
-        time_sin = np.sin(2 * np.pi * minute_of_day / 1440.0)
-        time_cos = np.cos(2 * np.pi * minute_of_day / 1440.0)
-        
-        day_w = time.localtime().tm_wday
-        day_sin = np.sin(2 * np.pi * day_w / 7.0)
-        day_cos = np.cos(2 * np.pi * day_w / 7.0)
-        
+        # 3-6. Market, macro, whale / statarb, cross-section and global blocks: shared builders
+        # (core/schemas/state_builder.py), also used by the history replay so both build identical frames.
         btc_market = self.market_states.get("BTCUSDT")
-        btc_mom_1m = btc_market.features[2] if btc_market and len(btc_market.features) == 90 else 0.0
-        btc_mom_15m = btc_market.features[4] if btc_market and len(btc_market.features) == 90 else 0.0
-        
-        # Cross-Coin Beta (Relative Strength to BTC)
-        sym_mom_1m = market.features[2] if market and len(market.features) == 90 else 0.0
-        cross_coin_beta = sym_mom_1m / btc_mom_1m if abs(btc_mom_1m) > 1e-6 else 0.0
-        cross_coin_beta = float(np.clip(cross_coin_beta, -5.0, 5.0))
-        
-        macro_features = [
-            float(time_sin), float(time_cos), float(day_sin), float(day_cos), float(cross_coin_beta), 0.0,
-            float(self.macro_state.sentiment_score),
-            float(self.macro_state.volatility_expectation),
-            float(self.macro_state.regime),
-            btc_mom_1m, btc_mom_15m, 
-            float(self.macro_state.sp500_momentum), 
-            float(self.macro_state.dxy_momentum), 
-            float(self.macro_state.fear_greed_index),
-            float(self.macro_state.vix_momentum),
-            float(self.macro_state.gold_momentum),
-            float(self.macro_state.treasury_yield_momentum),
-            float(self.macro_state.ndx_momentum),
-            float(self.macro_state.defi_tvl_momentum), 
-            0.0
-        ]
+        sym_feats = market.features if market else None
+        btc_feats = btc_market.features if btc_market else None
+        obs.extend(state_builder.market_block(sym_feats))
+        macro_features = state_builder.macro_block(time.localtime(), sym_feats, btc_feats, self.macro_state)
         obs.extend(macro_features)
-        
-        # 5. Future-Proofing Canvas: Whale & StatArb Injection (70 dims)
-        whale = self.whale_states.get(symbol, {})
-        statarb = self.statarb_states.get(symbol, {})
-        
-        # Institutional Whale Order Flow Normalization:
-        # Prevent injecting raw 8-figure dollar values (e.g. $124M) into the LSTM neural network!
-        w_buy_raw = float(whale.get("whale_buy_pressure", 0.0))
-        w_sell_raw = float(whale.get("whale_sell_pressure", 0.0))
-        total_whale_vol = w_buy_raw + w_sell_raw
-        whale_imbalance = (w_buy_raw - w_sell_raw) / (total_whale_vol + 1e-5) if total_whale_vol > 0 else 0.0
-        whale_vol_norm = float(np.clip(np.log1p(total_whale_vol) / 16.0, 0.0, 1.0))
-        
-        obs.extend([
-            # Whale Tracking (Slots 130 - 139)
-            float(whale.get("buy_wall_distance", 0.0)),
-            float(whale.get("sell_wall_distance", 0.0)),
-            float(whale_imbalance), # Normalized [-1.0, 1.0] Order Flow Imbalance
-            float(whale_vol_norm),  # Normalized [0.0, 1.0] Log Volume
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            
-            # StatArb Tracking (Slots 140 - 149)
-            float(statarb.get("okx_premium", 0.0)),
-            float(statarb.get("bybit_premium", 0.0)),
-            float(statarb.get("okx_momentum_lead", 0.0)),
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        ])
-        
-        # 6. Cross-sectional ranking (150-159) and market-wide signals (160-169), core/schemas/state_layout.py
+        obs.extend(state_builder.whale_statarb_block(self.whale_states.get(symbol, {}), self.statarb_states.get(symbol, {})))
         obs.extend(self._cross_section_features(symbol))
         obs.extend(self._global_features())
 

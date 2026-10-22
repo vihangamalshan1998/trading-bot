@@ -173,3 +173,6 @@ cython_debug/
 
 # Backtest kline cache (re-downloadable)
 data/historical/klines_1m/
+
+# History replay archive cache (re-downloadable, many GB)
+data/replay_cache/

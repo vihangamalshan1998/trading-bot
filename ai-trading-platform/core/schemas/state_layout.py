@@ -158,7 +158,9 @@ BRAIN_EXCLUDED_SLOTS = tuple(range(0, 20))
 MACRO_PENDING_SLOTS = (117, 121, 122, 123, 124, 125, 126, 127)
 CORE_LATE_SLOTS = (26, 30, 31, 32, 33, 36, 37, 39, 56, 57, 58, 64, 65, 66, 67, 73, 74, 101, 102, 103, 105, 132)
 PENDING_INPUT_SLOTS = tuple(sorted(set(MACRO_PENDING_SLOTS + CORE_LATE_SLOTS + ADDED_2026_10_SLOTS)))
-FULL_INPUTS_SINCE = 1792558800  # 2026-10-21 05:00 UTC
+# Moved from 2026-10-21 05:00 to 2026-10-22 06:00 UTC: market data switched from testnet to real Binance at
+# 05:28 (settings.market_data_mainnet); records need a full 26-minute frame window of mainnet inputs.
+FULL_INPUTS_SINCE = 1792648800  # 2026-10-22 06:00 UTC
 MIN_FULL_INPUT_ROWS = 3000
 
 # FeatureEngine-relative indices (0..89) for the live bot's per-feature transforms

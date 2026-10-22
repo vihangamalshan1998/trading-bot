@@ -19,7 +19,7 @@ if exist "venv\Scripts\activate.bat" (
 set PYTHONPATH=%~dp0
 
 REM --days: how much history (ending 2 days ago). --workers: CPU cores used (lower = cooler laptop).
-python -m apps.replay.batch --days 60 --workers 4
+python -m apps.replay.batch --days 90 --workers 4
 
 echo.
 pause

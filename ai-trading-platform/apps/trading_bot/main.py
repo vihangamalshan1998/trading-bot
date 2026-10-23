@@ -2851,6 +2851,7 @@ class ProductionTradingBot:
                                         )
                                     elif "OPEN" in side:
                                         # Institutional Upgrade 4: Telegram Entry Alert
+                                        alert_lv = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
                                         asyncio.create_task(
                                             telegram_notifier.broadcast_alert(
                                                 "TRADE_ENTRY",
@@ -2863,8 +2864,9 @@ class ProductionTradingBot:
                                                     "leverage": settings.max_leverage,
                                                     "confidence": float(confidence),
                                                     "reason": "Institutional Alpha Signal",
-                                                    "stop_loss": order_exec_price * (0.9925 if "LONG" in side else 1.0075),
-                                                    "take_profit": order_exec_price * (1.0175 if "LONG" in side else 0.9825)
+                                                    # The trade's own volatility-based levels (exit_policy), not fixed 0.75% / 1.75%
+                                                    "stop_loss": order_exec_price * (1 - alert_lv.stop if "LONG" in side else 1 + alert_lv.stop),
+                                                    "take_profit": order_exec_price * (1 + alert_lv.tp1 if "LONG" in side else 1 - alert_lv.tp1)
                                                 }
                                             )
                                         )

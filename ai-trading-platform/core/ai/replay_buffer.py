@@ -16,6 +16,9 @@ from apps.replay.states import REPLAY_OUTCOME_SRC, REPLAY_TABLE
 
 # Longest reward horizon (4h) + grading tolerance: gap kept between training rows and the holdout
 HOLDOUT_EMBARGO_SEC = 14400 + 1800
+# Holdout = the newest 24h of live records, but never more than 60% of the loaded rows (training keeps the rest)
+HOLDOUT_SECONDS = 24 * 3600
+HOLDOUT_MAX_FRAC = 0.60
 
 # Records rebuilt from Binance's history archive (apps/replay) live in this table, graded like live ones.
 # They join the TRAINING pool only (never the holdout, which stays live data) and only in complete-inputs mode.
@@ -34,9 +37,8 @@ class ReplayBuffer:
     Provides intelligent sampling (recent, historical, rare) from MySQL.
     Uses RAM as a cache, NOT the source of truth.
     """
-    def __init__(self, capacity_cache: int = 1000, holdout_frac: float = 0.15):
+    def __init__(self, capacity_cache: int = 1000):
         self.capacity = capacity_cache
-        self.holdout_frac = holdout_frac
         self.holdout_cache: List[Experience] = []
         self.holdout_start_ts = float("inf")
         # Only load records saved from this time on (epoch s); set once the brain uses the inputs that
@@ -143,17 +145,8 @@ class ReplayBuffer:
                         self._compact(exp)
                     recent.extend(rows)
 
-                # Chronological train / holdout split: the newest slice of graded data is NEVER trained on.
-                # Candidate models are judged on it, so promotion reflects out-of-sample performance.
-                recent.sort(key=lambda e: e.timestamp or 0)
-                n_holdout = int(len(recent) * self.holdout_frac) if len(recent) >= 100 else 0
-                self.holdout_cache = recent[len(recent) - n_holdout:] if n_holdout else []
-                self.cache = recent[:len(recent) - n_holdout] if n_holdout else recent
+                self.cache, self.holdout_cache = self.split_holdout(recent)
                 self.holdout_start_ts = (self.holdout_cache[0].timestamp or 0) if self.holdout_cache else float("inf")
-                if self.holdout_cache:
-                    # Purge embargo: training rows whose 4h forward window overlaps the holdout would leak it.
-                    embargo_start = self.holdout_start_ts - HOLDOUT_EMBARGO_SEC
-                    self.cache = [e for e in self.cache if (e.timestamp or 0) < embargo_start]
 
                 # Golden Batch Integration (The 10% Permanent Memory)
                 try:
@@ -195,6 +188,27 @@ class ReplayBuffer:
             from core.logging.logger import logger
             import traceback
             logger.error(f"CRITICAL ERROR loading cache from DB: {e}\n{traceback.format_exc()}")
+
+    @staticmethod
+    def split_holdout(rows: List[Experience]) -> Tuple[List[Experience], List[Experience]]:
+        """
+        Chronological (train, holdout) split: the holdout is never trained on, and candidate models are judged
+        on it, so promotion reflects out-of-sample performance. It is the newest HOLDOUT_SECONDS of records, at
+        most HOLDOUT_MAX_FRAC of them (15% of the rows was only ~5 hours of market at 3,000 records, so one
+        afternoon decided every tournament). Training rows whose 4h forward window reaches into the holdout
+        are dropped (embargo).
+        """
+        rows = sorted(rows, key=lambda e: e.timestamp or 0)
+        if len(rows) < 100:
+            return rows, []
+        window_start = (rows[-1].timestamp or 0) - HOLDOUT_SECONDS
+        n_holdout = min(sum(1 for e in rows if (e.timestamp or 0) >= window_start), int(len(rows) * HOLDOUT_MAX_FRAC))
+        if n_holdout <= 0:
+            return rows, []
+        holdout = rows[len(rows) - n_holdout:]
+        embargo_start = (holdout[0].timestamp or 0) - HOLDOUT_EMBARGO_SEC
+        train = [e for e in rows[:len(rows) - n_holdout] if (e.timestamp or 0) < embargo_start]
+        return train, holdout
 
     def _load_replay_rows(self, session) -> List[Experience]:
         """

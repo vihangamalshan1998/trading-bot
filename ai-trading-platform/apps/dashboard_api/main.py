@@ -11,6 +11,7 @@ import uvicorn
 import asyncio
 from fastapi.responses import FileResponse
 from core.db.redis import redis_manager
+from core.risk.entry_status import entry_block
 
 # Cache the last 50 metrics in memory (only filled when a trainer publishes training:metrics)
 training_metrics = []
@@ -132,47 +133,6 @@ def _cached_experience_count() -> int:
     return _experience_count["value"]
 
 
-async def _entry_block():
-    """
-    Why the bot cannot open new trades right now, from the risk state it saves (apps/trading_bot/main.py
-    ENTRY_GUARD_KEY): {"reason", "until"} or None. The dashboard showed "Trading active" whenever the kill
-    switch was off, even while the daily loss limit blocked every entry for ~20 hours.
-    """
-    from core.config.settings import settings
-    from core.risk.risk_manager import DRAWDOWN_WINDOW_DAYS
-    now = time.time()
-    guard = await _redis_json("bot:entry_guard", {}) or {}
-    risk = guard.get("risk") or {}
-    portfolio = await _redis_json("dashboard:portfolio", {}) or {}
-    equity = float(portfolio.get("equity") or 0.0)
-    blocks = []
-    try:
-        pause = float((await redis_manager.redis.get("system:pause_until")) or 0.0) if redis_manager.redis else 0.0
-    except (TypeError, ValueError):
-        pause = 0.0
-    if pause > now:
-        blocks.append(("Paused (Telegram or loss-velocity airbag)", pause))
-    cb = float(risk.get("circuit_breaker_active_until") or 0.0)
-    if cb > now:
-        blocks.append(("Circuit breaker (5% daily loss)", cb))
-    day_high = float(risk.get("rm_daily_high") or 0.0)
-    if equity > 0 and day_high > 0 and (day_high - equity) / day_high >= settings.max_daily_loss_pct:
-        blocks.append((f"Daily loss limit ({settings.max_daily_loss_pct:.0%} below the day's high)",
-                       float(risk.get("rm_last_day_reset") or now) + 86400.0))
-    today = int(now // 86400)
-    highs = {int(d): float(v) for d, v in (risk.get("rm_equity_highs_by_day") or {}).items()
-             if int(d) > today - DRAWDOWN_WINDOW_DAYS}
-    if equity > 0 and highs:
-        peak_day = max(highs, key=highs.get)
-        if (highs[peak_day] - equity) / highs[peak_day] >= settings.max_drawdown_pct:
-            blocks.append((f"Drawdown limit ({settings.max_drawdown_pct:.0%} below the best of the last "
-                           f"{DRAWDOWN_WINDOW_DAYS} days)", (peak_day + DRAWDOWN_WINDOW_DAYS) * 86400.0))
-    if not blocks:
-        return None
-    reason, until = max(blocks, key=lambda b: b[1])  # the one that lasts longest
-    return {"reason": reason, "until": until, "all": [{"reason": r, "until": u} for r, u in blocks]}
-
-
 @app.get("/api/system_stats")
 async def get_system_stats_api():
     if not system_stats.get("latest_headlines") or system_stats.get("news_count", 0) == 0:
@@ -187,7 +147,7 @@ async def get_system_stats_api():
         "macro": macro,
         "global_context": await _redis_json(GLOBAL_CONTEXT_KEY, {}) or {},
         "kill_switch_active": str(kill).lower() == "true",
-        "entry_block": await _entry_block(),
+        "entry_block": await entry_block(redis_manager.redis),
     }
 
 

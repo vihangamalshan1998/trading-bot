@@ -124,3 +124,24 @@ def test_sequences_are_cut_across_midnight_and_refuse_gaps(tmp_path, monkeypatch
     assert states.SequenceReader().sequence("ETHUSDT", d2, 305) is None   # invalid frame inside the window
     assert states.SequenceReader().sequence("ETHUSDT", d2, 399) is not None
     assert states.SequenceReader().sequence("SOLUSDT", d2, 399) is None   # no file
+
+
+def test_holdout_is_the_newest_24h_capped_at_60_percent():
+    from types import SimpleNamespace
+    from core.ai.replay_buffer import ReplayBuffer, HOLDOUT_EMBARGO_SEC
+    t0 = 1_792_648_800
+    # 3 days at ~102 records / hour: the holdout is exactly the newest 24h
+    rows = [SimpleNamespace(timestamp=t0 + i * 35) for i in range(7400)]
+    train, holdout = ReplayBuffer.split_holdout(rows)
+    span = holdout[-1].timestamp - holdout[0].timestamp
+    assert 23.9 * 3600 <= span <= 24 * 3600
+    assert train and train[-1].timestamp < holdout[0].timestamp - HOLDOUT_EMBARGO_SEC
+    # 34 hours (the refit on 23 Oct): 24h would be 70% of the rows, so the 60% cap applies (~20h)
+    rows = rows[:3500]
+    train, holdout = ReplayBuffer.split_holdout(rows)
+    assert len(holdout) == int(3500 * 0.6) and train
+    # Little data: the 60% cap keeps training rows
+    few = [SimpleNamespace(timestamp=t0 + i * 600) for i in range(200)]
+    train, holdout = ReplayBuffer.split_holdout(few)
+    assert len(holdout) == 120 and len(train) > 0
+    assert ReplayBuffer.split_holdout(few[:50]) == (few[:50], [])

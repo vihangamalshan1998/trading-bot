@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Optional
 from core.config.settings import settings
 from core.logging.logger import logger, set_log_file
 from core.db.redis import redis_manager
+from core.risk.entry_status import entry_block
 from core.telemetry.telegram_service import telegram_notifier
 
 class TelegramCommandCenter:
@@ -111,8 +112,8 @@ class TelegramCommandCenter:
     # =========================================================================
     async def handle_status_command(self, chat_id: Optional[str] = None):
         """Generates real-time bot health & system status report."""
-        equity = 10000.0
-        free_margin = 10000.0
+        equity = 0.0
+        block = None
         positions = []
         is_paused = False
         pause_remaining = 0.0
@@ -134,28 +135,36 @@ class TelegramCommandCenter:
                         is_paused = True
                         pause_remaining = (p_val - time.time()) / 60.0
                         
-                # Check portfolio
+                # Check portfolio (dashboard:portfolio holds equity and positions only)
                 p_raw = await redis_manager.redis.get("dashboard:portfolio")
                 if p_raw:
                     p_data = json.loads(p_raw)
-                    equity = p_data.get("equity", 10000.0)
-                    free_margin = p_data.get("free_margin", equity)
+                    equity = float(p_data.get("equity", 0.0) or 0.0)
                     positions = p_data.get("positions", [])
+                block = await entry_block(redis_manager.redis)
         except Exception as e:
             logger.error(f"Error reading status from Redis: {e}")
+            block = None
 
-        status_emoji = "🔴 STOPPED" if kill_active else ("🟡 PAUSED" if is_paused else "🟢 ACTIVE & TRADING")
+        # The bot's own entry blocks (daily loss limit, circuit breaker, drawdown) count too: it used to say
+        # "ACTIVE & TRADING" while every entry was rejected
+        if kill_active:
+            status_emoji = "🔴 STOPPED"
+        elif block:
+            until = time.strftime("%H:%M UTC", time.gmtime(block["until"]))
+            status_emoji = f"🟡 NO NEW TRADES: {block['reason']} until {until}"
+        else:
+            status_emoji = "🟢 ACTIVE & TRADING"
         mode_str = "DRY_RUN (Simulation)" if settings.dry_run else ("TESTNET" if settings.binance_testnet else "LIVE REAL MONEY")
-        
+
         active_pos_count = len([p for p in positions if float(p.get("quantity", 0)) != 0])
-        
+
         text = (
             f"<b>🤖 AI TRADING ENGINE COMMAND CENTER</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"• <b>Status:</b> <b>{status_emoji}</b>\n"
             f"• <b>Mode:</b> <code>{mode_str}</code>\n"
             f"• <b>Total Equity:</b> <code>${equity:,.2f} USDT</code>\n"
-            f"• <b>Available Margin:</b> <code>${free_margin:,.2f} USDT</code>\n"
             f"• <b>Open Positions:</b> <code>{active_pos_count} Active</code>\n"
             f"• <b>Pause Timer:</b> <code>{pause_remaining:.1f} mins remaining</code>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -164,40 +173,45 @@ class TelegramCommandCenter:
         await self.send_message(text, reply_markup=self.get_main_keyboard(), chat_id=chat_id)
 
     async def handle_pnl_command(self, chat_id: Optional[str] = None):
-        """Generates rich Sharpe & PnL metrics report."""
-        equity = 10000.0
+        """24h results from the bot's trade history (it used to show $0, 0% and a made-up Sharpe of 2.45:
+        the keys it read were never written)."""
+        equity = 0.0
         daily_pnl = 0.0
-        daily_pnl_pct = 0.0
-        win_rate = 0.0
-        sharpe = 2.45
-        trades_count = 0
-        
+        wins = trades_count = 0
+
         try:
             if redis_manager.redis:
                 p_raw = await redis_manager.redis.get("dashboard:portfolio")
                 if p_raw:
-                    p_data = json.loads(p_raw)
-                    equity = float(p_data.get("equity", 10000.0))
-                    daily_pnl = float(p_data.get("daily_pnl", 0.0))
-                    daily_pnl_pct = float(p_data.get("daily_pnl_pct", 0.0))
-                    trades_count = int(p_data.get("session_trades", 0))
-                    win_rate = float(p_data.get("session_win_rate", 0.0))
-                    sharpe = float(p_data.get("sharpe_ratio", 2.45))
+                    equity = float(json.loads(p_raw).get("equity", 0.0) or 0.0)
+                since = time.time() - 86400
+                for item in await redis_manager.redis.lrange("dashboard:trade_history", 0, 99):
+                    t = json.loads(item)
+                    side = str(t.get("side", ""))
+                    if "CLOSE" not in side or float(t.get("timestamp", 0) or 0) < since:
+                        continue
+                    pnl = float(t.get("realized_pnl", 0.0) or 0.0)
+                    daily_pnl += pnl
+                    trades_count += 1
+                    wins += pnl > 0
         except Exception as e:
             logger.error(f"Error fetching PnL metrics: {e}")
-            
+
+        start_equity = equity - daily_pnl
+        daily_pnl_pct = daily_pnl / start_equity * 100.0 if start_equity > 0 else 0.0
+        win_rate = wins / trades_count if trades_count else 0.0
         pnl_emoji = "🟢" if daily_pnl >= 0 else "🔴"
         pnl_str = f"+${daily_pnl:,.2f}" if daily_pnl >= 0 else f"-${abs(daily_pnl):,.2f}"
         pct_str = f"+{daily_pnl_pct:.2f}%" if daily_pnl >= 0 else f"{daily_pnl_pct:.2f}%"
-        
+
         text = (
             f"<b>📊 PERFORMANCE & RISK METRICS</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"• <b>Portfolio Equity:</b> <code>${equity:,.2f} USDT</code>\n"
-            f"• <b>24h Net PnL:</b> {pnl_emoji} <b>{pnl_str} ({pct_str})</b>\n"
-            f"• <b>Session Win Rate:</b> <code>{win_rate*100:.1f}%</code> ({trades_count} trades)\n"
-            f"• <b>Sharpe Ratio:</b> <code>{sharpe:.2f}</code> (Institutional grade)\n"
-            f"• <b>Max Drawdown Gate:</b> <code>5.0% Limit</code> (Protected)\n"
+            f"• <b>24h Closed Trades PnL:</b> {pnl_emoji} <b>{pnl_str} ({pct_str})</b>\n"
+            f"• <b>24h Win Rate:</b> <code>{win_rate*100:.1f}%</code> ({trades_count} closes)\n"
+            f"• <b>Daily Loss Limit:</b> <code>{settings.max_daily_loss_pct:.0%} below the day's high</code>\n"
+            f"• <b>Drawdown Limit:</b> <code>{settings.max_drawdown_pct:.0%} below the best of 7 days</code>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🕒 <i>{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}</i>"
         )
@@ -228,14 +242,17 @@ class TelegramCommandCenter:
 
         lines = ["<b>📈 ACTIVE POSITIONS BREAKDOWN</b>", "━━━━━━━━━━━━━━━━━━"]
         for p in active:
+            # dashboard:portfolio rows: quantity is unsigned, the direction is in "side"; prices are entryPrice /
+            # markPrice and the PnL is "pnl" (the old keys read 0, so every row showed LONG and divided by zero)
             sym = p.get("symbol", "")
-            qty = float(p.get("quantity", 0))
-            side = "LONG" if qty > 0 else "SHORT"
-            emoji = "🟢" if qty > 0 else "🔴"
-            entry_px = float(p.get("entry_price", 0))
-            cur_px = float(p.get("current_price", entry_px))
-            pnl_val = float(p.get("unrealized_pnl", 0))
-            pnl_pct = ((cur_px - entry_px) / entry_px * (1 if qty > 0 else -1)) * float(p.get("leverage", 20)) * 100
+            qty = abs(float(p.get("quantity", 0)))
+            is_long = str(p.get("side", "")).upper() == "LONG"
+            side = "LONG" if is_long else "SHORT"
+            emoji = "🟢" if is_long else "🔴"
+            entry_px = float(p.get("entryPrice", 0) or 0)
+            cur_px = float(p.get("markPrice", 0) or 0) or entry_px
+            pnl_val = float(p.get("pnl", 0) or 0)
+            pnl_pct = ((cur_px - entry_px) / entry_px * (1 if is_long else -1)) * float(p.get("leverage", 20)) * 100 if entry_px > 0 else 0.0
             
             pnl_str = f"+${pnl_val:,.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):,.2f}"
             pct_str = f"+{pnl_pct:.2f}%" if pnl_pct >= 0 else f"{pnl_pct:.2f}%"

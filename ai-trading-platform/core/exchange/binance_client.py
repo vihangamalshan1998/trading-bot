@@ -11,6 +11,8 @@ from core.config.settings import settings
 from core.logging.logger import logger
 from core.exchange.base_adapter import ExchangeAdapter
 
+REQUEST_TIMEOUT_SECONDS = 20.0
+
 class BinanceFuturesAdapter(ExchangeAdapter):
     """
     Phase 2: Consolidated Binance USD-M Futures Testnet Adapter.
@@ -31,8 +33,10 @@ class BinanceFuturesAdapter(ExchangeAdapter):
 
     async def connect(self):
         if self.session is None:
+            # aiohttp's default is a 5-minute timeout: one hung request froze the bot's 5s loop (stops included)
             self.session = aiohttp.ClientSession(
-                headers={"X-MBX-APIKEY": self.api_key}
+                headers={"X-MBX-APIKEY": self.api_key},
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS),
             )
             logger.info(f"Connected to Binance Futures Adapter (Testnet={settings.binance_testnet})")
             

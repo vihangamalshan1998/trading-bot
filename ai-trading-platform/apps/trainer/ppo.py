@@ -1152,7 +1152,12 @@ async def run_training_loop():
     legacy_direction = (not bool(model.feat_fitted)) or bool(model.feat_mask[list(BRAIN_EXCLUDED_SLOTS)].any())
     if not bool(model.feat_fitted) or "--refit-feature-stats" in _sys.argv:
         trainer_status.set_phase("fitting input scaling")
-        trainer.fit_feature_stats()
+        if trainer.fit_feature_stats():
+            # Saved right away: candidates were only saved every 100 steps, so a trainer closed sooner lost the
+            # refit and the next start resumed the old scaling without a word.
+            os.makedirs(os.path.dirname(CANDIDATE_LATEST_PATH), exist_ok=True)
+            torch.save(model.state_dict(), CANDIDATE_LATEST_PATH)
+            logger.info(f"Feature stats saved with the brain ({CANDIDATE_LATEST_PATH}); later starts resume from it.")
     elif bool(model.feat_mask[list(BRAIN_EXCLUDED_SLOTS)].any()):
         # Fitted before the account / position slots were excluded: switch them off, keep the rest
         with torch.no_grad():

@@ -236,7 +236,14 @@ class BinanceWebSocketCollector:
                     async with websockets.connect(url, ping_interval=None) as websocket:
                         logger.info(f"Connected to Binance WebSocket Chunk ({len(chunk)} streams)!")
                         while self._running:
-                            message = await websocket.recv()
+                            # A half-open connection never closes: without a read timeout this chunk's coins
+                            # silently stopped updating (stale prices for the bot's stops). Every chunk carries
+                            # trades and book updates many times a second, so 60s of silence means it is dead.
+                            try:
+                                message = await asyncio.wait_for(websocket.recv(), timeout=60.0)
+                            except asyncio.TimeoutError:
+                                logger.warning(f"WebSocket Chunk silent for 60s ({len(chunk)} streams). Reconnecting...")
+                                break
                             data = json.loads(message)
                             
                             event_type = data.get('e')

@@ -21,6 +21,6 @@ if exist "venv\Scripts\activate.bat" (
 )
 
 echo [3] Launching AI Trainer with Thermal Protection and CPU Core Limits...
-python -m apps.trainer.ppo
+python -m apps.trainer.ppo %*
 
 pause

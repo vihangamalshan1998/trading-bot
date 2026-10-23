@@ -492,10 +492,11 @@ async def stop_pm2():
 
 @app.post("/api/system/pm2/resume")
 async def resume_pm2():
-    """Disarms the emergency kill switch and resumes trading."""
+    """Disarms the emergency kill switch and clears a trading pause (same as Telegram /resume)."""
     try:
         if redis_manager.redis:
             await redis_manager.redis.set("system:kill_switch:active", "false")
+            await redis_manager.redis.delete("system:pause_until")
             await redis_manager.redis.publish("system:events", json.dumps({"type": "RESUME_TRADING"}))
             return {"status": "success", "message": "Emergency Kill Switch disarmed. Trading resumed."}
         else:

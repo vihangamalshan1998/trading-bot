@@ -969,8 +969,10 @@ function App() {
   const nOpen = openPositions(state.positions).length
   const meta = PAGES.find((p) => p.id === page)
 
+  // A pause (Telegram /pause, or set by hand) blocks new trades like the kill switch: offer the same Resume button
+  const paused = !killActive && (stats.entry_block?.all || []).some((b) => b.reason.startsWith('Paused'))
   const toggleKill = async () => {
-    if (killActive) {
+    if (killActive || paused) {
       if (await confirmAction('Resume trading?', 'The bot will open new trades again with the current live brain.', 'warning', 'Resume trading', '#22c55e')) postAction('/api/system/pm2/resume')
     } else if (await confirmAction('Turn on the kill switch?', 'The bot stops opening new trades immediately. Data collection and training continue.', 'error', 'Stop trading', '#f05252')) {
       postAction('/api/system/pm2/stop')
@@ -1023,7 +1025,7 @@ function App() {
               <div className="label">Equity</div>
               <div className="value">{money(state.equity || 0)}</div>
             </div>
-            <button className={`btn ${killActive ? 'green' : 'red'}`} onClick={toggleKill}>{killActive ? '▶ Resume trading' : '■ Kill switch'}</button>
+            <button className={`btn ${killActive || paused ? 'green' : 'red'}`} onClick={toggleKill}>{killActive || paused ? '▶ Resume trading' : '■ Kill switch'}</button>
             <button className="btn" onClick={restartAll} title="Restart all services">↻ Restart all</button>
           </div>
         </header>

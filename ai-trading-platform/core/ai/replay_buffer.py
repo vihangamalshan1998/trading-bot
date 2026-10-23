@@ -200,15 +200,19 @@ class ReplayBuffer:
         """
         A fresh random sample of graded replayed records from REPLAY_DAYS_PER_LOAD random days (each reload
         sees a different part of the history). Rows are transient Experience objects (never written back).
+        Only records from before min_timestamp: later moments are covered by live records, whose newest
+        ones are the holdout, and a replayed copy of them would leak the holdout into training.
         """
         from core.logging.logger import logger
         from sqlalchemy.sql import text
         from apps.replay.states import SequenceReader
         if self.replay_limit <= 0:
             return []
+        before = int(self.min_timestamp)
         try:
             days = [r[0] for r in session.execute(text(
-                f"SELECT DISTINCT day FROM {REPLAY_TABLE} WHERE data_quality_flags = '{GRADED_FLAG}'")).fetchall()]
+                f"SELECT DISTINCT day FROM {REPLAY_TABLE} WHERE data_quality_flags = '{GRADED_FLAG}' "
+                f"AND timestamp < {before}")).fetchall()]
         except Exception:
             return []  # table not created yet (no replay run on this machine)
         if not days:
@@ -217,7 +221,8 @@ class ReplayBuffer:
         params = {f"d_{i}": d for i, d in enumerate(days)}
         index = session.execute(text(
             f"SELECT id, symbol, timestamp, day, frame_idx, reward_5m, reward_1h, reward_4h FROM {REPLAY_TABLE} "
-            f"WHERE data_quality_flags = '{GRADED_FLAG}' AND day IN ({','.join(':' + k for k in params)}) "
+            f"WHERE data_quality_flags = '{GRADED_FLAG}' AND timestamp < {before} "
+            f"AND day IN ({','.join(':' + k for k in params)}) "
             f"ORDER BY RAND() LIMIT {int(self.replay_limit)}"), params).fetchall()
         reader = SequenceReader()
         rows = []

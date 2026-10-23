@@ -58,6 +58,7 @@ def live_entry_hurdle_pct(ts: float) -> float:
     return max(LIVE_QUIET_SESSION_HURDLE_PCT, LIVE_ENTRY_HURDLE_PCT) if quiet else LIVE_ENTRY_HURDLE_PCT
 
 CANDIDATE_LATEST_PATH = "models/candidates/candidate_latest.pt"
+MAX_REST_SECONDS = 30.0        # cap of the duty-cycle rest between training steps
 DIR_LOG_STD_MAX = -1.2
 
 def normalize_state_tensor(states: torch.Tensor) -> torch.Tensor:
@@ -1290,10 +1291,13 @@ async def run_training_loop():
                 await asyncio.sleep(2.0)
                 continue
                 
-            # SAFETY BREATHER: rest proportional to the work just done (duty cycle), never less than sleep_time
-            rest = max(sleep_time, work_time * (1.0 - duty_cycle) / duty_cycle)
+            # SAFETY BREATHER: rest proportional to the work just done (duty cycle), never less than sleep_time and
+            # never more than MAX_REST_SECONDS. A plain sleep: nothing else runs on this loop, and the awaited timer
+            # once never fired (23 Oct 2026: training sat idle for 8+ minutes in the event loop under EcoQoS with the
+            # screen off); a step stalled by the OS also inflated the next rest to many minutes.
+            rest = min(MAX_REST_SECONDS, max(sleep_time, work_time * (1.0 - duty_cycle) / duty_cycle))
             if rest > 0:
-                await asyncio.sleep(rest)
+                time.sleep(rest)
 
             step += 1
             trainer.step_count = step

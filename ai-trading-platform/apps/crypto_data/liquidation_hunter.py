@@ -91,13 +91,16 @@ class MultiExchangeLiquidationCollector:
         while self.raw_liquidations and (now - self.raw_liquidations[0]["timestamp"]) > 180.0:
             self.raw_liquidations.popleft()
             
-        # Reset symbol aggregations
+        # Reset symbol aggregations (the cascade price extremes too: they used to keep the extreme of every
+        # cascade since the service started)
         for sym in self.symbols:
             st = self.symbol_stats[sym]
             st["long_liq_1m"] = 0.0
             st["short_liq_1m"] = 0.0
             st["long_liq_3m"] = 0.0
             st["short_liq_3m"] = 0.0
+            st["lowest_cascade_price"] = float("inf")
+            st["highest_cascade_price"] = 0.0
             
         g_long_1m = 0.0
         g_short_1m = 0.0
@@ -226,31 +229,36 @@ class MultiExchangeLiquidationCollector:
     # Exchange 2: Bybit Linear Liquidation Stream
     # =========================================================================
     async def listen_bybit(self):
+        # Bybit retired the "liquidation.<symbol>" topic (subscribing answers "handler not found", so this feed
+        # received nothing). "allLiquidation.<symbol>" pushes a list of {s, S (liquidated position side), v, p}.
         url = "wss://stream.bybit.com/v5/public/linear"
         while self.running:
             try:
                 logger.info(f"Connecting to Bybit Linear Liquidation Stream: {url}")
                 async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
-                    # Subscribe to major symbols
-                    sub_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "NEARUSDT", "ADAUSDT", "AVAXUSDT"]
-                    sub_msg = {
-                        "op": "subscribe",
-                        "args": [f"liquidation.{sym}" for sym in sub_symbols]
-                    }
-                    await ws.send(json.dumps(sub_msg))
+                    sub_symbols = sorted(self.symbols)
+                    for i in range(0, len(sub_symbols), 10):  # Bybit takes at most 10 topics per request
+                        await ws.send(json.dumps({
+                            "op": "subscribe",
+                            "args": [f"allLiquidation.{sym}" for sym in sub_symbols[i:i + 10]],
+                        }))
                     logger.info("✅ Connected & Subscribed to Bybit Liquidation Feed!")
-                    
+
                     async for raw_msg in ws:
                         if not self.running:
                             break
                         try:
                             msg = json.loads(raw_msg)
-                            data = msg.get("data", {})
-                            if isinstance(data, dict) and "symbol" in data:
-                                sym = data.get("symbol", "")
-                                side = "SELL" if data.get("side", "").upper() == "BUY" else "BUY" # Bybit side is position direction
-                                size = float(data.get("size", 0.0))
-                                price = float(data.get("price", 0.0))
+                            if msg.get("op") == "subscribe" and not msg.get("success", True):
+                                logger.error(f"Bybit liquidation subscribe rejected: {msg.get('ret_msg')}")
+                                continue
+                            data = msg.get("data")
+                            for item in (data if isinstance(data, list) else []):
+                                sym = item.get("s", "")
+                                # S = side of the liquidated POSITION: Buy = a long was liquidated (forced sell)
+                                side = "SELL" if str(item.get("S", "")).upper() == "BUY" else "BUY"
+                                size = float(item.get("v") or 0.0)
+                                price = float(item.get("p") or 0.0)
                                 usd_val = size * price
                                 if usd_val > 0:
                                     self.record_liquidation("bybit", sym, side, usd_val, price)
@@ -263,10 +271,26 @@ class MultiExchangeLiquidationCollector:
     # =========================================================================
     # Exchange 3: OKX SWAP Liquidation Stream
     # =========================================================================
+    @staticmethod
+    def _okx_contract_sizes() -> Dict[str, float]:
+        """{instId: coins per contract} for OKX USDT swaps (e.g. BTC-USDT-SWAP 0.01, PEPE-USDT-SWAP 10,000,000)."""
+        import urllib.request
+        req = urllib.request.Request("https://www.okx.com/api/v5/public/instruments?instType=SWAP",
+                                     headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            rows = json.load(resp).get("data", [])
+        return {r["instId"]: float(r["ctVal"]) for r in rows
+                if r.get("settleCcy") == "USDT" and r.get("ctValCcy") != "USD" and float(r.get("ctVal") or 0) > 0}
+
     async def listen_okx(self):
         url = "wss://ws.okx.com:8443/ws/v5/public"
+        contract_sizes: Dict[str, float] = {}
         while self.running:
             try:
+                if not contract_sizes:
+                    # OKX reports liquidations in CONTRACTS: sz x price overstated BTC 100x and understated PEPE 10^7x
+                    contract_sizes = await asyncio.to_thread(self._okx_contract_sizes)
+                    logger.info(f"OKX contract sizes loaded for {len(contract_sizes)} USDT swaps.")
                 logger.info(f"Connecting to OKX Liquidation Stream: {url}")
                 async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
                     sub_msg = {
@@ -284,12 +308,15 @@ class MultiExchangeLiquidationCollector:
                             data_list = msg.get("data", [])
                             for item in data_list:
                                 inst_id = item.get("instId", "")
-                                if "USDT" in inst_id:
-                                    side = item.get("side", "").upper() # buy or sell
-                                    sz = float(item.get("sz", 0.0))
-                                    bk_px = float(item.get("bkPx", 0.0))
-                                    # Contract multiplier for crypto swap on OKX is typically 1 or 0.01 per contract
-                                    usd_val = sz * bk_px if bk_px > 0 else sz * 100.0
+                                ct_val = contract_sizes.get(inst_id)
+                                if not ct_val:
+                                    continue  # not a USDT swap with a known contract size
+                                # liquidation-orders: details[] holds the fills (side, sz in contracts, bkPx)
+                                for det in item.get("details") or [item]:
+                                    side = str(det.get("side", "")).upper()  # sell = a long was liquidated
+                                    sz = float(det.get("sz") or 0.0)
+                                    bk_px = float(det.get("bkPx") or 0.0)
+                                    usd_val = sz * ct_val * bk_px
                                     if usd_val > 0:
                                         self.record_liquidation("okx", inst_id, side, usd_val, bk_px)
                         except Exception as e:

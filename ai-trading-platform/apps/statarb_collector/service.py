@@ -6,6 +6,8 @@ from core.db.redis import redis_manager
 from core.config.settings import settings
 from core.logging.logger import logger, set_log_file
 
+PRICE_MAX_AGE_SECONDS = 30.0
+
 class StatArbCollector:
     def __init__(self):
         self.symbols = settings.symbol_universe
@@ -22,22 +24,31 @@ class StatArbCollector:
                 self.ccxt_symbols.append(ccxt_sym)
                 self.symbol_map[ccxt_sym] = sym
                 
-        # Store latest prices
+        # Store latest prices and when each arrived
         self.prices = {
             "binance": {sym: 0.0 for sym in self.symbols},
             "okx": {sym: 0.0 for sym in self.symbols},
             "bybit": {sym: 0.0 for sym in self.symbols}
         }
+        self.price_times = {ex: {sym: 0.0 for sym in self.symbols} for ex in self.prices}
         self.last_update_time = time.time()
-        
+
+    def _fresh_price(self, exchange_id: str, sym: str, now: float) -> float:
+        """Latest price, or 0 when older than PRICE_MAX_AGE_SECONDS: a feed that died used to leave its last
+        price frozen, so the premium tracked the other exchange's moves (BTC +1% -> a fake -1% OKX premium)."""
+        if now - self.price_times[exchange_id][sym] > PRICE_MAX_AGE_SECONDS:
+            return 0.0
+        return self.prices[exchange_id][sym]
+
     async def _publish_state(self, sym: str):
-        p_binance = self.prices["binance"][sym]
-        p_okx = self.prices["okx"][sym]
-        p_bybit = self.prices["bybit"][sym]
-        
+        now = time.time()
+        p_binance = self._fresh_price("binance", sym, now)
+        p_okx = self._fresh_price("okx", sym, now)
+        p_bybit = self._fresh_price("bybit", sym, now)
+
         if p_binance == 0.0:
             return
-            
+
         okx_premium = (p_okx - p_binance) / p_binance if p_okx > 0 else 0.0
         bybit_premium = (p_bybit - p_binance) / p_binance if p_bybit > 0 else 0.0
         
@@ -123,9 +134,10 @@ class StatArbCollector:
                 for ccxt_sym, ticker in tickers.items():
                     if ccxt_sym in symbol_map:
                         sym, mult = symbol_map[ccxt_sym]
-                        price = float(ticker.get('last', 0.0))
+                        price = float(ticker.get('last') or 0.0)  # 'last' can be None: float(None) dropped the feed
                         if price > 0:
                             self.prices[exchange_id][sym] = price * mult
+                            self.price_times[exchange_id][sym] = time.time()
                             self.last_update_time = time.time()
                             # If we just updated an external exchange, publish the new statarb state
                             if exchange_id != "binance":

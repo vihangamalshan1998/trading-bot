@@ -235,7 +235,9 @@ class ModelRegistry:
             # v3_live_gated_split: Part B traded as live
             "challenger_pnl_per_trade": m.get("challenger_pnl_per_trade"),
             "champion_pnl_per_trade": m.get("champion_pnl_per_trade"),
-            "challenger_long_share": m.get("challenger_long_share"),
+            # One-sided rejections (ACTION_MONOCULTURE) report long_share / trade_rate without the prefix
+            "challenger_long_share": m.get("challenger_long_share", m.get("long_share")),
+            "trade_rate": m.get("trade_rate"),
             "challenger_raw_sim_pnl": m.get("challenger_raw_sim_pnl"),
         }
         policy = m.get("trade_policy") if isinstance(m.get("trade_policy"), dict) else None

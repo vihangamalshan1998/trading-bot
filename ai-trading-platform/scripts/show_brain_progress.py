@@ -121,13 +121,14 @@ def main():
     l_date = latest.get("date", "unknown")
     l_approved = latest.get("approved", False)
     l_reason = latest.get("reason", "N/A")
-    l_score = latest.get("challenger_score", 0.0)
-    l_cscore = latest.get("champion_score", 0.0)
-    l_mse = latest.get("challenger_critic_mse", 0.0)
-    l_cmse = latest.get("champion_critic_mse", 0.0)
-    l_pnl = latest.get("challenger_sim_pnl", 0.0)
-    l_cpnl = latest.get("champion_sim_pnl", 0.0)
-    l_ent = latest.get("entropy", 0.0)
+    # A brain rejected before scoring (e.g. ACTION_MONOCULTURE) stores these as null: "or 0.0", not a .get default
+    l_score = latest.get("challenger_score") or 0.0
+    l_cscore = latest.get("champion_score") or 0.0
+    l_mse = latest.get("challenger_critic_mse") or 0.0
+    l_cmse = latest.get("champion_critic_mse") or 0.0
+    l_pnl = latest.get("challenger_sim_pnl") or 0.0
+    l_cpnl = latest.get("champion_sim_pnl") or 0.0
+    l_ent = latest.get("entropy") or 0.0
 
     print(f"\n[*] LATEST SHOWDOWN ANALYSIS: {l_ver} vs REIGNING CHAMPION")
     print("-" * total_width)
@@ -152,7 +153,7 @@ def main():
     ent_desc = "Optimal balance of exploration and conviction" if 0.5 <= l_ent <= 1.2 else "Watch closely"
     print(f" * Policy Entropy:       {l_ent:.4f} ({ent_desc})")
 
-    if base_mse and base_mse > 0:
+    if base_mse and base_mse > 0 and l_mse > 0:
         cum_gain = ((l_mse - base_mse) / base_mse) * 100
         print(f" * Cumulative Progress:  Critic prediction error improved {abs(cum_gain):.1f}% since Day 1 Baseline ({base_mse:.2f} -> {l_mse:.2f})")
     

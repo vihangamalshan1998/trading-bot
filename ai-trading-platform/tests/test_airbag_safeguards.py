@@ -266,3 +266,13 @@ def test_total_exposure_feeds_the_portfolio_cap():
         assert rm.evaluate(req, port, market).approved
     finally:
         rm_module.settings.trading_enabled, rm_module.settings.emergency_stop = old
+
+
+def test_stale_whale_and_statarb_feeds_read_as_no_data():
+    """A crashed collector used to freeze its last message in the brain's inputs forever."""
+    fresh = {"timestamp": time.time() - 5, "whale_buy_pressure": 200000.0}
+    stale = {"timestamp": time.time() - 600, "whale_buy_pressure": 200000.0}
+    assert ProductionTradingBot._fresh_feed(fresh) is fresh
+    assert ProductionTradingBot._fresh_feed(stale) == {}
+    assert ProductionTradingBot._fresh_feed(None) == {}
+    assert ProductionTradingBot._fresh_feed({"whale_buy_pressure": 1.0}) == {}   # no timestamp: unknown age

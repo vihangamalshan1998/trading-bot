@@ -37,6 +37,7 @@ ENTRY_GUARD_KEY = "bot:entry_guard"  # hourly entry cap + per-coin cooldowns, ke
 STATE_HISTORY_KEY = "bot:state_history"  # the brain's input history (last 300 frames per coin), kept across restarts
 STATE_HISTORY_SAVE_SECONDS = 60.0
 STATE_HISTORY_MAX_AGE_SECONDS = 300.0  # older saved history is not restored: the gap would distort the brain's view
+FEED_MAX_AGE_SECONDS = 60.0  # whale / statarb states older than this read as "no data"
 
 class ProductionTradingBot:
     """
@@ -975,6 +976,21 @@ class ProductionTradingBot:
                  if m is not None and len(m.features) == 90 and now - float(getattr(m, "timestamp", 0.0) or 0.0) < 120.0}
         return state_builder.cross_section_block(symbol, fresh)
 
+    @staticmethod
+    def _fresh_feed(state, max_age: float = FEED_MAX_AGE_SECONDS) -> dict:
+        """
+        A whale / statarb state, or {} (the brain's "no data" zeros) when older than max_age. The bot kept the
+        last message forever, so a crashed collector froze those inputs at their last values.
+        """
+        if not state:
+            return {}
+        try:
+            if time.time() - float(state.get("timestamp", 0.0) or 0.0) > max_age:
+                return {}
+        except (TypeError, ValueError):
+            return {}
+        return state
+
     def _global_features(self) -> list:
         g = self.global_context or {}
         if time.time() - float(g.get("timestamp", 0.0) or 0.0) > 600.0:
@@ -1088,7 +1104,8 @@ class ProductionTradingBot:
         obs.extend(state_builder.market_block(sym_feats))
         macro_features = state_builder.macro_block(time.localtime(), sym_feats, btc_feats, self.macro_state)
         obs.extend(macro_features)
-        obs.extend(state_builder.whale_statarb_block(self.whale_states.get(symbol, {}), self.statarb_states.get(symbol, {})))
+        obs.extend(state_builder.whale_statarb_block(self._fresh_feed(self.whale_states.get(symbol)),
+                                                     self._fresh_feed(self.statarb_states.get(symbol))))
         obs.extend(self._cross_section_features(symbol))
         obs.extend(self._global_features())
 

@@ -148,10 +148,12 @@ class WhaleTracker:
                         bids = payload.get('b', [])
                         asks = payload.get('a', [])
                         
-                        mid_price = 0.0
-                        if bids and asks:
-                            mid_price = (float(bids[0][0]) + float(asks[0][0])) / 2.0
-                            
+                        if not bids or not asks:
+                            continue  # one-sided update: no mid (dividing by 0 dropped the whole connection)
+                        mid_price = (float(bids[0][0]) + float(asks[0][0])) / 2.0
+                        if mid_price <= 0:
+                            continue
+
                         # Find closest Buy Wall
                         buy_wall_dist = 0.0
                         for bid in bids:

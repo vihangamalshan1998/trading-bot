@@ -33,6 +33,11 @@ const duration = (since) => {
   if (s < 172800) return `${(s / 3600).toFixed(1)}h`
   return `${(s / 86400).toFixed(1)}d`
 }
+// Bot's own entry block (daily loss limit, circuit breaker, drawdown, pause) from /api/system_stats
+const blockUntil = (b) => (b ? `until ${new Date(b.until * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : '')
+const tradingStatus = (killActive, block) => (killActive ? { label: 'Paused', color: 'red', note: 'Kill switch is on. No new trades.' }
+  : block ? { label: 'Blocked', color: 'amber', note: `${block.reason} ${blockUntil(block)}. Open trades are still managed.` }
+    : { label: 'Active', color: 'green', note: null })
 const expectedMove = (s) => HORIZON_W[0] * (s.ai_critic_return || 0) + HORIZON_W[1] * (s.ai_critic_1h || 0) + HORIZON_W[2] * (s.ai_critic_4h || 0)
 
 const usePoll = (url, ms, enabled = true) => {
@@ -207,6 +212,7 @@ const StatusTile = ({ icon, color, label, value, note }) => (
 
 const Overview = ({ ctx }) => {
   const { stats, brain, services, state, markets, blocked, killActive, go, confLabel } = ctx
+  const trading = tradingStatus(killActive, stats.entry_block)
   const svc = services?.services || []
   const pm2 = svc.filter((s) => !s.remote)
   const down = pm2.filter((s) => s.status !== 'online' && s.status !== 'file')
@@ -227,9 +233,9 @@ const Overview = ({ ctx }) => {
   return (
     <>
       <div className="grid cols-4">
-        <StatusTile icon="power" color={killActive ? 'red' : 'green'} label="Trading"
-          value={killActive ? 'Paused' : 'Active'}
-          note={killActive ? 'Kill switch is on. No new trades.' : `${openPositions(state.positions).length} open position(s)`} />
+        <StatusTile icon="power" color={trading.color} label="Trading"
+          value={trading.label}
+          note={trading.note || `${openPositions(state.positions).length} open position(s)`} />
         <StatusTile icon="brain" color={champ?.is_v3 ? 'green' : 'amber'} label="Live brain"
           value={champ ? (champ.is_v3 ? 'Proven on unseen data' : 'Old brain (unproven)') : '—'}
           note={champ ? `Version ${champ.version}` : 'Loading…'} />
@@ -914,6 +920,7 @@ function App() {
   const state = stateData || { equity: 0, positions: [], market_states: {} }
   const stats = statsData || { latest_headlines: [] }
   const killActive = !!stats.kill_switch_active
+  const trading = tradingStatus(killActive, stats.entry_block)
   const blocked = useMemo(() => new Set(brain?.champion?.trade_policy?.blocked_symbols || []), [brain])
   const markets = useMemo(() => Object.entries(stateData?.market_states || {}).sort(([a], [b]) => a.localeCompare(b)), [stateData])
   const svc = services?.services || []
@@ -957,7 +964,7 @@ function App() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <div className="row"><span>Trading</span><span className={killActive ? 'neg' : 'pos'}>{killActive ? 'Paused' : 'Active'}</span></div>
+          <div className="row"><span>Trading</span><span className={trading.color === 'green' ? 'pos' : trading.color === 'amber' ? 'warn' : 'neg'}>{trading.label}</span></div>
           <div className="row"><span>Trainer</span><span className={trainerUp ? 'pos' : 'neg'}>{trainerUp ? 'Running' : 'Offline'}</span></div>
           <div className="row"><span>Server</span><span className={stateErr ? 'neg' : 'pos'}>{stateErr ? 'Unreachable' : 'Connected'}</span></div>
         </div>
@@ -970,7 +977,7 @@ function App() {
             <div className="page-sub">{meta.sub}</div>
           </div>
           <div className="topbar-right">
-            <span className="pill"><Dot color={killActive ? 'red' : 'green'} />{killActive ? 'Trading paused' : 'Trading active'}</span>
+            <span className="pill" title={trading.note || ''}><Dot color={trading.color} />{`Trading ${trading.label.toLowerCase()}`}</span>
             <span className="pill"><Dot color={down ? 'red' : 'green'} />{down ? `${down} service(s) down` : 'Services OK'}</span>
             <div className="equity">
               <div className="label">Equity</div>
@@ -984,6 +991,7 @@ function App() {
         <main className="content">
           {stateErr && <div className="banner red"><Icon name="alert" /><span className="grow">Cannot reach the dashboard server. Data shown may be out of date.</span></div>}
           {killActive && page !== 'overview' && <div className="banner red"><Icon name="power" /><span className="grow">Kill switch is ON: the bot is not opening new trades. Data collection and training continue.</span></div>}
+          {!killActive && stats.entry_block && <div className="banner amber"><Icon name="alert" /><span className="grow">No new trades: {stats.entry_block.reason} {blockUntil(stats.entry_block)}. Open trades keep their stops and take-profits.</span></div>}
           {page === 'overview' && <Overview ctx={ctx} />}
           {page === 'coins' && <Coins ctx={ctx} />}
           {page === 'brain' && <Brain ctx={ctx} />}

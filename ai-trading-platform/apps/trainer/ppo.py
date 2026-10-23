@@ -1035,22 +1035,36 @@ async def run_training_loop():
     # Restrict PyTorch to 1 CPU thread so it doesn't starve the Live Trading Bot on shared VPS
     torch.set_num_threads(1)
     
-    # The ReplayBuffer currently returns 41-dim state vectors (single symbol + portfolio + position + macro)
+    import sys
+    from datetime import datetime
+    fresh_brain = "--fresh-brain" in sys.argv
+    if fresh_brain or "--refit-feature-stats" in sys.argv:
+        # A refit (and a fresh brain, which is fitted on start) is only worth it with the late inputs on: with fewer
+        # complete records it would fit them switched OFF and save that scaling, a wasted refit.
+        complete = ReplayBuffer().count_graded_since(FULL_INPUTS_SINCE)
+        if complete < MIN_FULL_INPUT_ROWS:
+            logger.error(f"REFIT NOT STARTED: only {complete} graded complete records on this machine, "
+                         f"{MIN_FULL_INPUT_ROWS} needed. Run MASTER_TRAINER until they are synced and graded, then retry.")
+            return
+
     model = SingleSymbolActorCritic(input_dim=200)
     registry = ModelRegistry()
-    
-    try:
-        model = registry.load_model(model)
-        logger.info("Successfully loaded existing model weights.")
-    except Exception as e:
-        logger.warning(f"Could not load existing model, starting fresh: {e}")
+
+    if fresh_brain:
+        # New weights trained only on clean data with every input on; the live champion keeps trading until
+        # this brain beats it in a tournament (the champion is loaded separately for each tournament).
+        logger.info("FRESH BRAIN: starting from new weights (not the live brain or the latest candidate).")
+    else:
+        try:
+            model = registry.load_model(model)
+            logger.info("Successfully loaded existing model weights.")
+        except Exception as e:
+            logger.warning(f"Could not load existing model, starting fresh: {e}")
 
     # Continue from the latest candidate (saved every 100 steps) so a restart does not throw away the
     # training since the last push. Only a candidate of the current kind (fitted, account slots off) is
     # resumed; delete models/candidates/candidate_latest.pt or pass --from-champion to restart from live.
-    import sys
-    from datetime import datetime
-    if os.path.exists(CANDIDATE_LATEST_PATH) and "--from-champion" not in sys.argv:
+    if os.path.exists(CANDIDATE_LATEST_PATH) and "--from-champion" not in sys.argv and not fresh_brain:
         try:
             cand = SingleSymbolActorCritic(input_dim=200)
             cand.load_state_dict(torch.load(CANDIDATE_LATEST_PATH, map_location="cpu"))
@@ -1145,7 +1159,8 @@ async def run_training_loop():
     if uses_late_inputs:
         logger.info("Brain uses the late inputs: loading complete records only (saved from 21 Oct 2026 05:00 UTC).")
     trainer = PPOTrainer(model=model, limit=limit, min_timestamp=FULL_INPUTS_SINCE if uses_late_inputs else 0.0)
-    trainer.load_trainer_state()
+    if not fresh_brain:
+        trainer.load_trainer_state()  # exploration noise + optimizer moments belong to the brain being resumed
     # Per-slot input scaling: fit once for models that predate it, or on request when new inputs come online
     import sys as _sys
     # A brain that still sees the account slots learned LONG / SHORT from them: restart that output neutral

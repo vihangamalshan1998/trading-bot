@@ -145,3 +145,18 @@ def test_holdout_is_the_newest_24h_capped_at_60_percent():
     train, holdout = ReplayBuffer.split_holdout(few)
     assert len(holdout) == 120 and len(train) > 0
     assert ReplayBuffer.split_holdout(few[:50]) == (few[:50], [])
+
+
+def test_tiny_golden_pool_is_not_repeated_in_every_batch():
+    import random
+    from types import SimpleNamespace
+    from core.ai.replay_buffer import ReplayBuffer, GOLDEN_MIN_POOL
+    b = ReplayBuffer.__new__(ReplayBuffer)
+    b.cache = [SimpleNamespace(id=i, reward=0.0, timestamp=i) for i in range(500)]
+    b.golden_cache = [SimpleNamespace(id=10_000 + i, reward=0.0, timestamp=i, _src="gold") for i in range(5)]
+    b.sumtree = SimpleNamespace(n_entries=0)
+    random.seed(0)
+    batch = b.sample(64)
+    assert not any(getattr(e, "_src", None) == "gold" for e in batch)   # 5 < GOLDEN_MIN_POOL: not used
+    b.golden_cache = [SimpleNamespace(id=10_000 + i, reward=0.0, timestamp=i, _src="gold") for i in range(GOLDEN_MIN_POOL)]
+    assert sum(getattr(e, "_src", None) == "gold" for e in b.sample(64)) == 6

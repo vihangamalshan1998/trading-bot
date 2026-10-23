@@ -19,6 +19,8 @@ HOLDOUT_EMBARGO_SEC = 14400 + 1800
 # Holdout = the newest 24h of live records, but never more than 60% of the loaded rows (training keeps the rest)
 HOLDOUT_SECONDS = 24 * 3600
 HOLDOUT_MAX_FRAC = 0.60
+# Golden rows join batches only once there are enough to choose from (else they repeat in every batch)
+GOLDEN_MIN_POOL = 100
 
 # Records rebuilt from Binance's history archive (apps/replay) live in this table, graded like live ones.
 # They join the TRAINING pool only (never the holdout, which stays live data) and only in complete-inputs mode.
@@ -315,8 +317,9 @@ class ReplayBuffer:
         
         batch = []
         
-        # 1. Golden Batch (The 10% permanent anchor against Forgetting)
-        if hasattr(self, 'golden_cache') and len(self.golden_cache) > 0:
+        # 1. Golden Batch (The 10% permanent anchor against Forgetting). Only from a pool of GOLDEN_MIN_POOL rows:
+        #    with 5 golden rows, all 5 were in nearly every batch of 64 and the brain over-learned those moments.
+        if hasattr(self, 'golden_cache') and len(self.golden_cache) >= GOLDEN_MIN_POOL:
             actual_golden = min(n_golden, len(self.golden_cache))
             batch.extend(random.sample(self.golden_cache, actual_golden))
             # If we don't have enough golden, shift the remainder to random

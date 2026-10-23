@@ -2092,7 +2092,11 @@ class ProductionTradingBot:
                     # GUARD 1.5: Spread Firewall (Protect against illiquid book slippage bleed)
                     if not is_closing and market and market.mid_price > 0:
                         spread_pct = market.spread / market.mid_price
-                        if spread_pct > session_max_spread:
+                        # A one-tick spread is the tightest book possible: coins whose tick is large relative to the
+                        # price (RENDER: 0.001 at ~$1.80 = 0.056%) were blocked every off-peak hour and weekend
+                        tick_cfg = registry.get_symbol(sym)
+                        one_tick_pct = (tick_cfg.tick_size / market.mid_price) if tick_cfg and tick_cfg.tick_size else 0.0
+                        if spread_pct > max(session_max_spread, one_tick_pct * 1.01):
                             logger.warning(f"[{sym}] 🛑 SPREAD FIREWALL ({session_name}): Spread {spread_pct*100:.3f}% > {session_max_spread*100:.3f}% limit. Skipping entry to protect from slippage fee bleed!")
                             continue
 

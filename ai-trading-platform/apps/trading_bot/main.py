@@ -960,6 +960,9 @@ class ProductionTradingBot:
                     raw = await self.redis.redis.get(GLOBAL_CONTEXT_KEY)
                     if raw:
                         self.global_context = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+                        added = macro_crash_shield.add_feed_events(self.global_context.get("econ_events"))
+                        if added:
+                            logger.info(f"Economic event shield: {added} release(s) added from the live calendar.")
             except Exception as e:
                 logger.debug(f"Global context refresh failed: {e}")
             await asyncio.sleep(30.0)
@@ -1305,6 +1308,9 @@ class ProductionTradingBot:
                             self.position_exit_levels.pop(s, None)
 
                     self._refresh_total_exposure()
+                    # Balance and positions are fresh: the risk manager rejects new entries when this is older
+                    # than max_market_data_age_seconds (it was never set, so that check never ran)
+                    self.portfolio_state.timestamp = time.time()
                     await self._ensure_disaster_stops(live_positions)
                     
                     if self.redis.redis:

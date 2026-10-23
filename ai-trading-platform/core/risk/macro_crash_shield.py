@@ -34,6 +34,7 @@ class MacroCrashShield:
         ("FOMC Press Conference (Powell)", "2026-10-28", "18:30", "CRITICAL"),
         ("US Non-Farm Payrolls (NFP)", "2026-11-06", "13:30", "CRITICAL"),
         ("US CPI Inflation", "2026-11-12", "13:30", "CRITICAL"),
+        ("US Non-Farm Payrolls (NFP)", "2026-12-04", "13:30", "CRITICAL"),
         ("US FOMC Rate Decision", "2026-12-09", "19:00", "CRITICAL"),
         ("FOMC Press Conference (Powell)", "2026-12-09", "19:30", "CRITICAL"),
         ("US CPI Inflation", "2026-12-15", "13:30", "CRITICAL"),
@@ -90,6 +91,31 @@ class MacroCrashShield:
             "time_str": datetime.datetime.utcfromtimestamp(timestamp).strftime("%H:%M UTC"),
             "impact": impact
         })
+
+    def add_feed_events(self, events) -> int:
+        """
+        Adds releases from the live economic calendar ([[epoch, importance], ...] published by the market
+        collector, apps/market_collector/global_context.py). The built-in KNOWN_EVENTS list is hand-written
+        (it missed releases and ends in March 2027); one already listed within 30 minutes is not added twice.
+        """
+        added = 0
+        for ts, importance in events or []:
+            ts = float(ts)
+            if any(abs(e["timestamp"] - ts) < 1800 for e in self.parsed_events):
+                continue
+            dt = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+            self.parsed_events.append({
+                "name": "US Fed decision (calendar feed)" if float(importance) >= 1.0 else "US CPI / jobs / PCE release (calendar feed)",
+                "timestamp": ts,
+                "date_str": dt.strftime("%Y-%m-%d"),
+                "time_str": dt.strftime("%H:%M UTC"),
+                "impact": "CRITICAL",
+            })
+            added += 1
+        if added:
+            cutoff = time.time() - 7 * 86400
+            self.parsed_events = [e for e in self.parsed_events if e["timestamp"] >= cutoff]
+        return added
 
     def update_btc_price(self, price: float, timestamp: Optional[float] = None) -> Tuple[bool, float]:
         """

@@ -29,6 +29,7 @@ POLL_SECONDS = 60
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 CALENDAR_REFRESH_SECONDS = 3600  # the feed is rate limited; it changes rarely
 CALENDAR_HORIZON_H = 24.0
+SHIELD_MIN_IMPORTANCE = 0.8  # Fed decisions (1.0) and CPI / jobs / PCE (0.8) pause new entries around the release
 
 
 def event_importance(title: str, impact: str) -> float:
@@ -123,6 +124,9 @@ async def poll_global_context(redis_conn, is_running=lambda: True):
                 except Exception as e:
                     logger.debug(f"Economic calendar poll failed: {e}")
             state.update(econ_calendar_features(sorted(events.items()), time.time()))
+            # Fed / CPI / jobs / PCE times for the bot's economic event shield (its built-in list is hand-written)
+            state["econ_events"] = [[t, w] for t, w in sorted(events.items())
+                                    if w >= SHIELD_MIN_IMPORTANCE and t >= time.time() - 3600]
             for coin in ("BTC", "ETH"):
                 try:
                     prem = await _coinbase_premium(session, coin)

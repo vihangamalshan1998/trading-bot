@@ -271,6 +271,21 @@ def test_K_correlated_exposure(base_state):
     assert not decision.approved
     assert decision.reason == "CORRELATED_EXPOSURE_LIMIT"
 
+def test_K_correlated_limit_does_not_block_other_coins(base_state):
+    # A big ETH position used to block every altcoin entry: only BTC / ETH orders add to that bucket
+    market, portfolio = base_state
+    import core.risk.risk_manager as rm_module
+    rm_module.settings.correlated_exposure_limit_pct = 0.40
+    rm_module.settings.max_open_positions = 10
+    rm = RiskManager()
+    rm.max_portfolio_exposure_pct = 1.0
+    portfolio.positions["ETHUSDT"] = PositionState(symbol="ETHUSDT", quantity=2.0, current_price=3500.0, leverage=1)
+    alt = market.model_copy(update={"symbol": "XRPUSDT"})
+    req = OrderRequest(symbol="XRPUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=10.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, alt)
+    assert decision.reason != "CORRELATED_EXPOSURE_LIMIT"
+
+
 def test_L_zero_quantity_after_clamping(base_state):
     market, portfolio = base_state
     import core.risk.risk_manager as rm_module

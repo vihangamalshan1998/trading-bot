@@ -4,7 +4,7 @@ from core.logging.logger import logger
 from core.exchange.binance_client import BinanceFuturesAdapter
 
 import numpy as np
-import math
+from decimal import Decimal, ROUND_DOWN
 
 class SymbolMetadata:
     def __init__(self, symbol: str):
@@ -36,26 +36,27 @@ class SymbolConfig:
         self.max_quantity: float = 1000.0
         self.min_notional: float = 5.0
         self.tick_size: float = 0.01
+        self.step_size: Optional[float] = None  # LOT_SIZE stepSize; None = 10^-quantity_precision
         
         # New additions for Phase 2
         self.metadata = SymbolMetadata(symbol)
         self.embedding = SymbolEmbedding()
         
+    @staticmethod
+    def _floor_to_step(value: float, step: Decimal) -> Decimal:
+        """Largest multiple of `step` <= value, in exact decimal arithmetic. Binary floats lost a whole step
+        (0.29 * 100 = 28.999999999999996 -> 0.28), so closing a 0.29 position left 0.01 open on Binance."""
+        v = Decimal(repr(float(value)))
+        return (v / step).to_integral_value(rounding=ROUND_DOWN) * step
+
     def format_quantity(self, qty: float) -> str:
-        """Truncates quantity to the strictly allowed precision (Binance rejects rounding up)."""
-        factor = 10 ** self.quantity_precision
-        truncated = math.floor(qty * factor) / factor
-        format_str = f"{{:.{self.quantity_precision}f}}"
-        return format_str.format(truncated)
-        
+        """Truncates quantity to the exchange step size (Binance rejects rounding up)."""
+        step = Decimal(str(self.step_size)) if self.step_size else Decimal(1).scaleb(-self.quantity_precision)
+        return f"{self._floor_to_step(qty, step):.{self.quantity_precision}f}"
+
     def format_price(self, price: float) -> str:
-        """Truncates price to the strictly allowed tick size."""
-        # Truncate to nearest tick size to avoid rounding up
-        # We add a tiny epsilon to handle floating point math errors before flooring
-        ticks = math.floor((price + 1e-10) / self.tick_size)
-        truncated = ticks * self.tick_size
-        format_str = f"{{:.{self.price_precision}f}}"
-        return format_str.format(truncated)
+        """Truncates price to the exchange tick size."""
+        return f"{self._floor_to_step(price, Decimal(str(self.tick_size))):.{self.price_precision}f}"
 
 class SymbolRegistry:
     """
@@ -84,6 +85,7 @@ class SymbolRegistry:
                     if f["filterType"] == "LOT_SIZE":
                         config.min_quantity = float(f["minQty"])
                         config.max_quantity = float(f["maxQty"])
+                        config.step_size = float(f["stepSize"]) if float(f.get("stepSize") or 0) > 0 else None
                     elif f["filterType"] == "MIN_NOTIONAL":
                         config.min_notional = float(f["notional"])
                     elif f["filterType"] == "PRICE_FILTER":

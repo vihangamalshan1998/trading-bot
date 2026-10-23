@@ -14,6 +14,7 @@ from core.schemas.state_schema import (
 from core.risk.macro_crash_shield import macro_crash_shield
 
 DRAWDOWN_WINDOW_DAYS = 7
+CORRELATED_SYMBOLS = frozenset({"BTCUSDT", "ETHUSDT"})  # one exposure bucket (correlated_exposure_limit_pct)
 
 
 class RiskManager:
@@ -105,12 +106,10 @@ class RiskManager:
         It is a conservative exposure bucket.
         """
 
-        correlated_symbols = {"BTCUSDT", "ETHUSDT"}
-
         exposure = 0.0
 
         for symbol, position in portfolio.positions.items():
-            if symbol not in correlated_symbols:
+            if symbol not in CORRELATED_SYMBOLS:
                 continue
 
             if position.quantity == 0:
@@ -432,31 +431,32 @@ class RiskManager:
         # 15. Correlated BTC/ETH exposure
         # ========================================================
 
-        correlated_exposure = self._correlated_exposure(
-            portfolio_state,
-            market_state,
-        )
-
-        if not math.isfinite(correlated_exposure):
-            return self._reject(
-                "INVALID_CORRELATED_EXPOSURE"
+        # Only an order that ADDS to the BTC / ETH bucket is checked. Every order used to be: while a BTC or ETH
+        # position above the limit was open, all other coins' entries were rejected too (9,092 rejections by
+        # 23 Oct 2026, mostly DOGE / XRP / ADA / SOL), although they do not change the BTC / ETH exposure.
+        if order_request.symbol in CORRELATED_SYMBOLS:
+            correlated_exposure = self._correlated_exposure(
+                portfolio_state,
+                market_state,
             )
 
-        if order_request.symbol in {"BTCUSDT", "ETHUSDT"}:
-            correlated_exposure += proposed_notional
+            if not math.isfinite(correlated_exposure):
+                return self._reject(
+                    "INVALID_CORRELATED_EXPOSURE"
+                )
 
-        correlated_pct = (
-            correlated_exposure
-            / portfolio_state.equity
-        )
-
-        if (
-            correlated_pct
-            > self.correlated_exposure_limit_pct
-        ):
-            return self._reject(
-                "CORRELATED_EXPOSURE_LIMIT"
+            correlated_pct = (
+                (correlated_exposure + proposed_notional)
+                / portfolio_state.equity
             )
+
+            if (
+                correlated_pct
+                > self.correlated_exposure_limit_pct
+            ):
+                return self._reject(
+                    "CORRELATED_EXPOSURE_LIMIT"
+                )
 
         # ========================================================
         # 16. Final quantity validation

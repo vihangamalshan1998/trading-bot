@@ -309,6 +309,12 @@ class ReplayBuffer:
             # Fallback to random if cache is too small
             return random.sample(self.cache, len(self.cache))
             
+        if getattr(self, "replay_cache", None):
+            # With replayed history in the pool, no extra weight on the newest rows: they are the last day or two of
+            # live data, one market regime. In a falling market (23 Oct 2026: LONG -0.12% vs SHORT +0.10% on live
+            # rows, balanced on the 91 days of history) ~45% of every batch came from it and the brain learned
+            # "always short" within a few steps. Sampled evenly, live rows get their real share of the pool.
+            recent_pct = 0.0
         n_recent = int(batch_size * recent_pct)
         n_rare = int(batch_size * rare_pct)
         n_golden = int(batch_size * golden_pct)

@@ -160,3 +160,17 @@ def test_tiny_golden_pool_is_not_repeated_in_every_batch():
     assert not any(getattr(e, "_src", None) == "gold" for e in batch)   # 5 < GOLDEN_MIN_POOL: not used
     b.golden_cache = [SimpleNamespace(id=10_000 + i, reward=0.0, timestamp=i, _src="gold") for i in range(GOLDEN_MIN_POOL)]
     assert sum(getattr(e, "_src", None) == "gold" for e in b.sample(64)) == 6
+
+
+def test_newest_rows_get_no_extra_weight_when_history_is_loaded():
+    import random
+    from types import SimpleNamespace
+    from core.ai.replay_buffer import ReplayBuffer
+    b = ReplayBuffer.__new__(ReplayBuffer)
+    hist = [SimpleNamespace(id=i, reward=0.0, timestamp=i, _src="replay") for i in range(800)]
+    live = [SimpleNamespace(id=10_000 + i, reward=0.0, timestamp=10_000 + i) for i in range(200)]
+    b.cache, b.replay_cache, b.golden_cache = hist + live, hist, []
+    b.sumtree = SimpleNamespace(n_entries=0)
+    random.seed(1)
+    share = sum(sum(getattr(e, "_src", None) != "replay" for e in b.sample(64)) for _ in range(200)) / (200 * 64)
+    assert 0.12 < share < 0.30   # ~20% = live rows' share of the pool (was ~45% with the 30% "recent" slice)

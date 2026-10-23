@@ -277,7 +277,7 @@ class ProductionTradingBot:
             "profit_ratchet_active": self.profit_ratchet_active,
             "max_equity": self.max_equity,
             "rm_daily_high": rm.daily_high_equity,
-            "rm_global_high": rm.global_high_equity,
+            "rm_equity_highs_by_day": {str(d): v for d, v in rm.equity_highs_by_day.items()},
             "rm_last_day_reset": rm.last_day_reset,
             "consecutive_losses": {s: n for s, n in self.consecutive_losses.items() if n},
             "lockouts": {s: d for s, d in self.loss_lockout_until.items() if max(list(d.values()) or [0.0]) > time.time()},
@@ -303,7 +303,12 @@ class ProductionTradingBot:
         self.profit_ratchet_active = bool(risk.get("profit_ratchet_active", False))
         self.max_equity = max(self.max_equity, float(risk.get("max_equity") or 0.0))
         rm.daily_high_equity = max(rm.daily_high_equity, float(risk.get("rm_daily_high") or 0.0))
-        rm.global_high_equity = max(rm.global_high_equity, float(risk.get("rm_global_high") or 0.0))
+        # Drawdown highs of the last 7 days (risk_manager.DRAWDOWN_WINDOW_DAYS). The older all-time
+        # "rm_global_high" is deliberately not restored: it had no date, so it could never expire.
+        for d, v in (risk.get("rm_equity_highs_by_day") or {}).items():
+            rm.equity_highs_by_day[int(d)] = max(rm.equity_highs_by_day.get(int(d), 0.0), float(v))
+        if rm.equity_highs_by_day:
+            rm.global_high_equity = max(rm.equity_highs_by_day.values())
         rm.last_day_reset = float(risk.get("rm_last_day_reset") or rm.last_day_reset)
         for sym, n in (risk.get("consecutive_losses") or {}).items():
             self.consecutive_losses[sym] = int(n)

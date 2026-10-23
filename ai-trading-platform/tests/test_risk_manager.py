@@ -224,13 +224,31 @@ def test_N_overall_drawdown(base_state):
     rm_module.settings.max_drawdown_pct = 0.10
     rm = RiskManager()
     rm.daily_high_equity = 8000.0
-    rm.global_high_equity = 10000.0
+    rm.equity_highs_by_day[int(time.time() // 86400) - 3] = 10000.0  # high 3 days ago
     portfolio.equity = 8000.0 # 20% drawdown
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)
     assert not decision.approved
     assert decision.reason == "MAX_DRAWDOWN"
     assert decision.adjusted_quantity == 0.0
+
+
+def test_N_drawdown_high_expires_after_seven_days(base_state):
+    # A high older than the window no longer blocks: an all-time high used to block entries for good
+    market, portfolio = base_state
+    import core.risk.risk_manager as rm_module
+    rm_module.settings.max_drawdown_pct = 0.10
+    rm = RiskManager()
+    today = int(time.time() // 86400)
+    rm.daily_high_equity = 8000.0
+    rm.equity_highs_by_day[today - rm_module.DRAWDOWN_WINDOW_DAYS] = 10000.0
+    rm.equity_highs_by_day[today - 1] = 8500.0  # 5.9% above today's equity: inside the 10% limit
+    portfolio.equity = 8000.0
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    decision = rm.evaluate(req, portfolio, market)
+    assert decision.reason != "MAX_DRAWDOWN"
+    assert rm.global_high_equity == 8500.0
+    assert today - rm_module.DRAWDOWN_WINDOW_DAYS not in rm.equity_highs_by_day
 
 def test_K_correlated_exposure(base_state):
     market, portfolio = base_state

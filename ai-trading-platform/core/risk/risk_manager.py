@@ -1,5 +1,6 @@
 import math
 import time
+from typing import Dict
 
 from core.config.settings import settings
 from core.logging.logger import logger
@@ -11,6 +12,8 @@ from core.schemas.state_schema import (
     RiskDecision,
 )
 from core.risk.macro_crash_shield import macro_crash_shield
+
+DRAWDOWN_WINDOW_DAYS = 7
 
 
 class RiskManager:
@@ -50,6 +53,10 @@ class RiskManager:
         self.bullish_macro_threshold = 0.8
 
         self.daily_high_equity = 0.0
+        # Drawdown is measured from the highest equity of the last DRAWDOWN_WINDOW_DAYS UTC days: an all-time
+        # high never expired, so once the account was max_drawdown_pct under it, new entries stayed blocked
+        # for good (no trades, no way to recover). {utc_day_number: highest equity that day}
+        self.equity_highs_by_day: Dict[int, float] = {}
         self.global_high_equity = 0.0
         self.last_day_reset = time.time()
 
@@ -72,18 +79,16 @@ class RiskManager:
         if self.daily_high_equity <= 0:
             self.daily_high_equity = equity
 
-        if self.global_high_equity <= 0:
-            self.global_high_equity = equity
-
         self.daily_high_equity = max(
             self.daily_high_equity,
             equity,
         )
 
-        self.global_high_equity = max(
-            self.global_high_equity,
-            equity,
-        )
+        day = int(now // 86400)
+        self.equity_highs_by_day[day] = max(self.equity_highs_by_day.get(day, 0.0), equity)
+        for d in [d for d in self.equity_highs_by_day if d <= day - DRAWDOWN_WINDOW_DAYS]:
+            del self.equity_highs_by_day[d]
+        self.global_high_equity = max(self.equity_highs_by_day.values())
 
     def _correlated_exposure(
         self,

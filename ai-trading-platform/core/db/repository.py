@@ -93,7 +93,7 @@ class ExperienceRepository:
         to_insert = self._buffer[:]
         self._buffer.clear()
         
-        session = async_session_maker()
+        session = AsyncSessionLocal()  # was the undefined name async_session_maker (NameError on every flush)
         try:
             session.add_all(to_insert)
             await session.commit()

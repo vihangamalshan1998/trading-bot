@@ -132,7 +132,6 @@ class TelegramCommandCenter:
                 if pause_ts:
                     p_val = float(pause_ts.decode("utf-8") if isinstance(pause_ts, bytes) else pause_ts)
                     if p_val > time.time():
-                        is_paused = True
                         pause_remaining = (p_val - time.time()) / 60.0
                         
                 # Check portfolio (dashboard:portfolio holds equity and positions only)

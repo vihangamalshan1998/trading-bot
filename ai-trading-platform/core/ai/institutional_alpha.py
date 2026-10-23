@@ -1,7 +1,7 @@
 import collections
 import time
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from core.logging.logger import logger
 from core.schemas.state_schema import MarketState
 

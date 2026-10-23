@@ -39,6 +39,21 @@ STATE_HISTORY_SAVE_SECONDS = 60.0
 STATE_HISTORY_MAX_AGE_SECONDS = 300.0  # older saved history is not restored: the gap would distort the brain's view
 FEED_MAX_AGE_SECONDS = 60.0  # whale / statarb states older than this read as "no data"
 
+_BACKGROUND_TASKS: set = set()
+
+
+def _spawn(coro) -> "asyncio.Task":
+    """
+    asyncio.create_task that keeps a reference until the task ends. The event loop only holds weak references
+    to tasks, so a fire-and-forget task (training record publish, Telegram alert) could be garbage-collected
+    before it finished, losing the record or alert without an error.
+    """
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
 class ProductionTradingBot:
     """
     Phase 1: Safe Execution Engine with Canonical Schemas.
@@ -674,7 +689,7 @@ class ProductionTradingBot:
                 "realized_pnl": 0.0,
                 "unrealized_pnl": float(getattr(pos, "unrealized_pnl", 0.0) or 0.0),
             }
-            asyncio.create_task(redis_manager.publish_binary("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
+            _spawn(redis_manager.publish_binary("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
         except Exception as e:
             logger.warning(f"[{sym}] Market snapshot record skipped: {e}")
 
@@ -831,7 +846,7 @@ class ProductionTradingBot:
                         crash_now, drop_pct = macro_crash_shield.update_btc_price(m_state.mid_price, m_state.timestamp)
                         if crash_now:
                             peak_px = max([p for t, p in macro_crash_shield.btc_price_history])
-                            asyncio.create_task(
+                            _spawn(
                                 telegram_notifier.broadcast_alert(
                                     "FLASH_CRASH",
                                     "",
@@ -1185,7 +1200,7 @@ class ProductionTradingBot:
                                         signed_trim = float(trim_qty_str) if trim_side == "BUY" else -float(trim_qty_str)
                                         await self._record_airbag_trim(worst_sym, worst_pos, float(trim_qty_str), trim_res, m_st.mid_price)
                                         worst_pos.quantity += signed_trim
-                                        asyncio.create_task(
+                                        _spawn(
                                             telegram_notifier.broadcast_alert(
                                                 "MARGIN_CUSHION_TRIM",
                                                 worst_sym,
@@ -1601,7 +1616,7 @@ class ProductionTradingBot:
                                 if "CLOSE" in rec_side:
                                     tr = self.active_orders[sym]['trade_record']
                                     holding_mins = (time.time() - self.position_entry_times.get(sym, time.time())) / 60.0
-                                    asyncio.create_task(
+                                    _spawn(
                                         telegram_notifier.broadcast_alert(
                                             "TRADE_EXIT",
                                             "",
@@ -1715,7 +1730,7 @@ class ProductionTradingBot:
                                     self.portfolio_state.free_margin += margin_used
                                     
                                     # Institutional Upgrade: Broadcast Order Timeout Alert to Telegram
-                                    asyncio.create_task(
+                                    _spawn(
                                         telegram_notifier.broadcast_alert(
                                             "ORDER_TIMEOUT",
                                             "",
@@ -2190,7 +2205,7 @@ class ProductionTradingBot:
                                 "realized_pnl": 0.0,
                                 "unrealized_pnl": 0.0
                             }
-                            asyncio.create_task(redis_manager.publish_binary("experience:completed", msgpack.packb(hold_exp_data, use_bin_type=True)))
+                            _spawn(redis_manager.publish_binary("experience:completed", msgpack.packb(hold_exp_data, use_bin_type=True)))
                         continue 
 
                     if is_closing and not exit_override:
@@ -2463,7 +2478,7 @@ class ProductionTradingBot:
                                 "realized_pnl": 0.0,
                                 "unrealized_pnl": float(pos.unrealized_pnl) if hasattr(pos, 'unrealized_pnl') else 0.0
                             }
-                            asyncio.create_task(redis_manager.publish_binary("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
+                            _spawn(redis_manager.publish_binary("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
                     
                     if side != "HOLD":
                         active_version = self.registry.get_current_version()
@@ -2706,7 +2721,7 @@ class ProductionTradingBot:
                                                 f"Fill Price ${avg_fill:,.4f} deviated {slippage_pct*100:.2f}% from Mid ${market.mid_price:,.4f} (> 0.75% threshold)! "
                                                 f"Quarantining {sym} for 15 minutes to allow orderbook depth to normalize."
                                             )
-                                            asyncio.create_task(
+                                            _spawn(
                                                 telegram_notifier.broadcast_alert(
                                                     "SLIPPAGE_ANOMALY",
                                                     sym,
@@ -2836,7 +2851,7 @@ class ProductionTradingBot:
                                         
                                         # Institutional Upgrade 4: Telegram Exit Alert
                                         holding_mins = (time.time() - self.position_entry_times.get(sym, time.time())) / 60.0
-                                        asyncio.create_task(
+                                        _spawn(
                                             telegram_notifier.broadcast_alert(
                                                 "TRADE_EXIT",
                                                 "",
@@ -2856,7 +2871,7 @@ class ProductionTradingBot:
                                     elif "OPEN" in side:
                                         # Institutional Upgrade 4: Telegram Entry Alert
                                         alert_lv = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
-                                        asyncio.create_task(
+                                        _spawn(
                                             telegram_notifier.broadcast_alert(
                                                 "TRADE_ENTRY",
                                                 "",
@@ -2973,8 +2988,8 @@ class ProductionTradingBot:
                                                     f"Freezing all new trade entries for {int(cooldown_secs/60)} minutes to protect portfolio capital."
                                                 )
                                                 if self.redis.redis:
-                                                    asyncio.create_task(self.redis.redis.set("system:pause_until", str(self.pause_until)))
-                                                asyncio.create_task(
+                                                    _spawn(self.redis.redis.set("system:pause_until", str(self.pause_until)))
+                                                _spawn(
                                                     telegram_notifier.broadcast_alert(
                                                         "LOSS_VELOCITY_BREAKER",
                                                         "",
@@ -3167,7 +3182,7 @@ class ProductionTradingBot:
                             logger.debug(f"[{sym}] Watchdog cancel error: {cancel_e}")
                         self.active_orders.pop(sym, None)
                     
-                    asyncio.create_task(
+                    _spawn(
                         telegram_notifier.broadcast_alert(
                             "HEARTBEAT_STALL",
                             "",
@@ -3267,7 +3282,7 @@ class ProductionTradingBot:
                             f"🏛️ ECONOMIC EVENT SHIELD: {next_event['name']} in {mins_until:.1f} mins! "
                             f"Pausing new order executions to avoid spread blowout."
                         )
-                        asyncio.create_task(
+                        _spawn(
                             telegram_notifier.broadcast_alert(
                                 "ECONOMIC_SHIELD",
                                 "",

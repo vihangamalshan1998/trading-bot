@@ -11,7 +11,6 @@ from core.logging.logger import logger
 from apps.research.historical_futures_loader import HistoricalFuturesLoader
 from apps.research.model import SingleSymbolActorCritic, MultiSymbolActorCritic
 from core.ai.memory import EventMemoryBuffer
-import os
 
 class ForwardTester:
     """
@@ -286,6 +285,7 @@ class ForwardTester:
                 base_capital = 5000.0
                 norm_wallet = float(np.clip(wallet_balance / base_capital, 0.0, 5.0))
                 norm_equity = float(np.clip(equity / base_capital, 0.0, 5.0))
+                free_margin = equity - used_margin  # was undefined (NameError on the first simulated step)
                 norm_free_margin = float(np.clip(free_margin / equity if equity > 0 else 1.0, 0.0, 1.0))
                 margin_util = used_margin / equity if equity > 0 else 0.0
                 norm_exposure = float(np.clip(trade_notional / equity if equity > 0 else 0.0, 0.0, 10.0))

@@ -2764,6 +2764,8 @@ class ProductionTradingBot:
                                             "confidence_calibrated": self._calibrated_confidence(float(confidence)),
                                             "predicted_move_pct": float(edge_move_pred),
                                             "est_cost_pct": float(edge_result.estimated_costs_pct),
+                                            # Which brain opened it: the dashboard compares its test win chance with live results
+                                            "model_version": active_version,
                                         })
                                     else:
                                         trade_record["exit_reason"] = (

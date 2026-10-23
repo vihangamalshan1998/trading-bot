@@ -445,6 +445,44 @@ const reasonLabel = {
 }
 const tooltipStyle = { backgroundColor: '#0d1220', border: '1px solid #2f3a4d', borderRadius: 8, fontSize: 12 }
 
+// "Test said X% -> live got Y%": the brain's honest win chance at entry vs how its live trades really ended
+const pctOrDash = (v) => (v == null ? '—' : `${(v * 100).toFixed(0)}%`)
+const LiveCheck = ({ check }) => {
+  if (!check) return null
+  const gap = check.n ? check.live_win - check.test_win : 0
+  const verdict = !check.n ? null : check.n < 20 ? 'Too few trades to judge yet (need about 20+).'
+    : Math.abs(gap) <= 0.10 ? 'Live results match the test: the win chance is honest.'
+      : gap < 0 ? 'Live trades win less often than the test promised.' : 'Live trades win more often than the test promised.'
+  return (
+    <Card title="Test said vs live got"
+      help="For each live trade: the win chance the brain gave when it opened (measured on its unseen-data test) vs whether the whole trade (50% take-profit + final close) made money after fees."
+      desc={check.scope === 'brain' ? `Trades opened by the live brain ${check.brain}.` : 'All recent trades (older trades did not record which brain opened them).'}>
+      {!check.n ? <Empty title="No finished trades yet">Fills in as the live brain's trades close.</Empty> : (
+        <>
+          <div className="kv-grid">
+            <KV label="Trades" value={check.n} />
+            <KV label="Test said (avg win chance)" value={pctOrDash(check.test_win)} />
+            <KV label="Live got (real win rate)" value={pctOrDash(check.live_win)} cls={check.n >= 20 ? tone(gap, 0.10) : ''} />
+          </div>
+          {check.buckets.length > 1 && (
+            <div className="table-wrap" style={{ marginTop: 12 }}>
+              <table className="tbl">
+                <thead><tr><th>Win chance at entry</th><th>Trades</th><th>Test said</th><th>Live got</th></tr></thead>
+                <tbody>
+                  {check.buckets.map((b) => (
+                    <tr key={b.range}><td>{b.range}</td><td>{b.n}</td><td>{pctOrDash(b.test_win)}</td><td>{pctOrDash(b.live_win)}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="small muted" style={{ marginBottom: 0 }}>{verdict}</p>
+        </>
+      )}
+    </Card>
+  )
+}
+
 const Brain = ({ ctx }) => {
   const { brain, stats } = ctx
   if (!brain) return <div className="loading">Loading brain status…</div>
@@ -527,6 +565,8 @@ const Brain = ({ ctx }) => {
           <p className="small faint" style={{ marginBottom: 0 }}>{brain.legacy_tournaments} older tournaments are hidden (they used the old, broken scoring).</p>
         </Card>
       </div>
+
+      <LiveCheck check={brain.live_check} />
 
       <div className="grid side">
         <Card title="Live brain: results per coin" help="How the live brain did on each coin in its unseen-data test (trades above its confidence threshold). Coins that lost money over 20+ trades are blocked.">

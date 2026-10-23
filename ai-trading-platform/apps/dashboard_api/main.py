@@ -245,6 +245,57 @@ def _read_json_file(path: str, default):
         return default
 
 
+LIVE_CHECK_BUCKETS = ((0.0, 0.45), (0.45, 0.55), (0.55, 0.65), (0.65, 1.01))
+
+
+def live_vs_test(history: list, version: str = None) -> dict:
+    """
+    "Test said X% -> live got Y%": every live trade paired from the trade history (OPEN, its 50% take-profit,
+    the final CLOSE), comparing the honest win chance the brain gave at entry (calibrated on its holdout test)
+    with whether the whole trade made money after fees. Only trades of `version` when the history records the
+    brain that opened them (from 23 Oct 2026); otherwise all recent trades.
+    """
+    open_by_sym, trades = {}, []
+    for r in sorted(history, key=lambda x: float(x.get("timestamp") or 0)):
+        side, sym = str(r.get("side") or ""), r.get("symbol")
+        pnl = float(r.get("realized_pnl") or 0.0) if isinstance(r.get("realized_pnl"), (int, float)) else 0.0
+        if side.startswith("OPEN"):
+            p = r.get("confidence_calibrated")
+            if isinstance(p, (int, float)):
+                open_by_sym[sym] = {"p": float(p), "version": r.get("model_version"), "pnl": 0.0}
+            else:
+                open_by_sym.pop(sym, None)  # recovered / untested entry: no win chance to compare
+        elif side.startswith("PARTIAL_CLOSE"):
+            if sym in open_by_sym:
+                open_by_sym[sym]["pnl"] += pnl
+        elif side.startswith("CLOSE"):
+            t = open_by_sym.pop(sym, None)
+            if t:
+                t["pnl"] += pnl
+                trades.append(t)
+        elif side.startswith("DUST_CLEAN"):
+            open_by_sym.pop(sym, None)  # tiny unfilled stub closed at once: not a real trade
+    tagged = [t for t in trades if t["version"]]
+    scope = "brain"
+    if version and tagged:
+        trades = [t for t in tagged if t["version"] == version]
+    elif not tagged:
+        scope = "all recent trades"
+
+    def summary(ts):
+        n = len(ts)
+        return {"n": n,
+                "test_win": sum(t["p"] for t in ts) / n if n else None,
+                "live_win": sum(t["pnl"] > 0 for t in ts) / n if n else None}
+
+    out = {"brain": version if scope == "brain" else None, "scope": scope, **summary(trades), "buckets": []}
+    for lo, hi in LIVE_CHECK_BUCKETS:
+        b = [t for t in trades if lo <= t["p"] < hi]
+        if b:
+            out["buckets"].append({"range": f"{lo * 100:.0f}-{min(hi, 1.0) * 100:.0f}%", **summary(b)})
+    return out
+
+
 @app.get("/api/brain")
 async def get_brain():
     version = _read_json_file(os.path.join(MODEL_DIR, "version.json"), {}) or {}
@@ -253,14 +304,21 @@ async def get_brain():
     evaluator = metrics.get("evaluator_version") or nested.get("evaluator_version") or ""
     policy = metrics.get("trade_policy") or nested.get("trade_policy") or {}
 
-    history = _read_json_file(os.path.join(MODEL_DIR, "tournament_history.json"), []) or []
-    v3 = [e for e in history if str(e.get("evaluator_version") or "").startswith("v3")]
+    tournament_history = _read_json_file(os.path.join(MODEL_DIR, "tournament_history.json"), []) or []
+    v3 = [e for e in tournament_history if str(e.get("evaluator_version") or "").startswith("v3")]
     reasons = {}
     for e in v3:
         reasons[e.get("reason") or "UNKNOWN"] = reasons.get(e.get("reason") or "UNKNOWN", 0) + 1
 
     model_path = os.path.join(MODEL_DIR, "model_v1.pt")
     trainer = await _redis_json(TRAINER_STATUS_KEY)
+    trade_history = []
+    if redis_manager.redis:
+        for item in await redis_manager.redis.lrange("dashboard:trade_history", 0, -1):
+            try:
+                trade_history.append(json.loads(item))
+            except Exception:
+                pass
     return {
         "champion": {
             "version": version.get("version", "unknown"),
@@ -276,7 +334,8 @@ async def get_brain():
             "challenger_trades", "champion_trades", "challenger_win_rate", "challenger_critic_skill",
             "champion_critic_skill", "blocked_symbols", "min_confidence", "sample_size")} for e in v3[-300:]],
         "tournament_reasons": reasons,
-        "legacy_tournaments": len(history) - len(v3),
+        "legacy_tournaments": len(tournament_history) - len(v3),
+        "live_check": live_vs_test(trade_history, version.get("version")),
         "trainer": trainer,
     }
 

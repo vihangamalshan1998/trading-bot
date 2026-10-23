@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import torch
 
 from apps.research.model import SingleSymbolActorCritic
-from apps.trainer.ppo import LIVE_ENTRY_HURDLE_PCT, MIN_GATED_TRADES, ROUND_TRIP_COST_PCT, PPOTrainer
+from apps.trainer.ppo import (LIVE_ENTRY_HURDLE_PCT, LIVE_QUIET_SESSION_HURDLE_PCT, MIN_GATED_TRADES,
+                              ROUND_TRIP_COST_PCT, PPOTrainer, live_entry_hurdle_pct)
 
 H = LIVE_ENTRY_HURDLE_PCT
 
@@ -24,6 +25,21 @@ def test_live_entry_rule_mirrors_the_bot():
     ])
     pos = PPOTrainer.live_entry_positions(vals)[:, 0].tolist()
     assert pos == [1.0, -1.0, 0.0, 0.0, 0.0]
+
+
+def test_live_entry_hurdle_follows_the_bot_sessions():
+    # 2026-10-22 is a Thursday, 2026-10-24 a Saturday (UTC)
+    thu = 1792627200
+    assert live_entry_hurdle_pct(thu + 3 * 3600) == max(LIVE_QUIET_SESSION_HURDLE_PCT, H)    # 03:00 Asia off-peak
+    assert live_entry_hurdle_pct(thu + 10 * 3600) == H                                      # 10:00 London
+    assert live_entry_hurdle_pct(thu + 15 * 3600) == H                                      # 15:00 New York
+    assert live_entry_hurdle_pct(thu + 22 * 3600) == max(LIVE_QUIET_SESSION_HURDLE_PCT, H)  # 22:00 off-peak again
+    assert live_entry_hurdle_pct(thu + 2 * 86400 + 15 * 3600) == max(LIVE_QUIET_SESSION_HURDLE_PCT, H)  # weekend
+    # A forecast between the two hurdles trades in New York hours only
+    move = (H + max(LIVE_QUIET_SESSION_HURDLE_PCT, H)) / 2
+    vals = torch.tensor([[0.0, move, move], [0.0, move, move]])
+    hurdles = torch.tensor([live_entry_hurdle_pct(thu + 15 * 3600), live_entry_hurdle_pct(thu + 3 * 3600)])
+    assert PPOTrainer.live_entry_positions(vals, hurdles)[:, 0].tolist() == [1.0, 0.0]
 
 
 def _res(pos, pnl, conf):
@@ -84,7 +100,7 @@ def _run(tmp_path, monkeypatch, chall, champ):
     t = _trainer()
     t.buffer = _Buffer(len(chall["live_pos"]))
     calls = iter([chall, champ])
-    monkeypatch.setattr(t, "_score_policy", lambda model, states, rewards: next(calls))
+    monkeypatch.setattr(t, "_score_policy", lambda model, states, rewards, hurdles=None: next(calls))
     return t.evaluate_candidate(sample_size=1000)
 
 

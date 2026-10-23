@@ -44,6 +44,19 @@ DIR_LOG_STD_MIN = -1.4
 LIVE_ENTRY_HURDLE_PCT = max(settings.min_open_expected_return_pct,
                             settings.min_edge_cost_multiple * exit_policy.ROUND_TRIP_COST * 100.0)
 MIN_GATED_TRADES = 30          # trades the live rules take in Part B before a verdict counts
+# The live bot raises the critic hurdle to this in the Asia off-peak hours (21:00-08:00 UTC) and at weekends
+# (session table in apps/trading_bot/main.py inference_loop).
+LIVE_QUIET_SESSION_HURDLE_PCT = 0.30
+
+
+def live_entry_hurdle_pct(ts: float) -> float:
+    """Expected-move hurdle (% of price) the live bot applies to an entry at UTC time ts."""
+    import datetime
+    t = datetime.datetime.fromtimestamp(float(ts), datetime.timezone.utc)
+    hour = t.hour + t.minute / 60.0
+    quiet = t.weekday() >= 5 or not (8.0 <= hour < 21.0)
+    return max(LIVE_QUIET_SESSION_HURDLE_PCT, LIVE_ENTRY_HURDLE_PCT) if quiet else LIVE_ENTRY_HURDLE_PCT
+
 CANDIDATE_LATEST_PATH = "models/candidates/candidate_latest.pt"
 DIR_LOG_STD_MAX = -1.2
 
@@ -608,18 +621,20 @@ class PPOTrainer:
             pass
 
     @staticmethod
-    def live_entry_positions(vals: torch.Tensor) -> torch.Tensor:
+    def live_entry_positions(vals: torch.Tensor, hurdles: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         (B, 1) position the live bot would open from the critic forecasts [5m, 1h, 4h] (% of price), BEFORE
         the confidence gate: +1 LONG / -1 SHORT / 0 none. Mirrors GUARD 4 in the trading bot: the blended
-        expected move must clear LIVE_ENTRY_HURDLE_PCT (it then decides the side, the actor only sizes),
-        and the 1h / 4h forecasts must not oppose the trade.
+        expected move must clear the hurdle (it then decides the side, the actor only sizes), and the 1h / 4h
+        forecasts must not oppose the trade. hurdles: (B,) per-row hurdle (live_entry_hurdle_pct of each
+        row's time); default LIVE_ENTRY_HURDLE_PCT.
         """
         w = torch.tensor(exit_policy.HORIZON_WEIGHTS, dtype=vals.dtype)
         exp_move = (vals[:, :3] * w).sum(dim=-1)
+        hurdle = hurdles.to(vals.dtype) if hurdles is not None else LIVE_ENTRY_HURDLE_PCT
         v1h, v4h = vals[:, 1], vals[:, 2]
-        long_ok = (exp_move >= LIVE_ENTRY_HURDLE_PCT) & ~(v1h < -0.20) & ~((v4h < -0.30) & (v1h <= 0.0))
-        short_ok = (exp_move <= -LIVE_ENTRY_HURDLE_PCT) & ~(v1h > 0.20) & ~((v4h > 0.30) & (v1h >= 0.0))
+        long_ok = (exp_move >= hurdle) & ~(v1h < -0.20) & ~((v4h < -0.30) & (v1h <= 0.0))
+        short_ok = (exp_move <= -hurdle) & ~(v1h > 0.20) & ~((v4h > 0.30) & (v1h >= 0.0))
         return (long_ok.float() - short_ok.float()).unsqueeze(1)
 
     def _live_split_score(self, res: dict, symbols: List[str], n_a: int) -> dict:
@@ -653,7 +668,8 @@ class PPOTrainer:
         policy["filtered_pnl_per_trade"] = round(out["pnl_per_trade"], 5)  # honest: Part B only
         return out
 
-    def _score_policy(self, model: nn.Module, states: torch.Tensor, rewards: torch.Tensor) -> dict:
+    def _score_policy(self, model: nn.Module, states: torch.Tensor, rewards: torch.Tensor,
+                      hurdles: Optional[torch.Tensor] = None) -> dict:
         """Deterministic (live-like) holdout scoring of one model."""
         model.eval()
         if not bool(getattr(model, "feat_fitted", False)):
@@ -670,7 +686,7 @@ class PPOTrainer:
         n_trades = int((pos != 0).sum().item())
         wins = int(((pnl > 0) & (pos != 0)).sum().item())
         # What the live bot would actually open (critic hurdle + 1h / 4h alignment), before the confidence gate
-        live_pos = self.live_entry_positions(vals)
+        live_pos = self.live_entry_positions(vals, hurdles)
         live_gross = torch.where(live_pos > 0, long_ret, torch.where(live_pos < 0, short_ret, torch.zeros_like(live_pos)))
         live_pnl = live_gross - ROUND_TRIP_COST_PCT * live_pos.abs()
         conf = torch.clamp((acts[:, 1] + 1.0) / 2.0, 0.05, 0.99)   # same mapping as the live bot
@@ -803,6 +819,9 @@ class PPOTrainer:
             row_symbols = list(getattr(self.buffer, "last_symbols", []) or [])
             if len(row_symbols) != len(states):
                 row_symbols = [""] * len(states)
+            row_ts = list(getattr(self.buffer, "last_timestamps", []) or [])
+            hurdles = (torch.tensor([live_entry_hurdle_pct(t) for t in row_ts], dtype=torch.float32)
+                       if len(row_ts) == len(states) else None)
             if len(states) < min_eval_samples:
                 logger.warning(f"Candidate evaluation REJECTED: Insufficient valid sequence tensors ({len(states)} < {min_eval_samples}).")
                 return {"approved": False, "reason": "INSUFFICIENT_TENSORS", "critic_loss": 0.0, "entropy": 0.0}
@@ -812,7 +831,7 @@ class PPOTrainer:
             rewards = torch.clamp(torch.nan_to_num(rewards, nan=0.0, posinf=0.0, neginf=0.0), min=-15.0, max=15.0)
             del actions, next_states, dones
 
-            chall = self._score_policy(self.model, states, rewards)
+            chall = self._score_policy(self.model, states, rewards, hurdles=hurdles)
             if torch.isnan(chall["acts"]).any() or torch.isnan(chall["vals"]).any():
                 logger.error("Candidate evaluation FAILED: Challenger output contains NaN.")
                 return {"approved": False, "reason": "NAN_OUTPUTS"}
@@ -844,7 +863,7 @@ class PPOTrainer:
             try:
                 champion_state = torch.load(champion_path, map_location="cpu")
                 champion_model.load_state_dict(champion_state)
-                champ = self._score_policy(champion_model, states, rewards)
+                champ = self._score_policy(champion_model, states, rewards, hurdles=hurdles)
                 del champion_model
             except Exception as champ_e:
                 logger.error(f"Candidate evaluation FAILED: Corrupt, incompatible, or unloadable champion model ({champ_e}). Failing closed without fabricating benchmark scores.")

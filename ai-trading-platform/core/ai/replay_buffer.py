@@ -523,6 +523,7 @@ class ReplayBuffer:
         """
         states, actions, rewards, next_states, dones = [], [], [], [], []
         self.last_symbols = []  # symbol of each returned row (same order), used for per-coin holdout stats
+        self.last_timestamps = []  # time of each returned row (same order), used for the live session hurdle
         
         for exp in batch:
             if exp.reward_5m is None or exp.reward_1h is None or exp.reward_4h is None:
@@ -563,6 +564,7 @@ class ReplayBuffer:
             rewards.append([r_5m_clean, r_1h_clean, r_4h_clean, long_pct, short_pct])  # 3 critic heads + 2 trade outcomes
             next_states.append(seq_states)
             self.last_symbols.append(getattr(exp, "symbol", "") or "")
+            self.last_timestamps.append(float(getattr(exp, "timestamp", 0) or 0))
             # Each sample is an independent one-step decision (contextual bandit): always terminal.
             dones.append([1.0])
             

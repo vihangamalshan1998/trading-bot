@@ -228,3 +228,41 @@ def test_airbag4_margin_cushion_detects_critical_ratio():
     assert worst_pos.quantity == 1000.0
     trim_qty = abs(worst_pos.quantity) * 0.25
     assert trim_qty == 250.0
+
+
+def test_total_exposure_feeds_the_portfolio_cap():
+    """total_exposure (never filled before, so the 20x portfolio cap never applied) sums open notionals."""
+    from core.risk.risk_manager import RiskManager
+    from core.schemas.state_schema import OrderRequest
+    import core.risk.risk_manager as rm_module
+
+    bot = ProductionTradingBot(symbols=["BTCUSDT", "ETHUSDT", "XRPUSDT"])
+    bot.market_states["BTCUSDT"] = make_market_state("BTCUSDT", 100.0)
+    bot.portfolio_state.positions["BTCUSDT"].quantity = 300.0      # $30,000 long at the market price
+    bot.portfolio_state.positions["ETHUSDT"].quantity = -200.0     # $20,000 short, no market state yet:
+    bot.portfolio_state.positions["ETHUSDT"].entry_price = 100.0   # valued at its entry price
+    for s in ("BTCUSDT", "ETHUSDT"):
+        bot.portfolio_state.positions[s].current_price = 100.0     # set every tick by the live loop
+    assert bot._refresh_total_exposure() == pytest.approx(50000.0)
+    assert bot.portfolio_state.total_exposure == pytest.approx(50000.0)
+
+    # Equity $3,000 x 20 = $60,000 cap: a $15,000 third trade would make $65,000 -> rejected
+    old = (rm_module.settings.trading_enabled, rm_module.settings.emergency_stop)
+    rm_module.settings.trading_enabled, rm_module.settings.emergency_stop = True, False
+    try:
+        rm = RiskManager()
+        rm.max_open_positions = 10
+        rm.max_symbol_exposure_pct = 20.0
+        rm.correlated_exposure_limit_pct = 20.0
+        rm.max_position_margin_pct = 1.0
+        port = bot.portfolio_state
+        port.equity, port.free_margin = 3000.0, 3000.0
+        market = make_market_state("XRPUSDT", 1.0)
+        req = OrderRequest(symbol="XRPUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=15000.0,
+                           target_position=1.0, model_version="v1", timestamp=time.time())
+        assert rm.max_portfolio_exposure_pct == 20.0
+        assert rm.evaluate(req, port, market).reason == "EXCESSIVE_PORTFOLIO_EXPOSURE"
+        req.requested_quantity = 5000.0   # $55,000 total: allowed
+        assert rm.evaluate(req, port, market).approved
+    finally:
+        rm_module.settings.trading_enabled, rm_module.settings.emergency_stop = old

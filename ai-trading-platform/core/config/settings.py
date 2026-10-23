@@ -50,7 +50,11 @@ class Settings(BaseSettings):
     max_position_size: float = Field(default=50000.0, gt=0)   # USD notional per coin (40% margin @20x is ~8x equity)
     # Portfolio & Symbol Exposure Limits (Leverage multiples of equity: 8.0 = 800% notional exposure / 8x leverage)
     max_symbol_exposure_pct: float = Field(default=8.0, gt=0)     # Max 8x equity notional per symbol (40% margin @ 20x)
-    max_portfolio_exposure_pct: float = Field(default=10.0, gt=0) # Max 10x aggregate portfolio leverage
+    # Max 20x aggregate notional across all open positions (backup cap: one trade at 25-40% margin x 20x is 5-8x)
+    max_portfolio_exposure_pct: float = Field(default=20.0, gt=0)
+    # Open positions in the same direction at once. Several longs (or shorts) at once are mostly one market bet
+    # (22 Oct 2026: 5 longs hit their stops in the same minute); kept at 5 for now to judge the refit brain.
+    max_same_side_positions: int = Field(default=5, ge=1)
 
     max_leverage: int = Field(default=20, gt=0)
     max_position_margin_pct: float = Field(default=0.40, gt=0, le=1.0)  # Max 40% of equity margin per coin (up to 40% on majors, 35% on alts)

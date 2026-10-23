@@ -338,6 +338,22 @@ class ProductionTradingBot:
         logger.info(f"[{sym}] Restored trade state: held {(time.time() - float(r.get('entry_time') or time.time())) / 60:.0f} min, "
                     f"50% profit taken: {bool(r.get('tp1'))}, best move so far {float(r.get('peak') or 0.0) * 100:+.2f}% (leveraged).")
 
+    def _refresh_total_exposure(self) -> float:
+        """
+        Notional of all open positions (USD) into portfolio_state.total_exposure, for the risk manager's
+        max_portfolio_exposure_pct cap. It was never filled (always 0), so that cap never applied.
+        """
+        total = 0.0
+        for sym, p in self.portfolio_state.positions.items():
+            qty = abs(float(p.quantity or 0.0))
+            if qty <= 0:
+                continue
+            m = self.market_states.get(sym)
+            px = float(getattr(m, "mid_price", 0.0) or 0.0) or float(p.entry_price or 0.0)
+            total += qty * px
+        self.portfolio_state.total_exposure = total
+        return total
+
     def _stops_allowed(self) -> bool:
         return (settings.disaster_stop_enabled and self.trading_enabled and not self.dry_run
                 and not self.emergency_stop and (settings.allow_testnet or settings.allow_live_trading))
@@ -1271,6 +1287,7 @@ class ProductionTradingBot:
                             self.partial_tp_triggered[s] = False
                             self.position_exit_levels.pop(s, None)
 
+                    self._refresh_total_exposure()
                     await self._ensure_disaster_stops(live_positions)
                     
                     if self.redis.redis:
@@ -2008,8 +2025,9 @@ class ProductionTradingBot:
                             continue
 
                     # GUARD 1.2: Net Portfolio Beta & Correlation Exposure Governor
-                    # Caps simultaneous unidirectional open positions to max 5 Longs or 5 Shorts
+                    # Caps simultaneous unidirectional open positions (settings.max_same_side_positions)
                     if not is_closing and pos.quantity == 0:
+                        max_same_side = settings.max_same_side_positions
                         open_longs = [s for s, p in self.portfolio_state.positions.items() if p.quantity > 1e-5]
                         open_shorts = [s for s, p in self.portfolio_state.positions.items() if p.quantity < -1e-5]
                         
@@ -2023,15 +2041,15 @@ class ProductionTradingBot:
                         net_exposure_ceiling = max(800.0, self.portfolio_state.equity * 0.50) # 50% of equity (min $800 safety buffer)
                         
                         if action_val > 0.20:
-                            if len(open_longs) >= 5:
-                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Longs reached ({len(open_longs)}/5: {open_longs}). Blocking new Long to prevent correlated drawdown!")
+                            if len(open_longs) >= max_same_side:
+                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Longs reached ({len(open_longs)}/{max_same_side}: {open_longs}). Blocking new Long to prevent correlated drawdown!")
                                 continue
                             if (long_margin - short_margin) >= net_exposure_ceiling:
                                 logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Net Long margin exposure (${long_margin - short_margin:.2f} >= ${net_exposure_ceiling:.2f} limit). Blocking Long!")
                                 continue
                         elif action_val < -0.20:
-                            if len(open_shorts) >= 5:
-                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Shorts reached ({len(open_shorts)}/5: {open_shorts}). Blocking new Short to prevent correlated drawdown!")
+                            if len(open_shorts) >= max_same_side:
+                                logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Maximum concurrent Shorts reached ({len(open_shorts)}/{max_same_side}: {open_shorts}). Blocking new Short to prevent correlated drawdown!")
                                 continue
                             if (short_margin - long_margin) >= net_exposure_ceiling:
                                 logger.info(f"[{sym}] 🛑 PORTFOLIO BETA GOVERNOR: Net Short margin exposure (${short_margin - long_margin:.2f} >= ${net_exposure_ceiling:.2f} limit). Blocking Short!")
@@ -2490,6 +2508,7 @@ class ProductionTradingBot:
                         )
                         
                         # Evaluate Risk via Schema
+                        self._refresh_total_exposure()
                         decision = self.risk_manager.evaluate(request, self.portfolio_state, market, self.macro_state)
                         
                         if decision.approved and decision.adjusted_quantity > 0:

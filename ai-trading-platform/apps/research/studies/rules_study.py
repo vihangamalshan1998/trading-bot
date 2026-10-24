@@ -1,4 +1,4 @@
-# Run from ai-trading-platform: PYTHONPATH=. venv/Scripts/python apps/research/studies/rules_study.py [training_days] [noexam]
+# Run from ai-trading-platform: PYTHONPATH=. venv/Scripts/python apps/research/studies/rules_study.py [training_days] [noexam] [combo]
 """Read-only study: extra entry/hold rules vs the live rules, on WHOLE history days (every graded moment of every coin,
 about one per coin per 10 min) so trades follow each other in time like live. The live brain decides every moment
 (live entry rule + its trade policy); a portfolio replay applies the live limits: one trade per coin, at most
@@ -111,7 +111,20 @@ def report(title, sigs):
         "8b 30 min lock": dict(lock_min=30),
         "8c 120 min lock": dict(lock_min=120),
     }
-    print(f"\n### {title}: {len(sigs)} brain signals ({sum(s.d > 0 for s in sigs)} long)")
+    btc = rules["1c BTC 1h strongly against (>0.5%) only"]["keep"]
+    fund = rules["7  funding filter (no crowded side)"]["keep"]
+    combos = {
+        "C1 BTC + funding (1c + 7)": dict(keep=lambda s: btc(s) and fund(s)),
+        "C2 BTC + 30 min lock (1c + 8b)": dict(keep=btc, lock_min=30),
+        "C3 funding + 30 min lock (7 + 8b)": dict(keep=fund, lock_min=30),
+        "C4 all three (1c + 7 + 8b)": dict(keep=lambda s: btc(s) and fund(s), lock_min=30),
+    }
+    if "combo" in sys.argv:
+        rules = {k: rules[k] for k in ("BASE live rules", "1c BTC 1h strongly against (>0.5%) only",
+                                       "7  funding filter (no crowded side)", "8b 30 min lock")}
+    rules.update(combos)
+    print(f"\n### {title}: {len(sigs)} brain signals ({sum(s.d > 0 for s in sigs)} long), "
+          f"funding filter: no long at >= {f_hi:.6f}, no short at <= {f_lo:.6f}")
     print(f"{'rule':44s} {'trades':>6s} {'long':>5s} {'win':>6s} {'per trade':>10s} {'total':>8s} {'long tot':>9s} {'short tot':>9s}")
     base = None
     for name, kw in rules.items():

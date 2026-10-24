@@ -1,4 +1,4 @@
-# Run from ai-trading-platform: PYTHONPATH=. venv/Scripts/python apps/research/studies/rules_study.py [training_days] [noexam] [combo]
+# Run from ai-trading-platform: PYTHONPATH=. venv/Scripts/python apps/research/studies/rules_study.py [training_days] [noexam] [combo|tune]
 """Read-only study: extra entry/hold rules vs the live rules, on WHOLE history days (every graded moment of every coin,
 about one per coin per 10 min) so trades follow each other in time like live. The live brain decides every moment
 (live entry rule + its trade policy); a portfolio replay applies the live limits: one trade per coin, at most
@@ -39,7 +39,7 @@ def btc_ret(ts, mins):
     return None if w is None else w[1000, 0] / w[1000 - mins, 0] - 1.0
 
 class Sig:
-    __slots__ = ("sym", "ts", "d", "conf", "funding", "ohlc", "lv", "btc1", "btc4", "_g")
+    __slots__ = ("sym", "ts", "d", "conf", "funding", "ohlc", "lv", "btc1", "btc4", "btc30", "own1", "own30", "_g")
     def grade(self, hold_h):
         """(sized net move, exit time) with the live exits and a max hold of hold_h hours."""
         if hold_h not in self._g:
@@ -123,6 +123,27 @@ def report(title, sigs):
         rules = {k: rules[k] for k in ("BASE live rules", "1c BTC 1h strongly against (>0.5%) only",
                                        "7  funding filter (no crowded side)", "8b 30 min lock")}
     rules.update(combos)
+    if "tune" in sys.argv:  # C2 is live since 24 Oct: tune its BTC limit / window, then add the coin's own move
+        def btc_lim(lim, win=60):
+            return lambda s: (s.btc1 if win == 60 else s.btc30) is None or (s.btc1 if win == 60 else s.btc30) * s.d > -lim
+        def own(lim, win=60, against=True):
+            """Skip when the coin itself moved >= lim against the trade (falling knife) or with it (chasing)."""
+            return lambda s: ((s.own1 if win == 60 else s.own30) * s.d * (1 if against else -1)) > -lim
+        c2 = btc_lim(0.005)
+        rules = {"BASE C2 (live now: BTC 1h 0.5% + 30 min lock)": dict(keep=c2, lock_min=30)}
+        for lim in (0.003, 0.004, 0.006, 0.007, 0.010):
+            rules[f"T1 BTC 1h limit {lim * 100:.1f}%"] = dict(keep=btc_lim(lim), lock_min=30)
+        for lim in (0.003, 0.005):
+            rules[f"T2 BTC 30m window, limit {lim * 100:.1f}%"] = dict(keep=btc_lim(lim, 30), lock_min=30)
+        for lim in (0.005, 0.010, 0.015, 0.020):
+            o = own(lim)
+            rules[f"T3 C2 + coin 1h fell/rose {lim * 100:.1f}% against"] = dict(keep=lambda s, o=o: c2(s) and o(s), lock_min=30)
+        for lim in (0.005, 0.010):
+            o = own(lim, 30)
+            rules[f"T4 C2 + coin 30m {lim * 100:.1f}% against"] = dict(keep=lambda s, o=o: c2(s) and o(s), lock_min=30)
+        for lim in (0.010, 0.020):
+            o = own(lim, against=False)
+            rules[f"T5 C2 + no chasing: coin 1h {lim * 100:.1f}% with"] = dict(keep=lambda s, o=o: c2(s) and o(s), lock_min=30)
     print(f"\n### {title}: {len(sigs)} brain signals ({sum(s.d > 0 for s in sigs)} long), "
           f"funding filter: no long at >= {f_hi:.6f}, no short at <= {f_lo:.6f}")
     print(f"{'rule':44s} {'trades':>6s} {'long':>5s} {'win':>6s} {'per trade':>10s} {'total':>8s} {'long tot':>9s} {'short tot':>9s}")
@@ -199,7 +220,8 @@ def signals_for(days):
             s = Sig()
             s.sym, s.ts, s.d, s.conf, s.funding, s.ohlc, s._g = e.symbol, int(e.timestamp), int(p), float(c), float(fr), w, {}
             s.lv = ep.exit_levels(ep.volatility_1h_from_ohlc(w[:1000]))
-            s.btc1, s.btc4 = btc_ret(s.ts, 60), btc_ret(s.ts, 240)
+            s.btc1, s.btc4, s.btc30 = btc_ret(s.ts, 60), btc_ret(s.ts, 240), btc_ret(s.ts, 30)
+            s.own1, s.own30 = w[1000, 0] / w[940, 0] - 1.0, w[1000, 0] / w[970, 0] - 1.0
             sigs.append(s)
         if i % 4000 == 0:
             print(f"  {i}/{len(index)} moments, {len(sigs)} signals"); sys.stdout.flush()

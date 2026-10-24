@@ -89,6 +89,19 @@ def ai_profit_close_min(levels: ExitLevels) -> float:
     return min(levels.stop, RISK_REF_STOP)
 
 
+def backup_stop_price(entry: float, is_long: bool, levels: ExitLevels, mult: float, peak_move: float, tp1_done: bool) -> float:
+    """
+    Price of the exchange-side backup stop (fires only when the bot is down). Normally mult x the trade's stop
+    away from entry; once the safe line is drawn (peak >= BREAKEVEN_TRIGGER, or TP1 banked) it moves to the
+    entry price itself, so a winner cannot turn into a loss on the exchange either. It sits just below the
+    bot's own breakeven exit (+costs), so with the bot running the bot always closes first.
+    """
+    if tp1_done or peak_move >= BREAKEVEN_TRIGGER:
+        return entry
+    dist = levels.stop * mult
+    return entry * (1 - dist) if is_long else entry * (1 + dist)
+
+
 @dataclass(frozen=True)
 class ExitDecision:
     close_all: bool = False

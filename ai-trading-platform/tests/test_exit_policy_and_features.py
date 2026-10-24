@@ -58,6 +58,14 @@ def test_ai_profit_close_needs_at_most_the_old_stop_distance():
     assert xp.ai_profit_close_min(xp.exit_levels(0.02)) == 0.0075
 
 
+def test_backup_stop_moves_to_entry_once_the_safe_line_is_drawn():
+    lv = xp.exit_levels(0.012)
+    assert abs(xp.backup_stop_price(100.0, True, lv, 1.5, 0.004, False) - 98.2) < 1e-9    # 1.5 x the 1.2% stop
+    assert abs(xp.backup_stop_price(100.0, False, lv, 1.5, 0.004, False) - 101.8) < 1e-9
+    assert xp.backup_stop_price(100.0, True, lv, 1.5, 0.0105, False) == 100.0          # peak passed +1%
+    assert xp.backup_stop_price(100.0, False, lv, 1.5, 0.0, True) == 100.0             # TP1 already banked
+
+
 def test_expected_move_blends_horizons():
     assert abs(xp.expected_move_pct([1.0, 1.0, 1.0]) - 1.0) < 1e-9
     assert abs(xp.expected_move_pct(np.array([0.0, 1.0, 0.0])) - xp.HORIZON_WEIGHTS[1]) < 1e-9

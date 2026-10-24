@@ -426,12 +426,17 @@ class ProductionTradingBot:
                 continue
             market = self.market_states.get(sym)
             lv = self._exit_levels_for(sym, market)
-            dist = lv.stop * settings.disaster_stop_mult
             is_long = amt > 0
             cfg = registry.get_symbol(sym)
             if not cfg:
                 continue
-            trigger = float(cfg.format_price(entry_px * (1 - dist) if is_long else entry_px * (1 + dist)))
+            pos_obj = self.portfolio_state.positions.get(sym)
+            lev = float(getattr(pos_obj, "leverage", 0) or 0) or float(settings.max_leverage)
+            peak_move = self.peak_pnl_pct.get(sym, 0.0) / lev
+            safe_line = bool(self.partial_tp_triggered.get(sym, False)) or peak_move >= exit_policy.BREAKEVEN_TRIGGER
+            trigger = float(cfg.format_price(exit_policy.backup_stop_price(
+                entry_px, is_long, lv, settings.disaster_stop_mult, peak_move, bool(self.partial_tp_triggered.get(sym, False)))))
+            dist = abs(trigger - entry_px) / entry_px
             side = "SELL" if is_long else "BUY"
             cur = self.disaster_stops.get(sym)
             if cur and cur["side"] == side and cur["trigger"] > 0 and abs(cur["trigger"] - trigger) / trigger < 0.002:
@@ -447,7 +452,10 @@ class ProductionTradingBot:
                 res = await self.binance.place_close_stop(sym, side, cfg.format_price(trigger), f"ai_dstop_{uuid.uuid4().hex[:10]}")
                 self.disaster_stops[sym] = {"algo_id": res.get("algoId"), "trigger": trigger, "side": side,
                                             "entry_px": entry_px, "qty": abs(amt)}
-                logger.info(f"[{sym}] 🛡️ Exchange backup stop set at {trigger} ({dist * 100:.2f}% from entry {entry_px}).")
+                if safe_line:
+                    logger.info(f"[{sym}] 🛡️🏠 Exchange backup stop moved to BREAK-EVEN at {trigger} (safe line drawn: best move {peak_move * 100:+.2f}%).")
+                else:
+                    logger.info(f"[{sym}] 🛡️ Exchange backup stop set at {trigger} ({dist * 100:.2f}% from entry {entry_px}).")
             except Exception as e:
                 self._disaster_stop_retry[sym] = now_t + 60.0
                 logger.warning(f"[{sym}] Could not set exchange backup stop: {e}")

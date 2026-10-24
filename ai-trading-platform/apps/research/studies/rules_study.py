@@ -1,4 +1,4 @@
-# Run from ai-trading-platform: PYTHONPATH=. venv/Scripts/python apps/research/studies/rules_study.py [training_days] [noexam] [combo|tune]
+# Run from ai-trading-platform: PYTHONPATH=. venv/Scripts/python apps/research/studies/rules_study.py [training_days] [noexam] [combo|tune|research]
 """Read-only study: extra entry/hold rules vs the live rules, on WHOLE history days (every graded moment of every coin,
 about one per coin per 10 min) so trades follow each other in time like live. The live brain decides every moment
 (live entry rule + its trade policy); a portfolio replay applies the live limits: one trade per coin, at most
@@ -39,7 +39,7 @@ def btc_ret(ts, mins):
     return None if w is None else w[1000, 0] / w[1000 - mins, 0] - 1.0
 
 class Sig:
-    __slots__ = ("sym", "ts", "d", "conf", "funding", "ohlc", "lv", "btc1", "btc4", "btc30", "own1", "own30", "_g")
+    __slots__ = ("sym", "ts", "d", "conf", "funding", "ohlc", "lv", "btc1", "btc4", "btc30", "own1", "own30", "hmax", "_g")
     def grade(self, hold_h):
         """(sized net move, exit time) with the live exits and a max hold of hold_h hours."""
         if hold_h not in self._g:
@@ -57,15 +57,19 @@ class Sig:
             self._g[hold_h] = ((full - COST) * min(1.0, BASE_STOP / self.lv.stop), self.ts + lo * 60)
         return self._g[hold_h]
 
-def replay(sigs, keep=lambda s: True, side_cap=5, lock_min=60, hold=lambda s, by: 4, size=lambda s: 1.0, per_hour=10):
-    """Portfolio replay in time order. Returns the list of (signal, sized net result)."""
-    open_until, side_open, lock, entries, out = {}, [], {}, [], []
+def replay(sigs, keep=lambda s: True, side_cap=5, lock_min=60, hold=lambda s, by: 4, size=lambda s: 1.0, per_hour=10,
+           tier2_h=None):
+    """Portfolio replay in time order. Returns the list of (signal, sized net result).
+    tier2_h: after 2+ losses in a row on a coin, both directions locked this many hours (live: 4); None = off."""
+    open_until, side_open, lock, entries, out, streak, coin_lock = {}, [], {}, [], [], {}, {}
     for s in sigs:
         if not keep(s):
             continue
         side_open = [(t, d) for t, d in side_open if t > s.ts]
         entries = [t for t in entries if t > s.ts - 3600]
         if open_until.get(s.sym, 0) > s.ts or lock.get((s.sym, s.d), 0) > s.ts or len(entries) >= per_hour:
+            continue
+        if coin_lock.get(s.sym, 0) > s.ts:
             continue
         if sum(1 for _, d in side_open if d == s.d) >= side_cap:
             continue
@@ -75,6 +79,9 @@ def replay(sigs, keep=lambda s: True, side_cap=5, lock_min=60, hold=lambda s, by
         entries.append(s.ts)
         if g < 0 and lock_min:
             lock[(s.sym, s.d)] = t_exit + lock_min * 60
+        streak[s.sym] = streak.get(s.sym, 0) + 1 if g < 0 else 0
+        if tier2_h and streak[s.sym] >= 2:
+            coin_lock[s.sym] = t_exit + tier2_h * 3600
         out.append((s, g * size(s)))
     return out
 
@@ -144,6 +151,29 @@ def report(title, sigs):
         for lim in (0.010, 0.020):
             o = own(lim, against=False)
             rules[f"T5 C2 + no chasing: coin 1h {lim * 100:.1f}% with"] = dict(keep=lambda s, o=o: c2(s) and o(s), lock_min=30)
+    if "research" in sys.argv:  # live since 24 Oct 17:31: C2 + falling knife; tier-2 quarantine now modelled too
+        live = lambda s: s.hmax >= 1.0 and (s.btc1 is None or s.btc1 * s.d > -0.005) and s.own1 * s.d > -0.005
+        L = dict(lock_min=30, tier2_h=4)
+        def on_top(extra, **kw):
+            return {**L, "keep": lambda s: live(s) and extra(s), **kw}
+        rules = {"BASE live now (C2 + knife + 4h tier 2)": {**L, "keep": live},
+                 "R0 same without the tier-2 quarantine": {**L, "keep": live, "tier2_h": None}}
+        for m in HURDLE_MULTS:
+            if m != 1.0:
+                rules[f"R1 entry hurdle x{m:.2f} (0.30% -> {0.30 * m:.2f}%)"] = {
+                    **L, "keep": lambda s, m=m: s.hmax >= m and (s.btc1 is None or s.btc1 * s.d > -0.005) and s.own1 * s.d > -0.005}
+        rules["R2a max 5 entries per hour"] = on_top(lambda s: True, per_hour=5)
+        rules["R2b max 20 entries per hour"] = on_top(lambda s: True, per_hour=20)
+        rules["R3a tier 2 quarantine 2 h"] = on_top(lambda s: True, tier2_h=2)
+        rules["R3b tier 2 quarantine 1 h"] = on_top(lambda s: True, tier2_h=1)
+        rules["R4 + funding filter"] = on_top(fund)
+        rules["R5a hold max 6 h"] = on_top(lambda s: True, hold=lambda s, by: 6)
+        rules["R5b roll-over at 4 h"] = on_top(lambda s: True, hold=roll_hold)
+        for c in (0.50, 0.55, 0.60):
+            rules[f"R6 confidence >= {c:.2f}"] = on_top(lambda s, c=c: s.conf >= c)
+        rules["R7 size by confidence"] = on_top(lambda s: True, size=lambda s: s.conf / mean_conf)
+        rules["R8 BTC limit 0.6%"] = {**L, "keep": lambda s: s.hmax >= 1.0 and (s.btc1 is None or s.btc1 * s.d > -0.006) and s.own1 * s.d > -0.005}
+        rules["R9 max 3 open on one side"] = on_top(lambda s: True, side_cap=3)
     print(f"\n### {title}: {len(sigs)} brain signals ({sum(s.d > 0 for s in sigs)} long), "
           f"funding filter: no long at >= {f_hi:.6f}, no short at <= {f_lo:.6f}")
     print(f"{'rule':44s} {'trades':>6s} {'long':>5s} {'win':>6s} {'per trade':>10s} {'total':>8s} {'long tot':>9s} {'short tot':>9s}")
@@ -179,6 +209,8 @@ b.impute_values = m.feat_mean.detach().clone().numpy()
 bias = torch.tensor(tp.get("critic_bias") or [0, 0, 0], dtype=torch.float32)
 F_SLOT = SLOT_BY_NAME["funding_rate"]
 random.seed(7)
+# entry hurdle multiples (research mode tests the live 0.30% hurdle at other levels; the other modes use 1.0 only)
+HURDLE_MULTS = (0.67, 1.0, 1.33, 1.67) if "research" in sys.argv else (1.0,)
 
 def signals_for(days):
     with b.SessionLocal() as s:
@@ -209,9 +241,12 @@ def signals_for(days):
             acts, raw = m(st)
         vals = cu.to_pct_torch(m, raw, st[:, -1, :]) - bias
         hur = torch.tensor([live_entry_hurdle_pct(e.timestamp) for e in chunk])
-        pos = PPOTrainer.live_entry_positions(vals, hur)[:, 0]
+        # signals at the lowest tested hurdle; hmax = the largest hurdle multiple the same entry still passes
+        by_mult = [PPOTrainer.live_entry_positions(vals, hur * mlt)[:, 0].tolist() for mlt in HURDLE_MULTS]
+        pos = by_mult[0]
+        hmax = [max(mlt for mlt, ps in zip(HURDLE_MULTS, col) if ps == col[0]) for col in zip(*by_mult)]
         conf = (acts[:, 1] + 1) / 2
-        for e, p, c, fr in zip(chunk, pos.tolist(), conf.tolist(), funding):
+        for e, p, c, fr, hm in zip(chunk, pos, conf.tolist(), funding, hmax):
             if p == 0 or c < (tp["min_confidence"] or 0) or e.symbol in tp["blocked_symbols"]:
                 continue
             w = window(e.symbol, e.timestamp)
@@ -219,6 +254,7 @@ def signals_for(days):
                 continue
             s = Sig()
             s.sym, s.ts, s.d, s.conf, s.funding, s.ohlc, s._g = e.symbol, int(e.timestamp), int(p), float(c), float(fr), w, {}
+            s.hmax = hm
             s.lv = ep.exit_levels(ep.volatility_1h_from_ohlc(w[:1000]))
             s.btc1, s.btc4, s.btc30 = btc_ret(s.ts, 60), btc_ret(s.ts, 240), btc_ret(s.ts, 30)
             s.own1, s.own30 = w[1000, 0] / w[940, 0] - 1.0, w[1000, 0] / w[970, 0] - 1.0

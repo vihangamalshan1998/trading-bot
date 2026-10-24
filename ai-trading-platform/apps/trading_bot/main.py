@@ -32,6 +32,7 @@ from core.risk.edge_estimator import EdgeEstimator
 from core.risk.macro_crash_shield import macro_crash_shield
 from core.ai.liquidation_cascade_hunter import liquidation_hunter, LiquidationSignal
 from core.risk.beta_hedger import beta_hedger
+from core.risk import btc_filter
 from core.telemetry.telegram_service import telegram_notifier
 
 ENTRY_GUARD_KEY = "bot:entry_guard"  # hourly entry cap + per-coin cooldowns, kept across restarts
@@ -39,6 +40,10 @@ STATE_HISTORY_KEY = "bot:state_history"  # the brain's input history (last 300 f
 STATE_HISTORY_SAVE_SECONDS = 60.0
 STATE_HISTORY_MAX_AGE_SECONDS = 300.0  # older saved history is not restored: the gap would distort the brain's view
 FEED_MAX_AGE_SECONDS = 60.0  # whale / statarb states older than this read as "no data"
+# After a losing close, that coin's direction stays locked this long (was 60 min; 30 min did better in the
+# whole-day history replay, apps/research/studies/rules_study.py, 24 Oct 2026)
+LOSS_LOCK_SECONDS = 1800.0
+BTC_MOVE_REFRESH_SECONDS = 30.0
 
 _BACKGROUND_TASKS: set = set()
 
@@ -146,6 +151,8 @@ class ProductionTradingBot:
         self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
         self.last_close_time = {sym: 0.0 for sym in self.symbols} # Cooldown tracking per symbol
         self.recent_entry_times = collections.deque()  # new-position timestamps for the hourly entry cap
+        self.btc_1h_move = None          # BTC move over the last hour (fraction) for the BTC filter, None = unknown
+        self.btc_1h_move_time = 0.0
         self._saved_entry_guard = None  # last entry-guard state written to Redis (survives restarts)
         self._entry_guard_loaded = False
         self._last_history_save = 0.0
@@ -475,9 +482,9 @@ class ProductionTradingBot:
             logger.warning(f"[{sym}] Income lookup for backup stop failed: {e}")
         self.last_close_time[sym] = time.time()
         closed_dir = "LONG" if is_long else "SHORT"
-        self.loss_lockout_until.setdefault(sym, {"LONG": 0.0, "SHORT": 0.0})[closed_dir] = time.time() + 3600.0
+        self.loss_lockout_until.setdefault(sym, {"LONG": 0.0, "SHORT": 0.0})[closed_dir] = time.time() + LOSS_LOCK_SECONDS
         logger.critical(f"[{sym}] 🛡️ EXCHANGE BACKUP STOP FIRED: the bot did not close this {closed_dir} in time "
-                        f"(trigger {info.get('trigger')}, entry {entry_px}). {closed_dir} locked for 60 min.")
+                        f"(trigger {info.get('trigger')}, entry {entry_px}). {closed_dir} locked for {LOSS_LOCK_SECONDS / 60:.0f} min.")
         if self.redis.redis and qty > 0 and entry_px > 0:
             exit_px = float(info.get("trigger") or entry_px)
             margin = entry_px * qty / settings.max_leverage
@@ -980,7 +987,21 @@ class ProductionTradingBot:
             except Exception as e:
                 logger.warning(f"Error in HTF regime loop: {e}")
             await asyncio.sleep(180.0) # Refresh every 3 minutes
-                    
+
+    async def update_btc_move_loop(self):
+        """Keeps the BTC move over the last hour (1m klines from the market-data venue) for the BTC filter."""
+        while self.running:
+            move = btc_filter.move_from_klines(await fetch_klines("BTCUSDT", "1m", 61))
+            if move is not None:
+                self.btc_1h_move, self.btc_1h_move_time = move, time.time()
+            await asyncio.sleep(BTC_MOVE_REFRESH_SECONDS)
+
+    def _btc_move_now(self):
+        """The BTC 1h move, or None when the reading is missing or stale (the filter then never blocks)."""
+        if time.time() - self.btc_1h_move_time > btc_filter.BTC_MOVE_MAX_AGE:
+            return None
+        return self.btc_1h_move
+
     async def poll_global_context_loop(self):
         """Refreshes market-wide signals published by the market collector (apps/market_collector/global_context.py)."""
         while self.running:
@@ -2465,6 +2486,12 @@ class ProductionTradingBot:
                         elif abs(action_val) > 0.20 and not self._history_warm(sym):
                             self._log_warmup(sym, "entry")
                             side = "HOLD"
+                        elif abs(action_val) > 0.20 and btc_filter.blocks_entry(1 if action_val > 0 else -1, btc_move := self._btc_move_now()):
+                            # BTC filter: no entry against a hard BTC move; HOLD (not skip) keeps the training records
+                            side = "HOLD"
+                            logger.info(f"[{sym}] ₿ BTC FILTER: SKIPPING OPEN_{'LONG' if action_val > 0 else 'SHORT'}, "
+                                        f"BTC moved {btc_move * 100:+.2f}% in the last hour "
+                                        f"(limit {btc_filter.BTC_MOVE_LIMIT * 100:.1f}%).")
                         elif action_val < -0.20:
                             side = "OPEN_SHORT"
                         elif action_val > 0.20:
@@ -3051,9 +3078,9 @@ class ProductionTradingBot:
                                             loss_cnt = self.consecutive_losses[sym]
                                             
                                             if loss_cnt == 1:
-                                                # Tier 1 Penalty Box: Lock out the SAME direction for 60 minutes (3,600s)
-                                                self.loss_lockout_until[sym][closed_dir] = time.time() + 3600.0
-                                                logger.warning(f"[{sym}] 🥊 PENALTY BOX (Tier 1): Stop-loss hit (${pnl:+.2f}). Direction '{closed_dir}' locked out for 60 mins to prevent squeeze fight!")
+                                                # Tier 1 Penalty Box: Lock out the SAME direction for LOSS_LOCK_SECONDS (30 min)
+                                                self.loss_lockout_until[sym][closed_dir] = time.time() + LOSS_LOCK_SECONDS
+                                                logger.warning(f"[{sym}] 🥊 PENALTY BOX (Tier 1): Stop-loss hit (${pnl:+.2f}). Direction '{closed_dir}' locked out for {LOSS_LOCK_SECONDS / 60:.0f} mins to prevent squeeze fight!")
                                             elif loss_cnt >= 2:
                                                 # Tier 2 Penalty Box: Lock out the ENTIRE symbol for 4 hours (14,400s)
                                                 self.loss_lockout_until[sym]["LONG"] = time.time() + 14400.0
@@ -3402,6 +3429,7 @@ class ProductionTradingBot:
             asyncio.create_task(self.sync_dashboard()),
             asyncio.create_task(self.monitor_kill_switch()),
             asyncio.create_task(self.update_htf_regimes_loop()),
+            asyncio.create_task(self.update_btc_move_loop()),
             asyncio.create_task(self.poll_global_context_loop()),
             asyncio.create_task(self.listen_liquidation_cascade()),
             asyncio.create_task(self.listen_macro_shield_loop()),

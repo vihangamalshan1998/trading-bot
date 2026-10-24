@@ -82,6 +82,13 @@ def risk_size_mult(levels: ExitLevels) -> float:
     return min(1.0, RISK_REF_STOP / max(levels.stop, 1e-9))
 
 
+def ai_profit_close_min(levels: ExitLevels) -> float:
+    """Smallest favourable move at which the AI may close a winner: one stop-distance, but never more than
+    RISK_REF_STOP (0.75%). Without the cap the wider stops of 24 Oct 2026 would have blocked AI profit closes
+    below ~1.2% (the +0.96% LTC close of that morning, +$146, needed only 0.75%)."""
+    return min(levels.stop, RISK_REF_STOP)
+
+
 @dataclass(frozen=True)
 class ExitDecision:
     close_all: bool = False

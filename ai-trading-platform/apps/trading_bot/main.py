@@ -2234,18 +2234,19 @@ class ProductionTradingBot:
                                               (pos.quantity < 0 and (pred_ret_5m >= 0.15 or pred_ret_1h >= 0.25))
                         
                         # Thresholds follow the shared exit policy (price moves): an AI close of a winner must be
-                        # worth at least one stop-distance, otherwise wins stay smaller than losses.
+                        # worth at least one stop-distance, capped at 0.75% (exit_policy.ai_profit_close_min)
                         cur_move = pnl_pct_leveraged / max(1.0, float(pos.leverage or 1))
                         close_levels = self._exit_levels_for(sym, market)
+                        profit_close_min = exit_policy.ai_profit_close_min(close_levels)
 
                         # 1. Critic-Assisted Exit: in profit beyond 2x costs and the Critic forecasts an adverse reversal
                         if cur_move >= 2.0 * exit_policy.ROUND_TRIP_COST and has_reversal_critic:
                             logger.info(f"[{sym}] 🎯 CRITIC-ASSISTED PROFIT EXIT: Move {cur_move*100:+.2f}% and Critic forecasts adverse reversal (5m: {pred_ret_5m:+.2f}%, 1h: {pred_ret_1h:+.2f}%). Securing profit!")
-                        elif 0.0 <= cur_move < close_levels.stop:
-                            # 2. Small profit: let it run toward TP1 instead of banking a win smaller than a loss
-                            logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: Move {cur_move*100:+.2f}% < {close_levels.stop*100:.2f}% (one stop-distance). Letting trend ride!")
+                        elif 0.0 <= cur_move < profit_close_min:
+                            # 2. Small profit: let it run toward TP1 instead of banking a tiny win
+                            logger.info(f"[{sym}] SKIPPING PREMATURE PROFIT CLOSE: Move {cur_move*100:+.2f}% < {profit_close_min*100:.2f}% (one stop-distance, max 0.75%). Letting trend ride!")
                             continue
-                        elif cur_move >= close_levels.stop:
+                        elif cur_move >= profit_close_min:
                             # 3. Solid Profit (>= one stop-distance): Allow smooth profit taking (0.40 hurdle)
                             close_hurdle = 0.40
                             if confidence < close_hurdle:
@@ -2281,10 +2282,12 @@ class ProductionTradingBot:
                         #    for) must clear costs with margin. A 5m forecast almost never exceeds this hurdle.
                         exp_move = exit_policy.expected_move_pct(critic_vals)
                         if action_val > 0.2 and exp_move < min_hurdle:
-                            logger.info(f"[{sym}] SKIPPING OPEN_LONG: Expected move {exp_move:+.2f}% < {min_hurdle:.2f}% hurdle.")
+                            if pos.quantity == 0:  # holding a position: nothing to open, so nothing to report
+                                logger.info(f"[{sym}] SKIPPING OPEN_LONG: Expected move {exp_move:+.2f}% < {min_hurdle:.2f}% hurdle.")
                             continue
                         elif action_val < -0.2 and exp_move > -min_hurdle:
-                            logger.info(f"[{sym}] SKIPPING OPEN_SHORT: Expected move {exp_move:+.2f}% > -{min_hurdle:.2f}% hurdle.")
+                            if pos.quantity == 0:
+                                logger.info(f"[{sym}] SKIPPING OPEN_SHORT: Expected move {exp_move:+.2f}% > -{min_hurdle:.2f}% hurdle.")
                             continue
                             
                         # 2. 1-Hour & 4-Hour Multi-Horizon Swing Alignment (Strict Anti-Suicide Rule)

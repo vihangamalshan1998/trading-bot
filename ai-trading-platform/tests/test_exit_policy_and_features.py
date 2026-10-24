@@ -52,6 +52,12 @@ def test_breakeven_guard_after_one_percent():
     assert abs(xp.simulate_trade(1, E, path, lv) - lv.breakeven) < 1e-12
 
 
+def test_ai_profit_close_needs_at_most_the_old_stop_distance():
+    assert xp.ai_profit_close_min(xp.exit_levels(0.005)) == 0.005      # tight stop: one stop-distance
+    assert xp.ai_profit_close_min(xp.exit_levels(0.0097)) == 0.0075    # 24 Oct LTC: +0.96% may still be closed
+    assert xp.ai_profit_close_min(xp.exit_levels(0.02)) == 0.0075
+
+
 def test_expected_move_blends_horizons():
     assert abs(xp.expected_move_pct([1.0, 1.0, 1.0]) - 1.0) < 1e-9
     assert abs(xp.expected_move_pct(np.array([0.0, 1.0, 0.0])) - xp.HORIZON_WEIGHTS[1]) < 1e-9

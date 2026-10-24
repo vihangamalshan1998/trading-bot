@@ -1129,6 +1129,27 @@ def push_champion_to_vps(version_tag: str) -> bool:
     return True
 
 
+def push_tournament_history_to_vps() -> bool:
+    """
+    Uploads only tournament_history.json after a rejected tournament, so the dashboard's Brain & Training charts
+    are at most one tournament old (before, the file reached the VPS only with a promoted brain). Written to a
+    temporary name and renamed into place, so the dashboard never reads a half-uploaded file.
+    """
+    import subprocess
+    tmp = f"{VPS_MODEL_DIR}/.tournament_history.json.tmp"
+    for cmd in (["scp", "-q", "models/production/tournament_history.json", f"{VPS_HOST}:{tmp}"],
+                ["ssh", VPS_HOST, f"mv {tmp} {VPS_MODEL_DIR}/tournament_history.json"]):
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception as e:
+            logger.debug(f"Tournament history upload skipped ({cmd[0]}): {e}")
+            return False
+        if res.returncode != 0:
+            logger.debug(f"Tournament history upload failed ({cmd[0]} exit {res.returncode}): {(res.stderr or '').strip()[:200]}")
+            return False
+    return True
+
+
 async def run_training_loop():
     set_log_file("logs/ai_trainer.log")
     logger.info("Initializing PPO Training Engine...")
@@ -1426,6 +1447,8 @@ async def run_training_loop():
                 if not eval_result.get("approved", False):
                     logger.warning(f"Candidate brain REJECTED by evaluation gate: {eval_result.get('reason')}. Continuing training without resetting weights (Saved at {cand_step_path})...")
                     registry.record_tournament_result(eval_result, version_tag=f"rejected_step_{step}")
+                    import threading
+                    threading.Thread(target=push_tournament_history_to_vps, daemon=True).start()  # dashboard charts
                 else:
                     try:
                         push_count += 1

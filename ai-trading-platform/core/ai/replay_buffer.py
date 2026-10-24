@@ -25,9 +25,11 @@ GOLDEN_MIN_POOL = 100
 # Records rebuilt from Binance's history archive (apps/replay) live in this table, graded like live ones.
 # They join the TRAINING pool only (never the holdout, which stays live data) and only in complete-inputs mode.
 # Each row of REPLAY_TABLE indexes one record; its 300 frames are cut from coin-day files (apps/replay/states.py).
-DEFAULT_REPLAY_ROWS = 3000
+# 10,000 (Oct 24 2026, was 3,000): with ~12 h of live training rows the forecasts memorised those hours
+# (1h/4h corr +0.6/+0.8 on them, negative on the holdout); a larger history share forces patterns that hold
+DEFAULT_REPLAY_ROWS = 10000
 # Days of history drawn per reload: a different random set each time, so the files read per reload stay few
-REPLAY_DAYS_PER_LOAD = 20
+REPLAY_DAYS_PER_LOAD = 50
 
 # Rows fetched per query while loading the cache. Each row's market_state JSON is parsed into Python
 # floats (~32 bytes each) and compacted to float32 before the next chunk, so peak RAM stays small.
@@ -250,7 +252,7 @@ class ReplayBuffer:
                              reward_5m=r.reward_5m, reward_1h=r.reward_1h, reward_4h=r.reward_4h,
                              data_quality_flags=GRADED_FLAG)
             exp._src = "replay"
-            exp._frames = frames
+            exp._frames = np.array(frames, copy=True)  # own 240 KB copy: a slice would pin the whole 12 MB day file
             rows.append(exp)
         logger.info(f"Loaded {len(rows)} replayed history records from {len(days)} random days ({REPLAY_TABLE}).")
         return rows

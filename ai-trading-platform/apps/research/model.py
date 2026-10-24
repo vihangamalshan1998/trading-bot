@@ -144,7 +144,7 @@ class SingleSymbolActorCritic(nn.Module):
     Phase 2 Upgrade: ActorCritic for a single symbol state with LSTM Memory and Limit Orders.
     Input dims: 200 (God Mode Architecture with 70 blank padding slots)
     """
-    FEATURE_BUFFERS = ("feat_mean", "feat_std", "feat_mask", "feat_fitted")
+    FEATURE_BUFFERS = ("feat_mean", "feat_std", "feat_mask", "feat_fitted", "critic_vol_units")
 
     def __init__(self, input_dim: int = 200, hidden_dim: int = 256):
         super().__init__()
@@ -158,6 +158,8 @@ class SingleSymbolActorCritic(nn.Module):
         self.register_buffer("feat_std", torch.ones(input_dim))
         self.register_buffer("feat_mask", torch.ones(input_dim))
         self.register_buffer("feat_fitted", torch.zeros(()))
+        # 1 = the critic forecasts in units of the coin's typical move (core/ai/critic_units.py), 0 = in % of price
+        self.register_buffer("critic_vol_units", torch.zeros(()))
 
         self.shared_norm = nn.LayerNorm(input_dim)
         
@@ -217,6 +219,7 @@ class SingleSymbolActorCritic(nn.Module):
             "feat_std": torch.ones_like(self.feat_std),
             "feat_mask": torch.ones_like(self.feat_mask),
             "feat_fitted": torch.zeros_like(self.feat_fitted),
+            "critic_vol_units": torch.zeros_like(self.critic_vol_units),  # older checkpoints forecast in %
         }
         for name in self.FEATURE_BUFFERS:
             state_dict.setdefault(name, identity[name])

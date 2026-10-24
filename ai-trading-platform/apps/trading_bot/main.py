@@ -14,6 +14,7 @@ from typing import Dict, Any
 from core.db.redis import redis_manager
 from core.ai.registry import ModelRegistry
 from core.risk import exit_policy
+from core.ai import critic_units
 from core.schemas.state_layout import ADDED_2026_10_SLOTS
 from core.schemas import state_builder
 from apps.market_collector.global_context import GLOBAL_CONTEXT_KEY
@@ -692,6 +693,11 @@ class ProductionTradingBot:
             _spawn(redis_manager.publish_binary("experience:completed", msgpack.packb(exp_data, use_bin_type=True)))
         except Exception as e:
             logger.warning(f"[{sym}] Market snapshot record skipped: {e}")
+
+    def _critic_bias(self):
+        """The champion's forecast bias (% per horizon, measured on its holdout), or None for older champions."""
+        bias = (self.trade_policy or {}).get("critic_bias")
+        return bias if isinstance(bias, list) and len(bias) == 3 else None
 
     def _calibrated_confidence(self, raw_conf: float) -> float:
         """Honest confidence: the win rate the champion's raw confidence actually achieved on unseen data."""
@@ -1510,7 +1516,9 @@ class ProductionTradingBot:
                             batch_logits, batch_critic = self.model(self._mask_unseen_inputs(final_batch), hidden_state=None, return_hidden=False)
                         for i, sym in enumerate(batch_syms):
                             precomputed_actions[sym] = batch_logits[i].numpy()
-                            precomputed_critics[sym] = batch_critic[i].numpy()
+                            # forecasts in % of price, minus the champion's holdout bias (core/ai/critic_units.py)
+                            precomputed_critics[sym] = critic_units.to_pct_np(
+                                self.model, batch_critic[i].numpy(), final_batch[i, -1].numpy(), self._critic_bias())
                     except Exception as e:
                         logger.warning(f"Batch inference failed, falling back to individual: {e}")
                         precomputed_actions = {}  # Force fallback
@@ -1847,7 +1855,8 @@ class ProductionTradingBot:
                         with torch.no_grad():
                             action_logits_t, expected_return = self.model(self._mask_unseen_inputs(state_tensor), hidden_state=None, return_hidden=False)
                             action_logits = action_logits_t[0].numpy()
-                            precomputed_critics[sym] = expected_return[0].numpy()
+                            precomputed_critics[sym] = critic_units.to_pct_np(
+                                self.model, expected_return[0].numpy(), state_tensor[0, -1].numpy(), self._critic_bias())
 
                     # Training record for this coin (every 10 min), before any trading gate can skip it
                     self._emit_market_snapshot(sym, seq, action_logits)

@@ -100,7 +100,7 @@ def _run(tmp_path, monkeypatch, chall, champ):
     t = _trainer()
     t.buffer = _Buffer(len(chall["live_pos"]))
     calls = iter([chall, champ])
-    monkeypatch.setattr(t, "_score_policy", lambda model, states, rewards, hurdles=None: next(calls))
+    monkeypatch.setattr(t, "_score_policy", lambda model, states, rewards, hurdles=None, n_fit=0: next(calls))
     return t.evaluate_candidate(sample_size=1000)
 
 

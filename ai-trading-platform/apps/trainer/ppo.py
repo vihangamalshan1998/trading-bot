@@ -18,6 +18,7 @@ from core.ai.registry import ModelRegistry
 from core.ai import trainer_status
 from core.config.settings import settings
 from core.risk import exit_policy
+from core.ai import critic_units
 from core.schemas.state_layout import LOG_VOLUME_SLOTS, SPREAD_SLOT, ACTIVE_SLOTS, STATE_DIM, WHALE_IMBALANCE_SLOT, WHALE_VOLUME_SLOT, ADDED_2026_10_SLOTS, BRAIN_EXCLUDED_SLOTS
 from core.schemas.state_layout import PENDING_INPUT_SLOTS, FULL_INPUTS_SINCE, MIN_FULL_INPUT_ROWS
 
@@ -377,7 +378,9 @@ class PPOTrainer:
             return False
 
         safe_rewards = torch.clamp(rewards, min=-15.0, max=15.0)
-        market_ret = safe_rewards[:, :3]                         # critic targets (5m / 1h / 4h)
+        market_ret = safe_rewards[:, :3]                         # true 5m / 1h / 4h moves (% of price)
+        critic_target = critic_units.targets_torch(self.model, market_ret, states[:, -1, :])
+        critic_w = torch.tensor(critic_units.HORIZON_LOSS_WEIGHTS, dtype=market_ret.dtype)
         long_ret, short_ret = self.trade_outcomes(safe_rewards)  # actor targets, (B, 1) each
         use_logged_actions = stored_old_log_probs is not None
         K = 1 if use_logged_actions else self.actions_per_state
@@ -445,8 +448,10 @@ class PPOTrainer:
             surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages
             actor_loss = -torch.min(surr1, surr2).mean()
 
-            # Critic: robust regression of true multi-horizon market returns (heavy-tailed -> Huber)
-            critic_loss = nn.functional.smooth_l1_loss(values, market_ret, beta=1.0)
+            # Critic: robust regression of true multi-horizon market returns (heavy-tailed -> Huber), in the model's
+            # units (core/ai/critic_units.py), the noisy 5-minute horizon down-weighted
+            per_h = nn.functional.smooth_l1_loss(values, critic_target, beta=1.0, reduction="none").mean(dim=0)
+            critic_loss = (per_h * critic_w).sum() / critic_w.sum()
 
             # Confidence head (tanh space -> probability) and size head anchored to it
             conf_prob = torch.clamp((action_preds[:, 1:2] + 1.0) / 2.0, 1e-4, 1.0 - 1e-4)
@@ -670,17 +675,30 @@ class PPOTrainer:
         return out
 
     def _score_policy(self, model: nn.Module, states: torch.Tensor, rewards: torch.Tensor,
-                      hurdles: Optional[torch.Tensor] = None) -> dict:
-        """Deterministic (live-like) holdout scoring of one model."""
+                      hurdles: Optional[torch.Tensor] = None, n_fit: int = 0) -> dict:
+        """
+        Deterministic (live-like) holdout scoring of one model. Critic forecasts are converted to % of price
+        (core/ai/critic_units.py). With n_fit > 0 the forecast bias is measured on the first n_fit rows (Part A,
+        older) and removed from every row, and the critic skill is measured on the remaining rows only: the bias
+        travels with a promoted brain (trade policy "critic_bias") and the live bot removes it the same way.
+        """
         model.eval()
         if not bool(getattr(model, "feat_fitted", False)):
             # Legacy (unfitted) models get 0 in the October 2026 inputs, exactly as the live bot feeds them
             states = states.clone()
             states[..., list(ADDED_2026_10_SLOTS)] = 0.0
         with torch.no_grad():
-            acts, vals = model(states)
-        long_ret, short_ret = self.trade_outcomes(rewards)
+            acts, raw_vals = model(states)
         market_ret = rewards[:, :3]
+        vals = critic_units.to_pct_torch(model, raw_vals, states[:, -1, :])
+        if 0 < n_fit < len(vals):
+            bias = (vals[:n_fit] - market_ret[:n_fit]).mean(dim=0)
+            vals = vals - bias
+            graded = slice(n_fit, None)
+        else:
+            bias = torch.zeros(vals.shape[1])
+            graded = slice(None)
+        long_ret, short_ret = self.trade_outcomes(rewards)
         dir_ = acts[:, 0:1]
         pos = self.position_from_action(dir_)
         pnl = self.action_pnl(dir_, long_ret, short_ret)
@@ -692,11 +710,12 @@ class PPOTrainer:
         live_pnl = live_gross - ROUND_TRIP_COST_PCT * live_pos.abs()
         conf = torch.clamp((acts[:, 1] + 1.0) / 2.0, 0.05, 0.99)   # same mapping as the live bot
         # Critic skill per horizon vs the naive "price won't move" forecast (1.0 = perfect, 0 = no skill, < 0 = harmful)
-        mse = ((vals - market_ret) ** 2).mean(dim=0)
-        naive = (market_ret ** 2).mean(dim=0).clamp_min(1e-8)
+        mse = ((vals[graded] - market_ret[graded]) ** 2).mean(dim=0)
+        naive = (market_ret[graded] ** 2).mean(dim=0).clamp_min(1e-8)
         skill = 1.0 - mse / naive
         return {
             "acts": acts, "vals": vals, "pnl": pnl, "pos": pos,
+            "critic_bias": [round(float(x), 5) for x in bias.tolist()],
             "live_pos": live_pos, "live_pnl": live_pnl, "conf": conf,
             "sim_pnl": float(pnl.mean().item()),               # mean net % per decision (0 = staying flat)
             "total_pnl": float(pnl.sum().item()),
@@ -832,7 +851,8 @@ class PPOTrainer:
             rewards = torch.clamp(torch.nan_to_num(rewards, nan=0.0, posinf=0.0, neginf=0.0), min=-15.0, max=15.0)
             del actions, next_states, dones
 
-            chall = self._score_policy(self.model, states, rewards, hurdles=hurdles)
+            # Part A (older half) also fits each brain's forecast bias; Part B grades with it removed
+            chall = self._score_policy(self.model, states, rewards, hurdles=hurdles, n_fit=len(states) // 2)
             if torch.isnan(chall["acts"]).any() or torch.isnan(chall["vals"]).any():
                 logger.error("Candidate evaluation FAILED: Challenger output contains NaN.")
                 return {"approved": False, "reason": "NAN_OUTPUTS"}
@@ -864,7 +884,7 @@ class PPOTrainer:
             try:
                 champion_state = torch.load(champion_path, map_location="cpu")
                 champion_model.load_state_dict(champion_state)
-                champ = self._score_policy(champion_model, states, rewards, hurdles=hurdles)
+                champ = self._score_policy(champion_model, states, rewards, hurdles=hurdles, n_fit=len(states) // 2)
                 del champion_model
             except Exception as champ_e:
                 logger.error(f"Candidate evaluation FAILED: Corrupt, incompatible, or unloadable champion model ({champ_e}). Failing closed without fabricating benchmark scores.")
@@ -886,6 +906,8 @@ class PPOTrainer:
             chall_live = self._live_split_score(chall, row_symbols, n_a)
             champ_live = self._live_split_score(champ, row_symbols, n_a)
             trade_policy = chall_live["policy"]
+            # Forecast bias (% per horizon, fitted on Part A): the live bot subtracts it from this brain's forecasts
+            trade_policy["critic_bias"] = chall.get("critic_bias")
 
             # Composite score: Part B live PnL per decision dominates; critic skill (1h horizon) is a tie-breaker.
             challenger_score = chall_live["pnl_per_decision"] + 0.01 * chall["critic_skill"][1]

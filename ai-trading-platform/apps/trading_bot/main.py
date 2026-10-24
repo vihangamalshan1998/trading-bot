@@ -151,8 +151,7 @@ class ProductionTradingBot:
         self.equity_history = collections.deque(maxlen=60) # Last 60 ticks (5 mins)
         self.last_close_time = {sym: 0.0 for sym in self.symbols} # Cooldown tracking per symbol
         self.recent_entry_times = collections.deque()  # new-position timestamps for the hourly entry cap
-        self.btc_1h_move = None          # BTC move over the last hour (fraction) for the BTC filter, None = unknown
-        self.btc_1h_move_time = 0.0
+        self.hour_moves = {}             # sym -> (move over the last hour as a fraction, read time) for the entry filters
         self._saved_entry_guard = None  # last entry-guard state written to Redis (survives restarts)
         self._entry_guard_loaded = False
         self._last_history_save = 0.0
@@ -989,18 +988,19 @@ class ProductionTradingBot:
             await asyncio.sleep(180.0) # Refresh every 3 minutes
 
     async def update_btc_move_loop(self):
-        """Keeps the BTC move over the last hour (1m klines from the market-data venue) for the BTC filter."""
+        """Keeps the last-hour move of BTC and of every traded coin (1m klines from the market-data venue)
+        for the BTC and falling-knife entry filters."""
         while self.running:
-            move = btc_filter.move_from_klines(await fetch_klines("BTCUSDT", "1m", 61))
-            if move is not None:
-                self.btc_1h_move, self.btc_1h_move_time = move, time.time()
+            for sym in dict.fromkeys(["BTCUSDT", *self.symbols]):
+                move = btc_filter.move_from_klines(await fetch_klines(sym, "1m", 61))
+                if move is not None:
+                    self.hour_moves[sym] = (move, time.time())
             await asyncio.sleep(BTC_MOVE_REFRESH_SECONDS)
 
-    def _btc_move_now(self):
-        """The BTC 1h move, or None when the reading is missing or stale (the filter then never blocks)."""
-        if time.time() - self.btc_1h_move_time > btc_filter.BTC_MOVE_MAX_AGE:
-            return None
-        return self.btc_1h_move
+    def _hour_move(self, sym):
+        """The coin's 1h move, or None when the reading is missing or stale (the filters then never block)."""
+        move, t = self.hour_moves.get(sym, (None, 0.0))
+        return move if time.time() - t <= btc_filter.BTC_MOVE_MAX_AGE else None
 
     async def poll_global_context_loop(self):
         """Refreshes market-wide signals published by the market collector (apps/market_collector/global_context.py)."""
@@ -2486,12 +2486,19 @@ class ProductionTradingBot:
                         elif abs(action_val) > 0.20 and not self._history_warm(sym):
                             self._log_warmup(sym, "entry")
                             side = "HOLD"
-                        elif abs(action_val) > 0.20 and btc_filter.blocks_entry(1 if action_val > 0 else -1, btc_move := self._btc_move_now()):
+                        elif abs(action_val) > 0.20 and btc_filter.blocks_entry(1 if action_val > 0 else -1, btc_move := self._hour_move("BTCUSDT")):
                             # BTC filter: no entry against a hard BTC move; HOLD (not skip) keeps the training records
                             side = "HOLD"
                             logger.info(f"[{sym}] ₿ BTC FILTER: SKIPPING OPEN_{'LONG' if action_val > 0 else 'SHORT'}, "
                                         f"BTC moved {btc_move * 100:+.2f}% in the last hour "
                                         f"(limit {btc_filter.BTC_MOVE_LIMIT * 100:.1f}%).")
+                        elif abs(action_val) > 0.20 and btc_filter.blocks_entry(1 if action_val > 0 else -1, coin_move := self._hour_move(sym),
+                                                                                btc_filter.COIN_MOVE_LIMIT):
+                            # Falling-knife filter: no long into the coin's own hard drop (no short into its pump)
+                            side = "HOLD"
+                            logger.info(f"[{sym}] 🔪 FALLING KNIFE: SKIPPING OPEN_{'LONG' if action_val > 0 else 'SHORT'}, "
+                                        f"{sym} moved {coin_move * 100:+.2f}% in the last hour "
+                                        f"(limit {btc_filter.COIN_MOVE_LIMIT * 100:.1f}%).")
                         elif action_val < -0.20:
                             side = "OPEN_SHORT"
                         elif action_val > 0.20:

@@ -35,12 +35,20 @@ def test_blocks_only_against_a_hard_btc_move():
     assert not btc_filter.blocks_entry(0, -0.05)
 
 
-def test_stale_btc_reading_never_blocks():
+def test_falling_knife_uses_the_coin_limit():
+    assert btc_filter.COIN_MOVE_LIMIT == 0.005
+    assert btc_filter.blocks_entry(1, -0.007, btc_filter.COIN_MOVE_LIMIT)       # long into the coin's own drop
+    assert btc_filter.blocks_entry(-1, 0.005, btc_filter.COIN_MOVE_LIMIT)       # short into its pump
+    assert not btc_filter.blocks_entry(1, 0.03, btc_filter.COIN_MOVE_LIMIT)     # chasing is allowed
+    assert not btc_filter.blocks_entry(1, -0.01, 0.02)                          # the limit is honoured
+
+
+def test_stale_or_missing_reading_never_blocks():
     bot = bot_main.ProductionTradingBot.__new__(bot_main.ProductionTradingBot)
-    bot.btc_1h_move, bot.btc_1h_move_time = -0.02, time.time()
-    assert bot._btc_move_now() == -0.02
-    bot.btc_1h_move_time = time.time() - btc_filter.BTC_MOVE_MAX_AGE - 1
-    assert bot._btc_move_now() is None
+    bot.hour_moves = {"BTCUSDT": (-0.02, time.time()), "DOGEUSDT": (-0.01, time.time() - btc_filter.BTC_MOVE_MAX_AGE - 1)}
+    assert bot._hour_move("BTCUSDT") == -0.02
+    assert bot._hour_move("DOGEUSDT") is None   # stale
+    assert bot._hour_move("ETHUSDT") is None    # never read
 
 
 def test_loss_lock_is_30_minutes():

@@ -9,8 +9,11 @@ at +0.25% and closed the rest at a "breakeven" of +0.0125% that did not even cov
 win was ~+0.03% vs an average loss of ~-0.85%, which needs a ~96% win rate just to break even.
 
 New rules:
-  - Stop-loss: 1x recent volatility (1h ATR), never wider than the old 0.75% (loss per trade
-    cannot grow while leverage / margin sizing stay unchanged).
+  - Stop-loss: 1x recent volatility (1h ATR), 0.35% to 2%. Until 24 Oct 2026 it was capped at 0.75%,
+    inside the normal 1h swing of most coins (history and live: ~47% of trades hit the full stop).
+    The bot sizes each position so a stop loses no more dollars than a 0.75% stop did (risk_size_mult).
+  - Breakeven guard: once a trade has been +BREAKEVEN_TRIGGER in profit, it never closes below a
+    breakeven that covers costs (before TP1 too).
   - First take-profit (50% of the position): at least 1.5x the stop AND at least stop + 2x costs.
   - Remaining 50%: stop moves to a breakeven that really covers round-trip costs, then trails one
     stop-distance behind the best price reached. Hard take-profit at 3x the stop.
@@ -23,7 +26,9 @@ ROUND_TRIP_COST = 0.0010
 
 STOP_VOL_MULT = 1.0
 MIN_STOP = 0.0035
-MAX_STOP = 0.0075          # the previous fixed stop (-15% leveraged at 20x): never exceed it
+MAX_STOP = 0.020           # 1h ATR up to 2% (was 0.75% until 24 Oct 2026)
+RISK_REF_STOP = 0.0075     # positions are sized so a stop loses at most what a 0.75% stop did
+BREAKEVEN_TRIGGER = 0.010  # once +1.0% in profit, the stop moves to breakeven (entry + costs)
 TP1_RR = 1.5               # first take-profit at >= 1.5x the stop
 HARD_TP_RR = 3.0
 DEFAULT_VOLATILITY = 0.0075  # used when the collector has no volatility reading yet
@@ -71,6 +76,12 @@ def exit_levels(volatility: float) -> ExitLevels:
     )
 
 
+def risk_size_mult(levels: ExitLevels) -> float:
+    """Position-size factor so a stop loses at most what a RISK_REF_STOP stop did (1.0 = today's size).
+    Never above 1.0: calm coins with a tight stop keep today's size rather than growing."""
+    return min(1.0, RISK_REF_STOP / max(levels.stop, 1e-9))
+
+
 @dataclass(frozen=True)
 class ExitDecision:
     close_all: bool = False
@@ -86,6 +97,8 @@ def evaluate_exit(move: float, peak_move: float, tp1_done: bool, held_seconds: f
     """
     if move <= -levels.stop:
         return ExitDecision(close_all=True, reason="HARD STOP")
+    if not tp1_done and peak_move >= BREAKEVEN_TRIGGER and move <= levels.breakeven:
+        return ExitDecision(close_all=True, reason="BREAKEVEN GUARD")
     if move >= levels.hard_tp:
         return ExitDecision(close_all=True, reason="HARD TAKE-PROFIT")
     if not tp1_done:
@@ -146,8 +159,9 @@ def simulate_trade(direction: int, entry: float, bars, levels: ExitLevels, bar_s
             best, worst, move_close = (entry - low) / entry, (entry - high) / entry, (entry - close) / entry
         # 1. adverse side first
         if not tp1_done:
-            if worst <= -levels.stop:
-                return -levels.stop
+            floor = levels.breakeven if peak >= BREAKEVEN_TRIGGER else -levels.stop
+            if worst <= floor:
+                return floor
         else:
             floor = max(levels.breakeven, peak - levels.trail_gap)
             if worst <= floor:

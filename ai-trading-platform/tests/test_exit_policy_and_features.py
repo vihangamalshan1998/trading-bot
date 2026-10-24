@@ -13,10 +13,13 @@ from apps.research.model import SingleSymbolActorCritic
 
 
 # ---------------------------------------------------------------- exit policy
-def test_stop_never_wider_than_previous_and_reward_beats_risk():
-    for vol in (0.0, 0.001, 0.004, 0.0075, 0.02, 0.08):
+def test_stop_follows_the_swing_but_dollar_risk_never_grows_and_reward_beats_risk():
+    for vol in (0.0, 0.001, 0.004, 0.0075, 0.012, 0.02, 0.08):
         lv = xp.exit_levels(vol)
-        assert xp.MIN_STOP <= lv.stop <= 0.0075, "loss per trade must not grow while leverage is unchanged"
+        assert xp.MIN_STOP <= lv.stop <= xp.MAX_STOP == 0.02
+        # the bot shrinks wide-stop positions: a stop never loses more than a 0.75% stop on today's size
+        assert lv.stop * xp.risk_size_mult(lv) <= 0.0075 + 1e-12
+        assert xp.risk_size_mult(lv) <= 1.0
         assert lv.tp1 >= 1.5 * lv.stop
         assert lv.tp1 - xp.ROUND_TRIP_COST > lv.stop * 0 + xp.ROUND_TRIP_COST  # TP1 net of costs is a real gain
         assert lv.breakeven >= xp.ROUND_TRIP_COST, "breakeven must cover round-trip costs"
@@ -34,6 +37,19 @@ def test_exit_sequence_stop_tp1_trail_breakeven():
     assert xp.evaluate_exit(0.0009, 0.0055, True, 60, lv).reason == "FREE-ROLL BREAKEVEN"
     assert xp.evaluate_exit(lv.hard_tp, lv.hard_tp, True, 60, lv).reason == "HARD TAKE-PROFIT"
     assert xp.evaluate_exit(0.0002, 0.003, False, xp.STALE_SECONDS + 1, lv).reason == "STALE PRUNE"
+
+
+def test_breakeven_guard_after_one_percent():
+    lv = xp.exit_levels(0.012)  # stop 1.2%, TP1 1.8%
+    # never reached +1%: an ordinary pullback is not closed
+    assert xp.evaluate_exit(0.0005, 0.009, False, 60, lv).reason == ""
+    # reached +1%, then fell back to breakeven: closed there instead of riding to the -1.2% stop
+    assert xp.evaluate_exit(0.0009, 0.0102, False, 60, lv).reason == "BREAKEVEN GUARD"
+    assert xp.evaluate_exit(0.004, 0.0102, False, 60, lv).reason == ""
+    # the trainer's replay of the same path gives the same breakeven result
+    E = 100.0
+    path = [(E * 1.0105, E * 1.002, E * 1.008), (E * 1.006, E * 0.995, E * 0.996)]
+    assert abs(xp.simulate_trade(1, E, path, lv) - lv.breakeven) < 1e-12
 
 
 def test_expected_move_blends_horizons():

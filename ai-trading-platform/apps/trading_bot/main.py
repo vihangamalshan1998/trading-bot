@@ -1877,6 +1877,7 @@ class ProductionTradingBot:
                     stale_trade_triggered = False
                     partial_tp_triggered = False
                     freeroll_stop_triggered = False
+                    breakeven_guard_triggered = False
                     pnl_pct_leveraged = 0.0
                     breadth_mult = 1.0
                     cvd_mult = 1.0
@@ -1910,9 +1911,9 @@ class ProductionTradingBot:
                             is_in_freeroll = self.partial_tp_triggered.get(sym, False)
 
                             # Shared exit policy (core/risk/exit_policy.py), in PRICE moves so it is independent
-                            # of leverage and identical to what the trainer scores. Stop <= 0.75% (never wider
-                            # than before), first take-profit >= 1.5x the stop, fee-covering breakeven, and the
-                            # runner trails one stop-distance behind its peak only after TP1 is banked.
+                            # of leverage and identical to what the trainer scores. Stop = 1h swing (0.35-2%, sized
+                            # for equal $ risk), first take-profit >= 1.5x the stop, breakeven guard after +1%, and
+                            # the runner trails one stop-distance behind its peak only after TP1 is banked.
                             levels = self._exit_levels_for(sym, market)
                             lev = float(pos_check.leverage) if pos_check.leverage else 1.0
                             peak_move = prev_peak / lev
@@ -1932,6 +1933,9 @@ class ProductionTradingBot:
                             elif decision.reason == "FREE-ROLL BREAKEVEN":
                                 logger.info(f"[{sym}] 🔒 FREE-ROLL BREAKEVEN HIT: Runner back to {pnl_pct*100:+.2f}% (<= +{levels.breakeven*100:.2f}% which covers round-trip fees). Closing remainder.")
                                 freeroll_stop_triggered = True
+                            elif decision.reason == "BREAKEVEN GUARD":
+                                logger.info(f"[{sym}] 🔒 BREAKEVEN GUARD: Peak {peak_move*100:+.2f}% (>= +{exit_policy.BREAKEVEN_TRIGGER*100:.1f}%), back to {pnl_pct*100:+.2f}%. Closing at breakeven instead of letting a winner become a loss.")
+                                breakeven_guard_triggered = True
                             elif decision.reason == "TRAILING STOP":
                                 logger.info(f"[{sym}] 🔒 RUNNER TRAIL: Peak {peak_move*100:+.2f}%, now {pnl_pct*100:+.2f}% (trail gap {levels.trail_gap*100:.2f}%). Securing gain!")
                                 trailing_stop_triggered = True
@@ -1946,7 +1950,7 @@ class ProductionTradingBot:
                             if sym in self.pnl_history:
                                 self.pnl_history[sym].clear()
 
-                    exit_override = hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or trailing_stop_triggered or stale_trade_triggered or freeroll_stop_triggered or partial_tp_triggered
+                    exit_override = hard_stop_triggered or hard_take_profit_triggered or sudden_shock_triggered or trailing_stop_triggered or stale_trade_triggered or freeroll_stop_triggered or breakeven_guard_triggered or partial_tp_triggered
                     if exit_override:
                         # Force an immediate MARKET CLOSE
                         action_val = -1.0 if pos_check.quantity > 0 else 1.0
@@ -2410,7 +2414,13 @@ class ProductionTradingBot:
                     else:
                         de_escalation_mult = 1.00
 
-                    max_margin_budget = max(0.0, current_eq * dynamic_margin_pct * kelly_compound_mult * de_escalation_mult)
+                    # Equal dollar risk per stop (Oct 24 2026): the stop follows the coin's 1h swing (up to 2%), so a
+                    # wide-stop coin gets a smaller position and a stop never loses more than a 0.75% stop did
+                    entry_lv = exit_policy.exit_levels(float(getattr(market, "volatility", 0.0) or 0.0))
+                    risk_mult = exit_policy.risk_size_mult(entry_lv)
+                    if risk_mult < 1.0 and abs(action_val) > 0.2 and pos.quantity == 0:
+                        logger.info(f"[{sym}] 📏 STOP-SIZED: stop {entry_lv.stop*100:.2f}% (1h swing) -> position x{risk_mult:.2f}, same $ risk as a 0.75% stop.")
+                    max_margin_budget = max(0.0, current_eq * dynamic_margin_pct * kelly_compound_mult * de_escalation_mult * risk_mult)
                     # Margin reserve: new entries never use the last entry_margin_reserve_pct of equity, so fills, fees
                     # and adverse moves cannot push free margin under Airbag 4's 15% line (forced market trims).
                     entry_margin_room = self.portfolio_state.free_margin - settings.entry_margin_reserve_pct * current_eq
@@ -2661,7 +2671,8 @@ class ProductionTradingBot:
                                     
                                     # Planned profitable exits (Take-Profit, Trailing Stop, Free-Roll, or profitable AI Close >= +1.5%)
                                     # are routed through Post-Only Maker GTX to capture the ultra-low 0.02% Maker fee (saves ~43% on fees!)
-                                    is_maker_exit = is_closing and not is_emergency_exit and (
+                                    # The breakeven guard protects capital: market at once, never a 30 s maker wait below breakeven
+                                    is_maker_exit = is_closing and not is_emergency_exit and not breakeven_guard_triggered and (
                                         pnl_pct_leveraged >= 0.015 or 
                                         partial_tp_triggered or 
                                         hard_take_profit_triggered or 
@@ -2671,7 +2682,7 @@ class ProductionTradingBot:
                                     is_market_exit = is_emergency_exit or (is_closing and not is_maker_exit) or (exit_override and not is_maker_exit)
                                     
                                     if is_market_exit:
-                                        exit_reason = "HARD STOP" if hard_stop_triggered else ("HARD TAKE-PROFIT" if hard_take_profit_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else ("STALE PRUNE" if stale_trade_triggered else ("FREE-ROLL BREAKEVEN" if freeroll_stop_triggered else ("PARTIAL TP 50%" if partial_tp_triggered else "AI CLOSE"))))))
+                                        exit_reason = "HARD STOP" if hard_stop_triggered else ("HARD TAKE-PROFIT" if hard_take_profit_triggered else ("SUDDEN SHOCK" if sudden_shock_triggered else ("TRAILING STOP" if trailing_stop_triggered else ("STALE PRUNE" if stale_trade_triggered else ("FREE-ROLL BREAKEVEN" if freeroll_stop_triggered else ("BREAKEVEN GUARD" if breakeven_guard_triggered else ("PARTIAL TP 50%" if partial_tp_triggered else "AI CLOSE")))))))
                                         logger.info(f"[{sym}] MARKET INTENT ({exit_reason}): {binance_side} {qty_str}")
                                         try:
                                               await self.binance.cancel_all_orders(sym)
@@ -2783,6 +2794,7 @@ class ProductionTradingBot:
                                             "HARD STOP" if hard_stop_triggered else "HARD TAKE-PROFIT" if hard_take_profit_triggered
                                             else "SUDDEN SHOCK" if sudden_shock_triggered else "TRAILING STOP" if trailing_stop_triggered
                                             else "MAX HOLD / STALE" if stale_trade_triggered else "FREE-ROLL BREAKEVEN" if freeroll_stop_triggered
+                                            else "BREAKEVEN GUARD" if breakeven_guard_triggered
                                             else "PARTIAL TP 50%" if partial_tp_triggered else "AI CLOSE")
                                         entry_t = self.position_entry_times.get(sym) or getattr(self.portfolio_state.positions.get(sym), "entry_time", 0.0)
                                         if entry_t:

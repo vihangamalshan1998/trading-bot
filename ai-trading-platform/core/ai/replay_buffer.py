@@ -1,3 +1,4 @@
+import gc
 import os
 import random
 import torch
@@ -102,6 +103,14 @@ class ReplayBuffer:
         from core.logging.logger import logger
         try:
             logger.info(f"📥 Loading up to {limit} experiences from MySQL into RAM cache...")
+            # Free the previous history rows first: holding the old and new 10,000 (~2.4 GB each) at once
+            # left a 16 GB laptop swapping (Oct 24 2026). The live rows stay until their replacements arrive.
+            if self.replay_cache:
+                self.cache = [e for e in self.cache if getattr(e, "_src", None) != "replay"]
+                self.replay_cache = []
+                if self.capacity > 0:
+                    self.sumtree.rebuild_from_list(self.cache, alpha=0.6)
+                gc.collect()
             # Enforce 90% Normal / 10% Golden rule directly in the pull
             normal_limit = int(limit * 0.90)
             golden_limit = int(limit * 0.10)

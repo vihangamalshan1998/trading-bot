@@ -2517,9 +2517,12 @@ class ProductionTradingBot:
                                 logger.info(f"[{sym}] 🔒 ONE-TRADE-ONE-ENTRY: Position already active ({abs(pos.quantity):.4f}). Strictly forbidding add-ons!")
                                 continue
                             
-                            # Clean One-Shot Entry (Dynamically scaled to account size)
-                            # Minimum viable size is at least 60% of target budget (min $25 notional for small live accounts)
-                            min_viable_notional = max(25.0, current_eq * min_margin_bound * pos.leverage * 0.60)
+                            # Clean One-Shot Entry: wait while free margin allows less than 60% of THIS trade's intended size
+                            # (min $25 notional). Measured against the intended size after the deliberate cuts (loss
+                            # de-escalation, equal-$-risk stop sizing): against the full size those cuts blocked the coin
+                            # outright (24 Oct 2026: TAO / INJ after a loss, and every coin with a stop wider than ~1.25%).
+                            intended_notional = max_margin_budget * max(0.70, target_size) * pos.leverage
+                            min_viable_notional = max(25.0, intended_notional * 0.60)
                             if notional_requested < min_viable_notional:
                                 logger.info(f"[{sym}] Skipping initial entry: notional ${notional_requested:.2f} < ${min_viable_notional:.2f} minimum viable size. Waiting for full margin to ensure clean one-shot entry!")
                                 continue

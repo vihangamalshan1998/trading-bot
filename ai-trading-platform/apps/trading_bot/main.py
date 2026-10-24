@@ -2432,6 +2432,12 @@ class ProductionTradingBot:
                     if risk_mult < 1.0 and abs(action_val) > 0.2 and pos.quantity == 0:
                         logger.info(f"[{sym}] 📏 STOP-SIZED: stop {entry_lv.stop*100:.2f}% (1h swing) -> position x{risk_mult:.2f}, same $ risk as a 0.75% stop.")
                     max_margin_budget = max(0.0, current_eq * dynamic_margin_pct * kelly_compound_mult * de_escalation_mult * risk_mult)
+                    # Risk cap (Oct 24 2026): a stop may lose at most max_risk_per_trade_pct of equity, costs included
+                    risk_cap_margin = exit_policy.max_notional_for_risk(current_eq, entry_lv, settings.max_risk_per_trade_pct) / max(1.0, float(pos.leverage or 1))
+                    if max_margin_budget > risk_cap_margin:
+                        if abs(action_val) > 0.2 and pos.quantity == 0:
+                            logger.info(f"[{sym}] 🎚️ RISK CAP: margin ${max_margin_budget:.0f} -> ${risk_cap_margin:.0f} so a {entry_lv.stop*100:.2f}% stop loses at most {settings.max_risk_per_trade_pct*100:.1f}% of equity.")
+                        max_margin_budget = risk_cap_margin
                     # Margin reserve: new entries never use the last entry_margin_reserve_pct of equity, so fills, fees
                     # and adverse moves cannot push free margin under Airbag 4's 15% line (forced market trims).
                     entry_margin_room = self.portfolio_state.free_margin - settings.entry_margin_reserve_pct * current_eq

@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     max_same_side_positions: int = Field(default=5, ge=1)
 
     max_leverage: int = Field(default=20, gt=0)
+    # Most a single trade may lose at its stop (incl. costs), as a share of equity (24 Oct 2026: a full-size
+    # alt trade at 35% margin x 20x with a 0.8% stop risked ~4.5%, nearly the whole 5% daily limit)
+    max_risk_per_trade_pct: float = Field(default=0.02, gt=0, le=0.10)
     max_position_margin_pct: float = Field(default=0.40, gt=0, le=1.0)  # Max 40% of equity margin per coin (up to 40% on majors, 35% on alts)
     min_close_confidence: float = Field(default=0.60, ge=0, le=1.0)     # Avoid closing on noise
     min_open_expected_return_pct: float = Field(default=0.22, ge=0)     # 0.22% min predicted move (ensures net profit after fees & spread)

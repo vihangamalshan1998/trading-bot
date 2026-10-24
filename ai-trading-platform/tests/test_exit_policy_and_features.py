@@ -66,6 +66,13 @@ def test_backup_stop_moves_to_entry_once_the_safe_line_is_drawn():
     assert xp.backup_stop_price(100.0, False, lv, 1.5, 0.0, True) == 100.0             # TP1 already banked
 
 
+def test_risk_cap_limits_the_loss_at_the_stop():
+    lv = xp.exit_levels(0.0081)                       # DOGE 24 Oct: stop 0.81%
+    n = xp.max_notional_for_risk(5000.0, lv, 0.02)    # at most $100 at the stop
+    assert abs(n * (lv.stop + xp.ROUND_TRIP_COST) - 100.0) < 1e-6
+    assert n < 27408                                  # the $27,408 full-size DOGE long risked ~$222
+
+
 def test_expected_move_blends_horizons():
     assert abs(xp.expected_move_pct([1.0, 1.0, 1.0]) - 1.0) < 1e-9
     assert abs(xp.expected_move_pct(np.array([0.0, 1.0, 0.0])) - xp.HORIZON_WEIGHTS[1]) < 1e-9

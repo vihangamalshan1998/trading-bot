@@ -82,6 +82,11 @@ def risk_size_mult(levels: ExitLevels) -> float:
     return min(1.0, RISK_REF_STOP / max(levels.stop, 1e-9))
 
 
+def max_notional_for_risk(equity: float, levels: ExitLevels, risk_pct: float) -> float:
+    """Largest position (notional) whose loss at the stop, costs included, is at most risk_pct of equity."""
+    return max(0.0, equity) * risk_pct / (levels.stop + ROUND_TRIP_COST)
+
+
 def ai_profit_close_min(levels: ExitLevels) -> float:
     """Smallest favourable move at which the AI may close a winner: one stop-distance, but never more than
     RISK_REF_STOP (0.75%). Without the cap the wider stops of 24 Oct 2026 would have blocked AI profit closes

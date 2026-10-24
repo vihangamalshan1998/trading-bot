@@ -174,3 +174,32 @@ def test_newest_rows_get_no_extra_weight_when_history_is_loaded():
     random.seed(1)
     share = sum(sum(getattr(e, "_src", None) != "replay" for e in b.sample(64)) for _ in range(200)) / (200 * 64)
     assert 0.12 < share < 0.30   # ~20% = live rows' share of the pool (was ~45% with the 30% "recent" slice)
+
+
+class _DaysSession:
+    """Fake DB session: returns the history days, then records which days the row query asked for."""
+    def __init__(self, days):
+        self.days, self.asked = days, None
+
+    def execute(self, query, params=None):
+        if params is None:
+            return types.SimpleNamespace(fetchall=lambda: [(d,) for d in self.days])
+        self.asked = sorted(params.values())
+        return types.SimpleNamespace(fetchall=lambda: [])
+
+
+def test_exam_days_never_reach_training_and_the_exam_uses_only_them(monkeypatch):
+    from datetime import date, timedelta
+    import core.ai.replay_buffer as rbm
+    days = [date(2026, 7, 23) + timedelta(days=i) for i in range(91)]
+    exam_days = [d for d in days if rbm.is_exam_day(d)]
+    assert 12 <= len(exam_days) <= 17
+    b = rbm.ReplayBuffer.__new__(rbm.ReplayBuffer)
+    b.min_timestamp, b.replay_limit = 1792648800, 10000
+    monkeypatch.setattr(rbm, "REPLAY_DAYS_PER_LOAD", 500)
+    s = _DaysSession(days)
+    b._load_replay_rows(s)
+    assert s.asked and not any(rbm.is_exam_day(d) for d in s.asked)
+    s = _DaysSession(days)
+    b._load_replay_rows(s, exam=True)
+    assert s.asked == sorted(exam_days)

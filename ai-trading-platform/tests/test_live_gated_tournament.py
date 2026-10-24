@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 
 from apps.research.model import SingleSymbolActorCritic
-from apps.trainer.ppo import (LIVE_ENTRY_HURDLE_PCT, LIVE_QUIET_SESSION_HURDLE_PCT, MIN_GATED_TRADES,
+from apps.trainer.ppo import (LIVE_ENTRY_HURDLE_PCT, LIVE_QUIET_SESSION_HURDLE_PCT, MIN_EXAM_ROWS, MIN_GATED_TRADES,
                               ROUND_TRIP_COST_PCT, PPOTrainer, live_entry_hurdle_pct)
 
 H = LIVE_ENTRY_HURDLE_PCT
@@ -70,9 +70,13 @@ def test_threshold_is_chosen_on_part_a_and_graded_on_part_b():
 class _Buffer:
     holdout_start_ts = 0.0
 
-    def __init__(self, n):
+    def __init__(self, n, exam_rows=0):
         self.rows = [SimpleNamespace(timestamp=n - i, symbol="BTCUSDT") for i in range(n)]
         self.last_symbols = []
+        self.exam_cache = [None] * exam_rows
+
+    def load_exam_rows(self):
+        return len(self.exam_cache)
 
     def sample_holdout(self, k):
         return list(self.rows)
@@ -93,15 +97,50 @@ def _scored(live_pos, live_pnl, conf):
     return r
 
 
-def _run(tmp_path, monkeypatch, chall, champ):
+def _run(tmp_path, monkeypatch, chall, champ, exams=None):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "models" / "production").mkdir(parents=True)
     torch.save(SingleSymbolActorCritic(input_dim=200).state_dict(), tmp_path / "models" / "production" / "model_v1.pt")
     t = _trainer()
-    t.buffer = _Buffer(len(chall["live_pos"]))
+    t.buffer = _Buffer(len(chall["live_pos"]), exam_rows=MIN_EXAM_ROWS if exams else 0)
     calls = iter([chall, champ])
     monkeypatch.setattr(t, "_score_policy", lambda model, states, rewards, hurdles=None, n_fit=0: next(calls))
+    if exams:
+        exam_calls = iter(exams)
+        monkeypatch.setattr(t, "_exam_score", lambda model, policy: next(exam_calls))
     return t.evaluate_candidate(sample_size=1000)
+
+
+def _exam(n, per_trade, rows=6000):
+    return {"rows": rows, "n_trades": n, "pnl_per_trade": per_trade, "pnl_per_row": n * per_trade / rows,
+            "win_rate": 0.5, "long_share": 0.5}
+
+
+def _winning_pair():
+    n = 200
+    pos = ([1, -1] * 20 + [0] * 60) * 2
+    return (_scored(pos, [0.3 if p else 0.0 for p in pos], [0.8] * n),
+            _scored(pos, [-0.2 if p else 0.0 for p in pos], [0.8] * n))
+
+
+def test_holdout_winner_that_loses_on_the_history_exam_is_rejected(tmp_path, monkeypatch):
+    chall, champ = _winning_pair()
+    res = _run(tmp_path, monkeypatch, chall, champ, exams=[_exam(150, -0.05), _exam(120, 0.08)])
+    assert res["approved"] is False and res["reason"] == "FAILS_HISTORY_EXAM"
+    assert res["challenger_exam"]["pnl_per_trade"] < 0
+
+
+def test_holdout_winner_must_not_earn_less_than_the_champion_on_the_exam(tmp_path, monkeypatch):
+    chall, champ = _winning_pair()
+    res = _run(tmp_path, monkeypatch, chall, champ, exams=[_exam(100, 0.02), _exam(120, 0.08)])
+    assert res["approved"] is False and res["reason"] == "FAILS_HISTORY_EXAM"
+
+
+def test_holdout_winner_that_also_passes_the_exam_is_approved(tmp_path, monkeypatch):
+    chall, champ = _winning_pair()
+    res = _run(tmp_path, monkeypatch, chall, champ, exams=[_exam(150, 0.10), _exam(120, 0.08)])
+    assert res["approved"] is True, res.get("reason")
+    assert res["challenger_exam"]["n_trades"] == 150
 
 
 def test_tournament_approves_a_brain_that_wins_as_live(tmp_path, monkeypatch):

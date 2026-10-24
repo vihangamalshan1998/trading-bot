@@ -31,6 +31,17 @@ GOLDEN_MIN_POOL = 100
 DEFAULT_REPLAY_ROWS = 10000
 # Days of history drawn per reload: a different random set each time, so the files read per reload stay few
 REPLAY_DAYS_PER_LOAD = 50
+# History exam (Oct 24 2026): every EXAM_DAY_EVERY-th history day is never trained on. Each tournament trades
+# EXAM_ROWS moments from those days with the live rules, so a brain must also earn on ~15 days of other markets,
+# not only on the newest 24 h that every tournament of the day re-uses (winner's curse).
+EXAM_DAY_EVERY = 6
+EXAM_ROWS = 6000
+
+
+def is_exam_day(day) -> bool:
+    from datetime import date as _date
+    d = day if isinstance(day, _date) else _date.fromisoformat(str(day)[:10])
+    return d.toordinal() % EXAM_DAY_EVERY == 0
 
 # Rows fetched per query while loading the cache. Each row's market_state JSON is parsed into Python
 # floats (~32 bytes each) and compacted to float32 before the next chunk, so peak RAM stays small.
@@ -55,6 +66,7 @@ class ReplayBuffer:
         except ValueError:
             self.replay_limit = DEFAULT_REPLAY_ROWS
         self.replay_cache: List[Experience] = []
+        self.exam_cache: List[Experience] = []    # history exam rows (exam days only), loaded once per run
         # Values written into the slots a replayed row cannot know (REPLAY_MISSING_SLOTS): the model's fitted
         # per-slot mean, so they standardize to 0 (neutral). None = NaN (feature-stat fitting skips them).
         self.impute_values = None
@@ -223,17 +235,18 @@ class ReplayBuffer:
         train = [e for e in rows[:len(rows) - n_holdout] if (e.timestamp or 0) < embargo_start]
         return train, holdout
 
-    def _load_replay_rows(self, session) -> List[Experience]:
+    def _load_replay_rows(self, session, exam: bool = False) -> List[Experience]:
         """
         A fresh random sample of graded replayed records from REPLAY_DAYS_PER_LOAD random days (each reload
         sees a different part of the history). Rows are transient Experience objects (never written back).
         Only records from before min_timestamp: later moments are covered by live records, whose newest
         ones are the holdout, and a replayed copy of them would leak the holdout into training.
+        Training never sees exam days; exam=True instead samples EXAM_ROWS rows from the exam days only.
         """
         from core.logging.logger import logger
         from sqlalchemy.sql import text
         from apps.replay.states import SequenceReader
-        if self.replay_limit <= 0:
+        if self.replay_limit <= 0 and not exam:
             return []
         before = int(self.min_timestamp)
         try:
@@ -244,13 +257,18 @@ class ReplayBuffer:
             return []  # table not created yet (no replay run on this machine)
         if not days:
             return []
-        days = random.sample(days, min(REPLAY_DAYS_PER_LOAD, len(days)))
+        days = [d for d in days if is_exam_day(d) == exam]
+        if not days:
+            return []
+        if not exam:
+            days = random.sample(days, min(REPLAY_DAYS_PER_LOAD, len(days)))
+        limit = EXAM_ROWS if exam else self.replay_limit
         params = {f"d_{i}": d for i, d in enumerate(days)}
         index = session.execute(text(
             f"SELECT id, symbol, timestamp, day, frame_idx, reward_5m, reward_1h, reward_4h FROM {REPLAY_TABLE} "
             f"WHERE data_quality_flags = '{GRADED_FLAG}' AND timestamp < {before} "
             f"AND day IN ({','.join(':' + k for k in params)}) "
-            f"ORDER BY RAND() LIMIT {int(self.replay_limit)}"), params).fetchall()
+            f"ORDER BY RAND() LIMIT {int(limit)}"), params).fetchall()
         reader = SequenceReader()
         rows = []
         for r in sorted(index, key=lambda r: (r.symbol, r.day)):  # keeps each coin-day file loaded once
@@ -263,8 +281,22 @@ class ReplayBuffer:
             exp._src = "replay"
             exp._frames = np.array(frames, copy=True)  # own 240 KB copy: a slice would pin the whole 12 MB day file
             rows.append(exp)
-        logger.info(f"Loaded {len(rows)} replayed history records from {len(days)} random days ({REPLAY_TABLE}).")
+        what = "history EXAM records" if exam else "replayed history records"
+        logger.info(f"Loaded {len(rows)} {what} from {len(days)} {'exam' if exam else 'random'} days ({REPLAY_TABLE}).")
         return rows
+
+    def load_exam_rows(self) -> int:
+        """Loads the history exam rows (exam days only) with their path-aware trade outcomes. Returns the count."""
+        from core.logging.logger import logger
+        try:
+            with self.SessionLocal() as session:
+                rows = self._load_replay_rows(session, exam=True)
+                self._attach_group(session, REPLAY_OUTCOME_SRC, rows)
+            self.exam_cache = [e for e in rows if e._trade_outcome is not None]
+        except Exception as e:
+            logger.error(f"History exam rows could not be loaded: {e}")
+            self.exam_cache = []
+        return len(self.exam_cache)
 
     def _attach_outcomes(self, session) -> int:
         """
@@ -275,23 +307,24 @@ class ReplayBuffer:
         replayed = {id(e) for e in self.replay_cache}
         groups = {"exp": [e for e in self.cache if id(e) not in replayed] + self.holdout_cache,
                   "gold": list(self.golden_cache), REPLAY_OUTCOME_SRC: list(self.replay_cache)}
-        labelled = 0
-        for src, exps in groups.items():
-            ids = [e.id for e in exps]
-            found = {}
-            try:
-                for i in range(0, len(ids), 1000):
-                    chunk = ids[i:i + 1000]
-                    for exp_id, lp, sp in session.query(TradeOutcome.exp_id, TradeOutcome.long_pct, TradeOutcome.short_pct).filter(
-                            TradeOutcome.src == src, TradeOutcome.exp_id.in_(chunk)).all():
-                        if lp is not None and sp is not None:
-                            found[exp_id] = (float(lp), float(sp))
-            except Exception:
-                found = {}  # table not created yet
-            for e in exps:
-                e._trade_outcome = found.get(e.id)
-                labelled += e._trade_outcome is not None
-        return labelled
+        return sum(self._attach_group(session, src, exps) for src, exps in groups.items())
+
+    @staticmethod
+    def _attach_group(session, src: str, exps: List[Experience]) -> int:
+        ids = [e.id for e in exps]
+        found = {}
+        try:
+            for i in range(0, len(ids), 1000):
+                chunk = ids[i:i + 1000]
+                for exp_id, lp, sp in session.query(TradeOutcome.exp_id, TradeOutcome.long_pct, TradeOutcome.short_pct).filter(
+                        TradeOutcome.src == src, TradeOutcome.exp_id.in_(chunk)).all():
+                    if lp is not None and sp is not None:
+                        found[exp_id] = (float(lp), float(sp))
+        except Exception:
+            found = {}  # table not created yet
+        for e in exps:
+            e._trade_outcome = found.get(e.id)
+        return sum(e._trade_outcome is not None for e in exps)
 
     def cleanup_old_data(self, days: int = 30):
         """Automatically deletes experiences older than X days to prevent database bloat."""

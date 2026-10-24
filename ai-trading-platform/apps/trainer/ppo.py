@@ -45,6 +45,11 @@ DIR_LOG_STD_MIN = -1.4
 LIVE_ENTRY_HURDLE_PCT = max(settings.min_open_expected_return_pct,
                             settings.min_edge_cost_multiple * exit_policy.ROUND_TRIP_COST * 100.0)
 MIN_GATED_TRADES = 30          # trades the live rules take in Part B before a verdict counts
+# History exam (replay_buffer.EXAM_DAY_EVERY days, never trained on): a challenger must also take this many trades
+# there, make money per trade after costs, and earn at least what the live champion earns per row on the same rows
+MIN_EXAM_TRADES = 30
+MIN_EXAM_ROWS = 1000           # fewer exam rows (no history on this machine): the exam is skipped, not failed
+EXAM_CHUNK = 500
 # The live bot raises the critic hurdle to this in the Asia off-peak hours (21:00-08:00 UTC) and at weekends
 # (session table in apps/trading_bot/main.py inference_loop).
 LIVE_QUIET_SESSION_HURDLE_PCT = 0.30
@@ -809,6 +814,51 @@ class PPOTrainer:
         policy["filtered_pnl_per_trade"] = round(sum(pnl_t[i] for i in allowed) / len(allowed), 5) if allowed else 0.0
         return policy
 
+    def _exam_score(self, model: nn.Module, policy: dict) -> dict:
+        """
+        The history exam: `model` trades the exam rows (history days never trained on) exactly as live, with
+        `policy` (its confidence threshold, blocked coins and forecast bias, all chosen on the live holdout).
+        Scored by the path-aware trade outcome after round-trip costs. Chunked to keep RAM flat.
+        """
+        rows = self.buffer.exam_cache
+        model.eval()
+        bias = torch.tensor(policy.get("critic_bias") or [0.0, 0.0, 0.0], dtype=torch.float32)
+        min_conf = policy.get("min_confidence")
+        blocked = set(policy.get("blocked_symbols") or [])
+        pnls, longs = [], 0
+        for i in range(0, len(rows), EXAM_CHUNK):
+            chunk = rows[i:i + EXAM_CHUNK]
+            states, _, rewards, _, _ = self.buffer.build_tensors(chunk, seq_len=300)
+            symbols = list(getattr(self.buffer, "last_symbols", []) or [])
+            stamps = list(getattr(self.buffer, "last_timestamps", []) or [])
+            if len(states) == 0 or len(symbols) != len(states) or len(stamps) != len(states):
+                continue
+            states = torch.nan_to_num(normalize_state_tensor(states), nan=0.0, posinf=1.0, neginf=-1.0)
+            rewards = torch.clamp(torch.nan_to_num(rewards, nan=0.0, posinf=0.0, neginf=0.0), min=-15.0, max=15.0)
+            if not bool(getattr(model, "feat_fitted", False)):
+                states[..., list(ADDED_2026_10_SLOTS)] = 0.0
+            with torch.no_grad():
+                acts, raw_vals = model(states)
+            vals = critic_units.to_pct_torch(model, raw_vals, states[:, -1, :]) - bias
+            hurdles = torch.tensor([live_entry_hurdle_pct(t) for t in stamps], dtype=torch.float32)
+            pos = self.live_entry_positions(vals, hurdles)[:, 0]
+            conf = torch.clamp((acts[:, 1] + 1.0) / 2.0, 0.05, 0.99)
+            long_ret, short_ret = self.trade_outcomes(rewards)
+            keep = pos != 0
+            if min_conf is not None:
+                keep = keep & (conf >= float(min_conf))
+            keep = keep & torch.tensor([s not in blocked for s in symbols], dtype=torch.bool)
+            gross = torch.where(pos > 0, long_ret[:, 0], short_ret[:, 0])
+            pnls.extend((gross[keep] - ROUND_TRIP_COST_PCT).tolist())
+            longs += int((pos[keep] > 0).sum().item())
+            del states, rewards, acts, raw_vals
+        n = len(pnls)
+        return {"rows": len(rows), "n_trades": n,
+                "pnl_per_trade": sum(pnls) / n if n else 0.0,
+                "pnl_per_row": sum(pnls) / max(1, len(rows)),
+                "win_rate": sum(p > 0 for p in pnls) / n if n else 0.0,
+                "long_share": longs / n if n else 0.0}
+
     def evaluate_candidate(self, sample_size: int = 1000) -> dict:
         """
         Champion vs Challenger tournament on the CHRONOLOGICAL HOLDOUT (newest data, never trained on).
@@ -922,6 +972,31 @@ class PPOTrainer:
             critic_not_degraded = chall["critic_skill"][1] >= min(champ["critic_skill"][1], 0.0) - 0.01
             is_superior = beats_flat and not one_sided and score_beaten and pnl_preserved and critic_not_degraded
 
+            # History exam, only for a challenger that passed everything above (it costs ~1-2 min)
+            chall_exam = champ_exam = None
+            exam_passed = True
+            if is_superior:
+                if not self.buffer.exam_cache:
+                    n_exam = self.buffer.load_exam_rows()
+                    logger.info(f"History exam ready: {n_exam} graded rows from exam days (never trained on).")
+                if len(self.buffer.exam_cache) >= MIN_EXAM_ROWS:
+                    chall_exam = self._exam_score(self.model, trade_policy)
+                    champ_policy = {}
+                    try:
+                        with open("models/production/version.json", "r") as f:
+                            champ_policy = (json.load(f).get("metrics") or {}).get("trade_policy") or {}
+                    except Exception:
+                        pass
+                    exam_champion = SingleSymbolActorCritic(input_dim=200)
+                    exam_champion.load_state_dict(torch.load(champion_path, map_location="cpu"))
+                    champ_exam = self._exam_score(exam_champion, champ_policy)
+                    del exam_champion
+                    exam_passed = (chall_exam["n_trades"] >= MIN_EXAM_TRADES and chall_exam["pnl_per_trade"] > 0.0
+                                   and chall_exam["pnl_per_row"] >= champ_exam["pnl_per_row"])
+                else:
+                    logger.warning(f"History exam skipped: only {len(self.buffer.exam_cache)} exam rows (< {MIN_EXAM_ROWS}).")
+            is_superior = is_superior and exam_passed
+
             eval_timestamp = time.time()
 
             # Compute cryptographic hash of the current champion checkpoint
@@ -981,6 +1056,8 @@ class PPOTrainer:
                 "evaluator_version": "v3_live_gated_split",
                 "label_type": "path_aware_trade_outcome",
                 "trade_policy": trade_policy,
+                "challenger_exam": chall_exam,
+                "champion_exam": champ_exam,
             }
 
             summary = (
@@ -993,10 +1070,17 @@ class PPOTrainer:
                 f"n={eval_sample_count} | Policy: min conf {trade_policy.get('min_confidence')}, "
                 f"blocked {trade_policy.get('blocked_symbols')} (chosen on Part A)"
             )
+            if chall_exam is not None:
+                summary += (f" | History exam ({chall_exam['rows']} rows, never trained on): trades {chall_exam['n_trades']} "
+                            f"(win {chall_exam['win_rate']:.0%}, {chall_exam['pnl_per_trade']:+.4f}%/trade, long {chall_exam['long_share']:.0%}) "
+                            f"vs Champ {champ_exam['n_trades']} (win {champ_exam['win_rate']:.0%}, {champ_exam['pnl_per_trade']:+.4f}%/trade) | "
+                            f"PnL/row {chall_exam['pnl_per_row']:+.4f}% vs {champ_exam['pnl_per_row']:+.4f}%")
             if is_superior:
                 logger.info(f"🏆 TOURNAMENT WINNER: Challenger is SUPERIOR on holdout! {summary}")
                 return {"approved": True, "reason": "SUPERIOR_TO_CHAMPION", "metrics": metrics, **metrics}
-            if not enough_trades:
+            if not exam_passed:
+                reason = "FAILS_HISTORY_EXAM"
+            elif not enough_trades:
                 reason = "TOO_FEW_LIVE_TRADES"
             elif not beats_flat:
                 reason = "NO_EDGE_AFTER_COSTS"

@@ -716,3 +716,18 @@ def test_atomic_promotion_rejects_unapproved_or_nan_candidate(tmp_path):
 
 
 
+
+
+def test_edge_estimator_charges_every_coin_the_same_flat_impact():
+    # No order-book depth in MarketState: a fake 50-coin default used to charge DOGE 0.02% and BTC ~0
+    from core.risk.edge_estimator import EdgeEstimator, FLAT_IMPACT_PCT
+
+    def market(sym, px):
+        return MarketState(symbol=sym, timestamp=time.time(), bid=px, ask=px, mid_price=px, last_price=px, spread=0.0,
+                           order_book_imbalance=0.0, volume=1.0, vwap=px, volatility=0.006, funding_rate=0.0,
+                           features=[0.0] * 90)
+
+    est = EdgeEstimator(min_net_edge_pct=0.08)
+    btc = est.estimate("BTCUSDT", "OPEN_LONG", 0.5, 0.8, market("BTCUSDT", 67000.0), order_size_notional=8000.0)
+    doge = est.estimate("DOGEUSDT", "OPEN_LONG", 0.5, 0.8, market("DOGEUSDT", 0.078), order_size_notional=8000.0)
+    assert btc.slippage_pct == doge.slippage_pct == FLAT_IMPACT_PCT

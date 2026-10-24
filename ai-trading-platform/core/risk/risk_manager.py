@@ -54,6 +54,10 @@ class RiskManager:
         self.bullish_macro_threshold = 0.8
 
         self.daily_high_equity = 0.0
+        # Daily loss is measured from the day's START equity (Oct 24 2026; was the day's peak incl. unrealized,
+        # so a winning day that gave back profit blocked entries for up to ~20 h). The trading bot sets this to
+        # its own 24 h benchmark every tick, so this check and its 5% circuit breaker always agree.
+        self.daily_start_equity = 0.0
         # Drawdown is measured from the highest equity of the last DRAWDOWN_WINDOW_DAYS UTC days: an all-time
         # high never expired, so once the account was max_drawdown_pct under it, new entries stayed blocked
         # for good (no trades, no way to recover). {utc_day_number: highest equity that day}
@@ -75,7 +79,11 @@ class RiskManager:
         # Reset daily high once per 24h.
         if now - self.last_day_reset >= 86400:
             self.daily_high_equity = equity
+            self.daily_start_equity = equity
             self.last_day_reset = now
+
+        if self.daily_start_equity <= 0:
+            self.daily_start_equity = equity
 
         if self.daily_high_equity <= 0:
             self.daily_high_equity = equity
@@ -239,10 +247,10 @@ class RiskManager:
 
         daily_loss = 0.0
 
-        if self.daily_high_equity > 0:
+        if self.daily_start_equity > 0:
             daily_loss = (
-                self.daily_high_equity - portfolio_state.equity
-            ) / self.daily_high_equity
+                self.daily_start_equity - portfolio_state.equity
+            ) / self.daily_start_equity
 
         if daily_loss >= self.max_daily_loss_pct:
             return self._reject("MAX_DAILY_LOSS")

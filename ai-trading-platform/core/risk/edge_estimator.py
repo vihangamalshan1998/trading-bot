@@ -3,6 +3,8 @@ from typing import Optional
 from core.config.settings import settings
 from core.schemas.state_schema import MarketState
 
+FLAT_IMPACT_PCT = 0.02  # % of notional, per entry (no real order-book depth in MarketState)
+
 @dataclass
 class EdgeResult:
     symbol: str
@@ -85,13 +87,9 @@ class EdgeEstimator:
         half_spread_pct = (spread / (2.0 * mid_price)) * 100.0 if not is_maker else 0.0
 
         # 4. Estimated Slippage & Market Impact
-        # Proportional to spread and order size vs top of book depth
-        bid_q = getattr(market, "bid_qty", 50.0)
-        ask_q = getattr(market, "ask_qty", 50.0)
-        top_depth_qty = max(1.0, bid_q + ask_q)
-        top_depth_notional = top_depth_qty * mid_price
-        depth_ratio = min(1.0, order_size_notional / max(top_depth_notional, 1.0))
-        slippage_pct = (half_spread_pct * 0.5) + (depth_ratio * 0.02)
+        # MarketState carries no top-of-book depth: the old bid_qty / ask_qty lookup always fell back to 50 coins,
+        # charging cheap coins 0.02% and BTC / ETH ~0. Every coin now gets the same flat impact estimate.
+        slippage_pct = (half_spread_pct * 0.5) + FLAT_IMPACT_PCT
 
         # 5. Funding Attribution (if held over 8h window)
         funding_rate = getattr(market, "funding_rate", 0.0)

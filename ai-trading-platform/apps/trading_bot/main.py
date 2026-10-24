@@ -1418,6 +1418,8 @@ class ProductionTradingBot:
                         self.profit_ratchet_active = False
                         logger.info(f"📅 24-Hour Equity Benchmark Reset: Starting Equity = ${self.daily_start_equity:.2f}")
 
+                if self.daily_start_equity > 0:
+                    self.risk_manager.daily_start_equity = self.daily_start_equity  # one daily benchmark for both checks
                 if self.daily_start_equity > 0 and current_eq > 0:
                     # Update rolling daily high-water peak equity
                     if current_eq > self.daily_peak_equity:

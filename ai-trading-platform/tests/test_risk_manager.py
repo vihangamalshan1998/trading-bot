@@ -210,13 +210,25 @@ def test_M_daily_loss(base_state):
     import core.risk.risk_manager as rm_module
     rm_module.settings.max_daily_loss_pct = 0.05
     rm = RiskManager()
-    rm.daily_high_equity = 10000.0
+    rm.daily_start_equity = 10000.0
     portfolio.equity = 9000.0 # 10% daily loss
     req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
     decision = rm.evaluate(req, portfolio, market)
     assert not decision.approved
     assert decision.reason == "MAX_DAILY_LOSS"
     assert decision.adjusted_quantity == 0.0
+
+def test_M_daily_loss_counts_from_the_day_start_not_the_peak(base_state):
+    # Up +6% at the peak, gave it back to -0.2% for the day: not a 5% daily loss, entries stay open
+    market, portfolio = base_state
+    import core.risk.risk_manager as rm_module
+    rm_module.settings.max_daily_loss_pct = 0.05
+    rm = RiskManager()
+    rm.daily_start_equity = 10000.0
+    rm.daily_high_equity = 10600.0
+    portfolio.equity = 9980.0
+    req = OrderRequest(symbol="BTCUSDT", action_type="OPEN_LONG", confidence=0.9, requested_quantity=1.0, target_position=1.0, model_version="v1", timestamp=time.time())
+    assert rm.evaluate(req, portfolio, market).reason != "MAX_DAILY_LOSS"
 
 def test_N_overall_drawdown(base_state):
     market, portfolio = base_state

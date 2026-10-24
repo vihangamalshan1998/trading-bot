@@ -1180,7 +1180,7 @@ async def run_training_loop():
     trainer_status.set_phase("loading training data")
     uses_late_inputs = bool(model.feat_fitted) and bool(model.feat_mask[list(PENDING_INPUT_SLOTS)].any())
     if uses_late_inputs:
-        logger.info("Brain uses the late inputs: loading complete records only (saved from 21 Oct 2026 05:00 UTC).")
+        logger.info("Brain uses the late inputs: loading complete records only (saved from 22 Oct 2026 06:00 UTC).")
     trainer = PPOTrainer(model=model, limit=limit, min_timestamp=FULL_INPUTS_SINCE if uses_late_inputs else 0.0)
     if not fresh_brain and "--from-champion" not in sys.argv:
         # exploration noise + optimizer moments belong to the candidate they were saved with, not the live champion
